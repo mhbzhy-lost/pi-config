@@ -6,10 +6,10 @@ const { resolveModelSelection, ModelSelectionError } = await import(
 );
 
 const available = [
-  { provider: "codex-pool", id: "gpt-6-astra" },
-  { provider: "codex-pool", id: "gpt-5.6-sol" },
-  { provider: "qoder-pool", id: "GLM-5.3-0.6x" },
-  { provider: "zai-coding-cn", id: "glm-5.3" },
+  { provider: "codex-pool", id: "gpt-6-astra", api: "openai-completions" },
+  { provider: "codex-pool", id: "gpt-5.6-sol", api: "openai-completions" },
+  { provider: "qoder-pool", id: "GLM-5.3-0.6x", api: "openai-completions" },
+  { provider: "zai-coding-cn", id: "glm-5.3", api: "openai-completions" },
 ];
 const reviewerModels = ["codex-pool/gpt-6-astra", "openai-codex/gpt-6-astra", "codex-pool/gpt-5.6-sol",
   "qoder-pool/GLM-5.3-0.6x", "zai-coding-cn/glm-5.3"];
@@ -41,12 +41,12 @@ test("qualified 请求失败时不给模糊建议", () => failure(
 ));
 
 test("建议不唯一时省略 suggestion", () => failure(
-  () => resolveModelSelection({ requestedModel: "astra", agentName: "reviewer", agentModels: ["p1/x-astra", "p2/y-astra"], availableModels: [{ provider: "p1", id: "x-astra" }, { provider: "p2", id: "y-astra" }] }),
+  () => resolveModelSelection({ requestedModel: "astra", agentName: "reviewer", agentModels: ["p1/x-astra", "p2/y-astra"], availableModels: [{ provider: "p1", id: "x-astra", api: "openai-completions" }, { provider: "p2", id: "y-astra", api: "openai-completions" }] }),
   (error) => { assert.equal("suggestion" in error.details, false); assert.deepEqual([...error.details.declaredCandidates], ["p1/x-astra", "p2/y-astra"]); },
 ));
 
 test("后缀边界：只有 '-' 或 '.' 分隔才算命中", () => failure(
-  () => resolveModelSelection({ requestedModel: "astra", agentName: "reviewer", agentModels: ["p/megastra"], availableModels: [{ provider: "p", id: "megastra" }] }),
+  () => resolveModelSelection({ requestedModel: "astra", agentName: "reviewer", agentModels: ["p/megastra"], availableModels: [{ provider: "p", id: "megastra", api: "openai-completions" }] }),
   (error) => { assert.equal("suggestion" in error.details, false); },
 ));
 

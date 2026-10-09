@@ -1,4 +1,5 @@
 const ACTIONS = ["enqueue", "await_admission", "report_conflict", "publish", "fail", "inspect_integration_state", "prepare_auto_integration", "inspect_auto_integration"] as const;
+import { resolveChildBrokerIdentity } from "../src/subagent-dispatch/child-broker-binding.ts";
 import { createRootBrokerClient } from "../src/subagent-dispatch/root-broker-client.ts";
 import { readBrokerGrant } from "../src/subagent-dispatch/root-broker-protocol.ts";
 import { createChildIntegrationLifecycle } from "../src/workspace/child-integration-lifecycle.ts";
@@ -133,6 +134,7 @@ export function createSubagentIntegrationTool({ coordinator, resolveBinding }: {
   if (!coordinator || typeof resolveBinding !== "function") throw new TypeError("subagent integration requires a coordinator and trusted binding resolver");
   return Object.freeze({
     name: "subagent_integration",
+    exposure: "model-only" as const,
     label: "Subagent Integration",
     description: SUBAGENT_INTEGRATION_DESCRIPTION,
     parameters: SUBAGENT_INTEGRATION_PARAMETERS,
@@ -174,10 +176,17 @@ export default function integrationQueue(pi: any, options: any = {}) {
   // Required child extensions 也会被 generic 顶层 RPC Host 注入；该场景没有
   // Root Broker 身份，必须静默禁用，不能把不可用的 broker 当作加载错误。
   const env = options.env ?? process.env;
+  if (!options.coordinator && env.PI_SUBAGENT_CHILD === '1' && env.PI_SUBAGENT_EXTENSION_BINDINGS && !env.PI_SUBAGENT_RUN_ID) {
+    return resolveChildBrokerIdentity(env).then(identity => {
+      env.PI_SUBAGENT_ORCHESTRATOR_SESSION_ID = identity.rootSessionId; env.PI_SUBAGENT_RUN_ID = identity.runId;
+      return integrationQueue(pi, { ...options, env });
+    });
+  }
   if (!options.coordinator
     && (env.PI_ROOT_SUBAGENT_BROKER_ENABLED !== "1"
       || !env.PI_SUBAGENT_ORCHESTRATOR_SESSION_ID || !env.PI_SUBAGENT_RUN_ID)) {
     try { console.error("[subagent-integration] disabled: trusted Root Broker session unavailable"); } catch { /* 诊断输出不得影响 child 加载 */ }
+    pi.on("session_start", () => pi.events?.emit?.("subagent:acknowledge-extension", { id: "integration-queue" }));
     return Object.freeze({ dispose() {} });
   }
   const tool = createSubagentIntegrationTool(options);
@@ -194,8 +203,8 @@ export default function integrationQueue(pi: any, options: any = {}) {
     if (!active.includes(tool.name)) pi.setActiveTools([...active, tool.name]);
   }) ?? (() => {}));
 
-  const rootSessionId = process.env.PI_SUBAGENT_ORCHESTRATOR_SESSION_ID;
-  const runId = process.env.PI_SUBAGENT_RUN_ID;
+  const rootSessionId = env.PI_SUBAGENT_ORCHESTRATOR_SESSION_ID;
+  const runId = env.PI_SUBAGENT_RUN_ID;
   const managed = options.managedCodingWorktree !== false && (options.managedCodingWorktree === true || Boolean(rootSessionId && runId));
   let guardBroker: any;
   let live = true;
@@ -285,5 +294,6 @@ export default function integrationQueue(pi: any, options: any = {}) {
     disposers.push(() => lifecycle?.dispose());
     if (guardBroker) disposers.push(() => guardBroker.dispose());
   }
+  disposers.push(pi.on("session_start", () => pi.events?.emit?.("subagent:acknowledge-extension", { id: "integration-queue" })) ?? (() => {}));
   return Object.freeze({ dispose() { live = false; for (const dispose of disposers.splice(0)) dispose(); } });
 }

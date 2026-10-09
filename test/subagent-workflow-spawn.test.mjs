@@ -68,8 +68,8 @@ test("compiles one safe checked leaf workflow without public direct-execution fi
     },
   });
 
-  assert.deepEqual({ ...request, workflowScript: "<script>" }, {
-    workflowScript: "<script>",
+  assert.deepEqual({ ...request, script: "<script>" }, {
+    script: "<script>",
     cwd: "/repo",
     context: "fresh",
     async: true,
@@ -92,7 +92,7 @@ test("compiles one safe checked leaf workflow without public direct-execution fi
       },
     },
   };
-  const result = await runInNewContext(`(async () => {\n${request.workflowScript}\n})()`, sandbox);
+  const result = await runInNewContext(`(async () => {\n${request.script}\n})()`, sandbox);
 
   assert.deepEqual(result, { key: "typed-request-1", runId: "leaf-run-1" });
   assert.equal(sandbox.workflowInjected, undefined);
@@ -121,7 +121,7 @@ test("disables upstream worktree allocation while preserving the managed leaf cw
     context: "fresh", child: { output: false },
   });
   const started = [];
-  await runInNewContext(`(async () => {\n${request.workflowScript}\n})()`, {
+  await runInNewContext(`(async () => {\n${request.script}\n})()`, {
     runs: { async run(key, params) { started.push({ key, params }); return { key }; } },
   });
   assert.equal(request.worktree, false);
@@ -137,7 +137,7 @@ test("separates orchestrator root cwd from managed leaf cwd", async () => {
   });
   assert.equal(request.cwd, "/repo");
   const started = [];
-  await runInNewContext(`(async () => {\n${request.workflowScript}\n})()`, {
+  await runInNewContext(`(async () => {\n${request.script}\n})()`, {
     runs: { async run(key, params) { started.push({ key, params }); return { key }; } },
   });
   assert.equal(started[0].params.cwd, "/state/worktrees/managed");
@@ -153,8 +153,8 @@ test("managed coding child controls carry the integration extension without expo
   const generic = buildWorkflowSpawn({
     workflowKey: "typed-generic-tool", agent: "reviewer", task: "review", cwd: "/repo", context: "fresh", child: { output: false },
   });
-  const managedLeaf = JSON.parse(managed.workflowScript.match(/, (.*)\);$/s)[1]);
-  const genericLeaf = JSON.parse(generic.workflowScript.match(/, (.*)\);$/s)[1]);
+  const managedLeaf = JSON.parse(managed.script.match(/, (.*)\);$/s)[1]);
+  const genericLeaf = JSON.parse(generic.script.match(/, (.*)\);$/s)[1]);
   assert.deepEqual(managedLeaf.subagentOnlyExtensions, [integration]);
   assert.equal(Object.hasOwn(genericLeaf, "subagentOnlyExtensions"), false);
 });
@@ -178,7 +178,7 @@ test("keeps supported generic execution controls inside the workflow leaf", asyn
     },
   });
   const started = [];
-  await runInNewContext(`(async () => {\n${request.workflowScript}\n})()`, {
+  await runInNewContext(`(async () => {\n${request.script}\n})()`, {
     runs: { async run(key, params) { started.push({ key, params }); return { key }; } },
   });
 

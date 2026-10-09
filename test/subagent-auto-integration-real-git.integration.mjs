@@ -218,7 +218,7 @@ function dispatchPiHarness(originRoot, leafAsyncDir) {
   const rpc = {
     async ping() { return { version: 1, methods: ["spawn"], session: { sessionId: "root-session", sessionFile: "root-session", cwd: sessionRoot } }; },
     async spawn(params) {
-      const match = params.workflowScript.match(/^return await runs\.run\(([^,]+), (.*)\);$/);
+      const match = params.script.match(/^return await runs\.run\(([^,]+), (.*)\);$/);
       const workflowKey = JSON.parse(match[1]);
       const leaf = JSON.parse(match[2]);
       queueMicrotask(() => events.emit("subagent:async-started", {

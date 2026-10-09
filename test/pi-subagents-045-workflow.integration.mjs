@@ -10,7 +10,7 @@ import { buildTopLevelRuntimeEnv, SUPPORTED_PI_VERSIONS } from "../scripts/probe
 
 const execFileAsync = promisify(execFile);
 const repoRoot = resolve(import.meta.dirname, "..");
-const piBinary = process.env.PI_REAL_BIN;
+const piBinary = process.env.PI_HISTORICAL_REAL_BIN ?? process.env.PI_REAL_BIN;
 const clientModule = new URL("../scripts/probes/pi-subagents-compat.ts", import.meta.url).href;
 
 function assistantText(record) {
@@ -192,8 +192,10 @@ function probeExtensionSource({ projectRoot }) {
 
 test("pi-subagents 0.62.0 rejects clarify and correlates a public workflow leaf", async () => {
   assert.ok(piBinary, "PI_REAL_BIN must identify an explicitly supported Pi host used for this integration test");
-  const piVersion = (await execFileAsync(piBinary, ["--version"], { encoding: "utf8" })).stdout.trim();
-  assert.ok(SUPPORTED_PI_VERSIONS.includes(piVersion), `unsupported Pi host: ${piVersion}`);
+  const historicalRoot=resolve(piBinary,"../..");
+  const historicalEnv={...process.env,PI_PACKAGE_DIR:historicalRoot,PI_REAL_BIN:piBinary,PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT:historicalRoot};
+  const piVersion = (await execFileAsync(piBinary, ["--version"], { encoding: "utf8",env:historicalEnv })).stdout.trim();
+  assert.ok(["0.87.1"].includes(piVersion), `历史0.62 lane必须绑定0.87.1 Host: ${piVersion}`);
 
   const root = await mkdtemp(join(tmpdir(), "pi-subagents-045-workflow-"));
   const npmRoot = join(root, "npm");
@@ -234,7 +236,7 @@ Return the deterministic workflow child marker.
     ], {
       cwd: projectRoot,
       env: {
-        ...buildTopLevelRuntimeEnv(process.env),
+        ...buildTopLevelRuntimeEnv(historicalEnv),
         PI_CODING_AGENT_DIR: configRoot,
         OPENAI_API_KEY: "not-used",
       },

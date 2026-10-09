@@ -581,6 +581,52 @@ function runtimeFixture(fixtureOptions = {}) {
   };
 }
 
+test("footer polls raw workflow and leaf runs while rendering one canonical conversation", (t) => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "footer-workflow-root-"));
+  const leafDir = fs.mkdtempSync(path.join(os.tmpdir(), "footer-workflow-leaf-"));
+  const subject = runtimeFixture();
+  t.after(() => {
+    subject.shutdown(); subject.restore();
+    fs.rmSync(rootDir, { recursive: true, force: true });
+    fs.rmSync(leafDir, { recursive: true, force: true });
+  });
+  subject.asyncStart({ id: "workflow-root", mode: "workflow", agent: "workflow", asyncDir: rootDir, cwd: "/repo", sessionId: "parent", workflowKey: "typed-key" });
+  subject.asyncStart({ id: "workflow-leaf", mode: "single", agent: "reviewer", asyncDir: leafDir, cwd: "/repo", sessionId: "parent", parentWorkflowRunId: "workflow-root", workflowKey: "typed-key", title: "审阅任务" });
+  fs.writeFileSync(path.join(rootDir, "status.json"), JSON.stringify({ state: "complete", mode: "workflow", steps: [{ runId: "workflow-leaf", agent: "reviewer", workflowKey: "typed-key", status: "running" }] }));
+  fs.writeFileSync(path.join(leafDir, "status.json"), JSON.stringify({ state: "running", mode: "single", parentWorkflowRunId: "workflow-root", workflowKey: "typed-key", steps: [{ agent: "reviewer", status: "running", model: "fixture/reviewer", thinking: "high", tokens: { total: 4321 }, sessionFile: path.join(leafDir, 'session.jsonl') }] }));
+  const rootBytes = fs.readFileSync(path.join(rootDir, 'status.json'), 'utf8');
+  const leafBytes = fs.readFileSync(path.join(leafDir, 'status.json'), 'utf8');
+  subject.poll();
+
+  const rendered = subject.component().render(100).join("\n");
+  assert.match(rendered, /审阅任务 \(reviewer\)/);
+  assert.doesNotMatch(rendered, /workflow-root|\(workflow\)/);
+  assert.doesNotMatch(rendered, /history/);
+  assert.equal((rendered.match(/审阅任务/g) ?? []).length, 1);
+  assert.equal(fs.readFileSync(path.join(rootDir, 'status.json'), 'utf8'), rootBytes);
+  assert.equal(fs.readFileSync(path.join(leafDir, 'status.json'), 'utf8'), leafBytes);
+  subject.start(subject.ctx, 'reload');
+  const persisted = globalThis[Symbol.for('pi-config.custom-footer.subagents.v2')];
+  assert.deepEqual(new Set(persisted.children.map(c => c.runId)), new Set(['workflow-root','workflow-leaf']));
+  fs.writeFileSync(path.join(rootDir, 'status.json'), JSON.stringify({ state:'complete', mode:'workflow', steps:[
+    {runId:'workflow-leaf',agent:'reviewer',workflowKey:'typed-key',status:'running'},
+    {runId:'next-leaf',agent:'executor',workflowKey:'next-key',label:'后续步骤',status:'running'},
+  ] }));
+  subject.poll();
+  subject.input()('\x1bo');
+  const childFooter = subject.component().render(180).join('\n');
+  assert.match(childFooter, /后续步骤/);
+  assert.match(childFooter, /4.3k tokens/);
+  assert.match(childFooter, /\(fixture\) reviewer/);
+  assert.equal(subject.custom[0].done, 0);
+  subject.asyncStart({ id:'next-leaf', mode:'single', agent:'executor', asyncDir:path.join(rootDir,'next'), cwd:'/repo', sessionId:'parent', parentWorkflowRunId:'workflow-root', workflowKey:'next-key', title:'第二任务' });
+  subject.poll();
+  const folded = subject.component().render(180).join('\n');
+  assert.match(folded, /第二任务/);
+  assert.doesNotMatch(folded, /后续步骤/);
+  assert.equal(subject.custom[0].done, 0);
+});
+
 test("Alt+O accepts a distinct shortcut context for the live session manager only", (t) => {
   const subject = runtimeFixture(); t.after(() => { subject.shutdown(); subject.restore(); });
   subject.asyncStart({ id: "shortcut-run", asyncDir: "/tmp/shortcut-run", cwd: "/repo", agent: "executor" });

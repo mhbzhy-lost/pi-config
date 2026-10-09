@@ -1,0 +1,9 @@
+{
+  "provenance": "合成身份替换；官方0.75 typed workflow root started → root step.runId → single leaf parentWorkflowRunId/workflowKey，同parent session。不是执行proof。",
+  "rootStarted": {"id":"trial-root","mode":"workflow","agent":"workflow","asyncDir":"/tmp/trial-browser-runs/trial-root","cwd":"/repo","sessionId":"trial-parent"},
+  "rootStatus": {"runId":"trial-root","mode":"workflow","state":"complete","steps":[{"runId":"trial-leaf","agent":"reviewer","label":"typed-trial-key","workflowKey":"typed-trial-key","status":"running","sessionFile":"/tmp/trial-browser-runs/trial-leaf/session.jsonl"}]},
+  "rootComplete": {"runId":"trial-root","state":"complete","results":[{"state":"running"}]},
+  "leafStarted": {"id":"trial-leaf","mode":"single","agent":"reviewer","parentWorkflowRunId":"trial-root","workflowKey":"typed-trial-key","asyncDir":"/tmp/trial-browser-runs/trial-leaf","cwd":"/repo","sessionId":"trial-parent","title":"审阅任务"},
+  "leafStatus": {"runId":"trial-leaf","mode":"single","state":"running","parentWorkflowRunId":"trial-root","workflowKey":"typed-trial-key","steps":[{"agent":"reviewer","status":"running","sessionFile":"/tmp/trial-browser-runs/trial-leaf/session.jsonl","model":"fixture/reviewer","thinking":"high","tokens":{"total":4321}}]},
+  "leafComplete": {"runId":"trial-leaf","state":"complete","results":[{"state":"complete"}]}
+}

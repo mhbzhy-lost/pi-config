@@ -79,9 +79,10 @@ export async function negotiateCapabilities(rpc: any, { cwd, diagnostic, respons
   if (!raw?.session || typeof raw.session !== "object") {
     missing.push("session.sessionId", "session.sessionFile", "session.cwd");
   } else {
-    for (const field of ["sessionId", "sessionFile", "cwd"]) {
+    for (const field of ["sessionId", "cwd"]) {
       if (typeof raw.session[field] !== "string" || raw.session[field].length === 0) missing.push(`session.${field}`);
     }
+    if (raw.session.sessionFile !== null && (typeof raw.session.sessionFile !== "string" || !raw.session.sessionFile)) missing.push("session.sessionFile");
     if (typeof cwd === "string" && raw.session.cwd !== cwd) missing.push("session.cwd");
   }
   for (const capability of SECURITY_CAPABILITIES) {

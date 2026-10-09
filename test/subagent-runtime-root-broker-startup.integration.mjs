@@ -50,7 +50,7 @@ test("persisted root session shares its broker registry with an independent Jiti
       input: `${JSON.stringify({ id: "root-broker-registry-commands", type: "get_commands" })}\n`,
       env: {
         ...withoutSubagentEnvironment(process.env),
-        PI_CODING_AGENT_DIR: agentDir,
+        PI_CODING_AGENT_DIR: agentDir, PI_CODING_WORKSPACE_DIR: path.join(root,"state"),
         PI_ROOT_BROKER_PROBE_OUTPUT: output,
         TMPDIR: runtimeTmp,
         OPENAI_API_KEY: "not-used",

@@ -55,6 +55,7 @@ export function createSupervisorTool(adapter, { name = "subagent_supervisor", la
 
   return Object.freeze({
     name,
+    exposure: "model-only" as const,
     label,
     description: SUPERVISOR_DESCRIPTION,
     parameters: SUPERVISOR_PARAMETERS,

@@ -124,7 +124,8 @@ function spawnRpcHost(command, args, { cwd, env, input, timeoutMs = 300_000 }) {
   const child = spawn(command, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
   const records = [];
   let stdout = ""; let stderr = ""; let buffer = ""; let timedOut = false; let spawnError;
-  const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, timeoutMs);
+  const timer = setTimeout(() => { timedOut = true; child.kill("SIGTERM");
+    setTimeout(()=>child.kill("SIGKILL"),3000).unref(); }, timeoutMs);
   child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
   child.stdout.on("data", (chunk) => {
     stdout += chunk; buffer += chunk;
@@ -147,7 +148,8 @@ function spawnRpcHost(command, args, { cwd, env, input, timeoutMs = 300_000 }) {
   return {
     records,
     endInput() { child.stdin.end(); },
-    kill() { child.kill("SIGTERM"); },
+    kill() { child.kill("SIGTERM");
+    setTimeout(()=>child.kill("SIGKILL"),3000).unref(); },
     closed,
     diagnostics() {
       const recordTail = records.slice(-12).map((record) => JSON.stringify(record).slice(0, 400)).join("\n");
@@ -237,7 +239,15 @@ Wait, then report whether the injected steer text arrived.
   await execFileAsync("git", ["commit", "-qm", "fixture"], { cwd: projectRoot });
   await mkdir(join(configRoot, "agents"), { recursive: true });
   for (const name of ["delegate", "executor", "reviewer"]) {
-    await copyFile(join(repoRoot, "pi", "agents", `${name}.md`), join(configRoot, "agents", `${name}.md`));
+    await writeFile(join(configRoot,"agents",`${name}.md`),`---
+name: ${name}
+description: fixture
+model: fake/deterministic
+tools: read,bash,contact_supervisor
+extensions: ${provider}
+---
+执行隔离fixture。
+`);
   }
   await writeFile(provider, providerSource(contract));
 

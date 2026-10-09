@@ -45,6 +45,8 @@ test("reviewer and executor profiles keep configuration out of their operating i
   assert.match(reviewerBody, /只读/);
   assert.doesNotMatch(executor, /^temperature:/m);
   assert.doesNotMatch(executorBody, /dispatch-ir|runtime|Host|profile|capability|frontmatter|model routing/i);
-  assert.match(executorBody, /TDD/);
+  // TDD 默认禁令已全局下放到共享规范（AGENTS_SHARED），executor 正文不得再携带 TDD
+  // 指令，也不得以测试断言恢复 TDD 要求；职责边界（不得委派）必须保留。
+  assert.doesNotMatch(executorBody, /TDD/i);
   assert.match(executorBody, /不得委派/);
 });

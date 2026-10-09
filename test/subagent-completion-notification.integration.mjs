@@ -84,7 +84,7 @@ function notifyProviderSource(contract) {
           const users = messages.filter((message) => message?.role === "user").map(text);
           const toolResults = messages.filter((message) => message?.role === "toolResult");
           const lastUser = users.at(-1) ?? "";
-          const dispatched = toolResults.find((message) => message.toolName === "subagent" && message?.details?.runId);
+          const dispatched = toolResults.find((message) => message.toolName === "subagent" && /Started /.test(text(message)));
           let tool;
           let output;
           if (lastUser.includes(${JSON.stringify(CHILD_OBJECTIVE_MARKER)})) {
@@ -153,6 +153,7 @@ function spawnRpcHost(command, args, { cwd, env, input, timeoutMs = 300_000 }) {
   const timer = setTimeout(() => {
     timedOut = true;
     child.kill("SIGTERM");
+    setTimeout(()=>child.kill("SIGKILL"),3000).unref();
   }, timeoutMs);
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
@@ -187,7 +188,8 @@ function spawnRpcHost(command, args, { cwd, env, input, timeoutMs = 300_000 }) {
   return {
     records,
     endInput() { child.stdin.end(); },
-    kill() { child.kill("SIGTERM"); },
+    kill() { child.kill("SIGTERM");
+    setTimeout(()=>child.kill("SIGKILL"),3000).unref(); },
     closed,
     diagnostics() {
       const recordTail = records.slice(-12).map((record) => JSON.stringify(record).slice(0, 400)).join("\n");
@@ -308,7 +310,15 @@ Return the deterministic child marker without modifying files.
   // profile（registerBuiltinAgentsViaEvents 在扩展加载期读取）。
   await mkdir(join(configRoot, "agents"), { recursive: true });
   for (const name of ["delegate", "executor", "reviewer"]) {
-    await copyFile(join(repoRoot, "pi", "agents", `${name}.md`), join(configRoot, "agents", `${name}.md`));
+    await writeFile(join(configRoot,"agents",`${name}.md`),`---
+name: ${name}
+description: fixture
+model: fake/deterministic
+tools: read,bash,contact_supervisor
+extensions: ${provider}
+---
+执行隔离fixture。
+`);
   }
   await writeFile(provider, notifyProviderSource(contract));
   await writeFile(parentProbe, parentProbeSource());

@@ -1,3 +1,4 @@
+import { resolveChildBrokerIdentity } from "../src/subagent-dispatch/child-broker-binding.ts";
 import { createRootBrokerClient } from "../src/subagent-dispatch/root-broker-client.ts";
 
 const RETRY_DEADLINE_MS = 5_000;
@@ -26,7 +27,16 @@ export function installRootSessionOwnerLifecycle(pi: any, options: Options = {})
     if (started) throw new Error("Root session owner is already started");
     started = true;
     try {
+      const env = options.env ?? process.env;
+      if (env.PI_SUBAGENT_CHILD === '1' && env.PI_SUBAGENT_EXTENSION_BINDINGS) {
+        const identity = await resolveChildBrokerIdentity(env);
+        // 显式绑定经自身processBirth/authority/grant验证，供同一child入口消费。
+        env.PI_SUBAGENT_ORCHESTRATOR_SESSION_ID = identity.rootSessionId;
+        env.PI_SUBAGENT_RUN_ID = identity.runId;
+      }
       owner = await installRootSessionOwner(pi, options);
+      if ('client' in owner) pi.events?.emit?.('pi-config:root-owner-ready', { runId: env.PI_SUBAGENT_RUN_ID });
+      pi.events?.emit?.("subagent:acknowledge-extension", { id: "root-session-owner" });
     } catch (error) {
       started = false;
       throw error;

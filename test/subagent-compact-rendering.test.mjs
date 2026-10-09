@@ -71,6 +71,21 @@ test("compact notification shows only one title and completion state without mut
   assert.deepEqual(message, before);
 });
 
+test("compact notification keeps workflow dispatch receipts distinct from child completion", () => {
+  const receipt = {
+    content: "Background task completed: **workflow** (dispatch complete; 1 child running or uncollected)",
+  };
+  const before = clone(receipt);
+  assert.equal(formatCompactSubagentNotification(receipt), "派发完成，1个子任务仍运行或待收集");
+  assert.deepEqual(receipt, before);
+  assert.equal(formatCompactSubagentNotification({
+    content: "Background task completed: **reviewer**",
+  }), "✓ reviewer · completed");
+  assert.equal(formatCompactSubagentNotification({
+    content: "Background task completed: **workflow** (dispatch complete; child state unavailable)",
+  }), "派发完成，子任务仍运行或待收集（数量未知）");
+});
+
 test("compact notification renders grouped titles and terminal states", () => {
   const grouped = {
     content: "Background tasks completed (2): **delegate** [First check], **delegate** [Second check]\n\nfull output",
@@ -202,7 +217,7 @@ test("compact status summarizes active, idle, error, and non-status results", ()
       { content: [{ type: "text", text: "Async run not found. Provide id or dir." }], isError: true },
       { action: "status", id: "missing" },
     ),
-    "Status: error · run: missing",
+    "Async run not found. Provide id or dir.",
   );
   assert.equal(
     formatCompactSubagentToolResult(
@@ -226,7 +241,7 @@ test("compact steer result separates the target title from the original message"
   assert.deepEqual(result, beforeResult);
 });
 
-test("compact interrupt hides the success receipt but keeps errors visible", () => {
+test("compact interrupt shows a short success state and keeps errors visible", () => {
   const args = { action: "interrupt", id: "run-int-1" };
   const success = {
     content: [{ type: "text", text: "Interrupt requested for async run run-int-1." }],
@@ -235,7 +250,7 @@ test("compact interrupt hides the success receipt but keeps errors visible", () 
   const beforeArgs = clone(args);
   const beforeResult = clone(success);
 
-  assert.equal(formatCompactSubagentToolResult(success, args), "");
+  assert.equal(formatCompactSubagentToolResult(success, args), "已中断 · run-int-1");
   assert.deepEqual(args, beforeArgs);
   assert.deepEqual(success, beforeResult);
 

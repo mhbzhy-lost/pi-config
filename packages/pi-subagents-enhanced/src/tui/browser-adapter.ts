@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { MarkdownTheme } from "@earendil-works/pi-tui";
-import { readFleetTranscript, renderFleetTranscript } from "../compat/pi-subagents-0.71.ts";
+import { readFleetTranscript, renderFleetTranscript } from "../compat/pi-subagents-0.75.ts";
 
 const MAX_STATUS_BYTES = 2 * 1024 * 1024;
 

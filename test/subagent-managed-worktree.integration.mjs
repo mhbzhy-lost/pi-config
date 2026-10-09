@@ -81,7 +81,7 @@ function piHarness(originRoot) {
     async ping() { return { version: 1, methods: ["spawn"], session: { sessionId: "root-session", sessionFile: "root-session", cwd: sessionRoot } }; },
     async spawn(params) {
       calls.push(params);
-      const match = params.workflowScript.match(/^return await runs\.run\(([^,]+), (.*)\);$/);
+      const match = params.script.match(/^return await runs\.run\(([^,]+), (.*)\);$/);
       const workflowKey = JSON.parse(match[1]);
       const leaf = JSON.parse(match[2]);
       queueMicrotask(() => events.emit("subagent:async-started", {
@@ -252,7 +252,7 @@ test("typed coding facade allocates, binds, reports, discards, and releases thro
   assert.equal(f.service.status({ workspaceId: spawned.details.workspace_id }).receipt.owner.toolCallId, "tool-call");
   assert.equal(calls[0].cwd, realpathSync(f.originRoot));
   assert.equal(calls[0].worktree, false);
-  assert.equal(JSON.parse(calls[0].workflowScript.match(/, (.*)\);$/)[1]).worktree, false);
+  assert.equal(JSON.parse(calls[0].script.match(/, (.*)\);$/)[1]).worktree, false);
   assert.equal(Object.hasOwn(f.service.status({ workspaceId: spawned.details.workspace_id }).receipt.run, "kind"), false);
   assert.equal(Object.hasOwn(spawned.details, "kind"), false);
   assert.equal(registered.length, 1);

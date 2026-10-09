@@ -11,9 +11,9 @@ test("resolveModelCandidates preserves the declared candidate order", () => {
     agentName: "ordered",
     models: ["pool/primary", "direct/backup", "other/last"],
     availableModels: [
-      { provider: "other", id: "last" },
-      { provider: "pool", id: "primary" },
-      { provider: "direct", id: "backup" },
+      { provider: "other", id: "last", api: "openai-completions" },
+      { provider: "pool", id: "primary", api: "openai-completions" },
+      { provider: "direct", id: "backup", api: "openai-completions" },
     ],
   }), ["pool/primary", "direct/backup", "other/last"]);
 });
@@ -30,7 +30,7 @@ test("resolveModelCandidates reports the complete unavailable declaration", () =
     () => resolveModelCandidates({
       agentName: "unavailable",
       models: ["pool/primary", "direct/backup"],
-      availableModels: [{ provider: "other", id: "available" }],
+      availableModels: [{ provider: "other", id: "available", api: "openai-completions" }],
     }),
     (error) => {
       assert.match(error.message, /pool\/primary/);

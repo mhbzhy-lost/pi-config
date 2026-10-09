@@ -80,7 +80,7 @@ test("spawn forwards a normalized workflow payload without injecting direct-exec
   const events = createEvents();
   const client = createTypedSubagentRpcClient(events, { randomUUID: () => "request-2" });
   const params = {
-    workflowScript: "return await runs.run('typed-request-1', { agent: 'reviewer', task: 'Review exactly this diff.', async: true, worktree: false });",
+    script: "return await runs.run('typed-request-1', { agent: 'reviewer', task: 'Review exactly this diff.', async: true, worktree: false });",
     cwd: "/repo",
     context: "fresh",
     async: true,
@@ -92,7 +92,7 @@ test("spawn forwards a normalized workflow payload without injecting direct-exec
   const request = client.spawn(params, { diagnostic: { toolCallId: "tool-spawn-1", sink: (...args) => trace.push(args) } });
 
   assert.deepEqual(params, {
-    workflowScript: "return await runs.run('typed-request-1', { agent: 'reviewer', task: 'Review exactly this diff.', async: true, worktree: false });",
+    script: "return await runs.run('typed-request-1', { agent: 'reviewer', task: 'Review exactly this diff.', async: true, worktree: false });",
     cwd: "/repo",
     context: "fresh",
     async: true,
@@ -430,4 +430,10 @@ test("dispose rejects pending calls and fences invalid request ids", async () =>
   await assert.rejects(pending, (error) => error.code === "disposed");
   assert.equal(events.listenerCount("subagents:rpc:v1:reply:pending-1"), 0);
   await assert.rejects(client.ping(), (error) => error.code === "disposed");
+});
+
+test('合法ephemeral Host ping的sessionFile:null使用sessionId，缺字段/非法值仍fail closed', async () => {
+  const response = { version: 1, methods: ['ping','spawn'], session: { sessionId: 'ephemeral-id', cwd: '/repo', sessionFile: null }, capabilities: { asyncSpawn: true, processTerminalProof: true, launchResolvedExtensions: true, runtimeAcknowledgedExtensions: true } };
+  const normal = await negotiateCapabilities({}, { response, cwd: '/repo' }); assert.equal(normal.canSpawn, true);
+  for (const value of [undefined, '', 1, false]) { const malformed = await negotiateCapabilities({}, { response: {...response, session: {...response.session, sessionFile:value}}, cwd:'/repo' }); assert.equal(malformed.canSpawn, false); }
 });

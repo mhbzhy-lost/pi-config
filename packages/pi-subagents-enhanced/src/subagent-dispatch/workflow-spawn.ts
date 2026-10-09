@@ -53,7 +53,7 @@ function childControls(value) {
   if (value === undefined) return {};
   if (!record(value)) throw new TypeError("workflow child controls must be an object");
   const controls = {};
-  for (const key of ["model", "output", "outputMode", "outputSchema", "skill", "reads", "progress", "acceptance", "subagentOnlyExtensions", "timeoutMs", "thinking"]) {
+  for (const key of ["model", "output", "outputMode", "outputSchema", "skill", "reads", "progress", "acceptance", "subagentOnlyExtensions", "timeoutMs", "thinking", "extensionBindings"]) {
     if (value[key] !== undefined) controls[key] = value[key];
   }
   return controls;
@@ -96,7 +96,7 @@ export function buildWorkflowSpawn({
     ...(acceptance === undefined ? {} : { acceptance: checkedAcceptance(acceptance) }),
   };
   return {
-    workflowScript: `return await runs.run(${JSON.stringify(normalizedKey)}, ${JSON.stringify(leaf)});`,
+    script: `return await runs.run(${JSON.stringify(normalizedKey)}, ${JSON.stringify(leaf)});`,
     cwd: rootCwd,
     context,
     async: true,

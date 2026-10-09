@@ -279,12 +279,10 @@ export default function customFooter(pi: ExtensionAPI) {
   const reconcile = (owner = ctx, epoch = sessionEpoch) => {
     if (!owner || owner !== ctx || epoch !== sessionEpoch) return;
     const wasActive = browser.snapshot().active;
-    const seen = new Set<string>();
-    for (const child of browser.snapshot().children) {
+    // 可见 facade 已折叠，但原始 root 仍需轮询以发现后续 workflow step。
+    for (const run of browser.trackedRuns()) {
       if (owner !== ctx || epoch !== sessionEpoch) return;
-      if (seen.has(child.runId)) continue;
-      seen.add(child.runId);
-      browser.reconcileRun(child.runId, readBrowserRunStatus(child.asyncDir));
+      browser.reconcileRun(run.id, readBrowserRunStatus(run.asyncDir));
     }
     persist();
     if (wasActive && !browser.snapshot().active) exitBrowser();

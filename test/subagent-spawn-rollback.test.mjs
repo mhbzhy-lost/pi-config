@@ -77,7 +77,7 @@ function leafSpawningRpc(pi, { rootRunId, leafRunId, leafAsyncDir }, overrides =
   return createRpc({
     async spawn(params) {
       this.calls.push({ method: "spawn", params });
-      const [workflowKey, leaf] = JSON.parse(`[${params.workflowScript.match(/^return await runs\.run\((.*)\);$/s)[1]}]`);
+      const [workflowKey, leaf] = JSON.parse(`[${params.script.match(/^return await runs\.run\((.*)\);$/s)[1]}]`);
       queueMicrotask(() => pi.events.emit("subagent:async-started", {
         parentWorkflowRunId: rootRunId,
         workflowKey,

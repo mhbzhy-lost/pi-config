@@ -76,7 +76,7 @@ test("keeps subagent dependencies owned by the enhanced package setup", async ()
 test("loads upstream only through the enhanced package and removes duplicate auto-discovered entries", async () => {
   const entry = await text("packages/pi-subagents-enhanced/extensions/subagent-runtime.ts");
 
-  assert.match(entry, /\.\.\/src\/compat\/pi-subagents-0\.71\.ts/);
+  assert.match(entry, /\.\.\/src\/compat\/pi-subagents-0\.75\.ts/);
   assert.match(entry, /installHeadlessTypedSubagentRuntime/);
   assert.doesNotMatch(entry, /registerTool\s*\(/);
   for (const legacy of [

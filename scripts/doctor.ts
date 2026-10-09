@@ -2,7 +2,7 @@
 import { createRequire } from "node:module";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { execFile as execFileCallback } from "node:child_process";
-import { access, lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, lstat, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -15,10 +15,12 @@ import { assertRunAuthorization, createRunAuthorization } from "../packages/pi-s
 import { RootBrokerServer } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-server.ts";
 import { createManagedWorkspaceService } from "../packages/pi-subagents-enhanced/src/workspace/service.ts";
 
+import { probePhysicalHost } from "../packages/pi-subagents-enhanced/src/host-runtime/index.ts";
+
 const execFile = promisify(execFileCallback);
 
-const SUPPORTED_PI_VERSIONS = ["0.82.0", "0.82.1", "0.83.0", "0.84.1", "0.84.2", "0.84.3", "0.84.4", "0.85.1", "0.87.1"];
-const PI_SUBAGENTS_VERSION = "0.71.0";
+const SUPPORTED_PI_VERSIONS = ["0.82.0", "0.82.1", "0.83.0", "0.84.1", "0.84.2", "0.84.3", "0.84.4", "0.85.1", "0.87.1", "1.0.4"];
+const PI_SUBAGENTS_VERSION = "0.75.0";
 const ENHANCED_SUBAGENTS_VERSION = "0.1.0";
 const ENHANCED_SUBAGENTS_SOURCE = "../packages/pi-subagents-enhanced";
 const TYPEBOX_VERSION = "1.1.38";
@@ -28,6 +30,9 @@ const TASK_SCHEDULER_PACKAGES = {
   croner: "10.0.1",
 };
 const BASIC_MEMORY_VERSION = "0.22.1";
+// r2c 采集适配器（~/.r2c/integrations/pi-adapter）：安装了就必须挂载到 pi/settings.json，
+// 否则 ai-coding-trace 扩展不加载、采集不到 Pi 会话数据（ensure-pi-settings.ts 条件挂载）。
+const R2C_ADAPTER_SOURCE = "../../.r2c/integrations/pi-adapter";
 const LEGACY_RUNTIME_FILES = [
   "scripts/lib/runtime/spawn.mjs",
   "scripts/lib/runtime/monitor.mjs",
@@ -147,7 +152,7 @@ async function readInstalledBasicMemoryVersion() {
 
 async function readInstalledPiVersion() {
   try {
-    const { stdout } = await execFile(process.env.PI_REAL_BIN ?? "pi", ["--version"]);
+    const { stdout } = await execFile(process.execPath, [process.env.PI_REAL_BIN ?? resolve(import.meta.dirname,"../node_modules/@earendil-works/pi-coding-agent/dist/cli.js"), "--version"]);
     return stdout.trim();
   } catch {
     return "unknown";
@@ -264,6 +269,21 @@ export async function inspectConfiguration(repoRoot, options = {}) {
     if (!hasDisabledTaskSchedulerResources(settings)) {
       issues.push("task scheduler package resources must all be disabled");
     }
+    // 与 Pi 一致：package source 相对 settings.json 所在目录解析（repoRoot/pi → repoRoot/../.r2c）。
+    const r2cAdapterDir = options.r2cAdapterDir ?? resolve(repoRoot, "pi", R2C_ADAPTER_SOURCE);
+    const r2cAdapterRegistered = sources.includes(R2C_ADAPTER_SOURCE);
+    try {
+      await access(r2cAdapterDir, constants.R_OK);
+      if (!r2cAdapterRegistered) {
+        issues.push(`r2c pi-adapter is installed but not registered in pi/settings.json (run: node scripts/ensure-pi-settings.ts): ${R2C_ADAPTER_SOURCE}`);
+      }
+    } catch (error) {
+      if (error?.code === "ENOENT" || error?.code === "ENOTDIR") {
+        if (r2cAdapterRegistered) issues.push(`pi/settings.json references missing local r2c adapter package: ${R2C_ADAPTER_SOURCE}`);
+      } else {
+        issues.push(unreadableIssue("r2c pi-adapter", error));
+      }
+    }
   } catch {
     issues.push("pi-subagents-enhanced local package source must be uniquely configured");
     issues.push("task scheduler package resources must all be disabled");
@@ -346,7 +366,13 @@ export async function inspectConfiguration(repoRoot, options = {}) {
   }
   for (const peer of FORBIDDEN_LOCAL_PI_PEERS) {
     try {
-      await lstat(join(enhancedPackageRoot, "node_modules", ...peer.split("/")));
+      const local = join(enhancedPackageRoot, "node_modules", ...peer.split("/"));
+      const info = await lstat(local);
+      if (info.isSymbolicLink()) {
+        const expected = join(repoRoot, 'node_modules', ...peer.split('/'));
+        const metadata = JSON.parse(await readFile(join(expected, 'package.json'), 'utf8'));
+        if (await realpath(local) === await realpath(expected) && metadata.name === peer && metadata.version === '1.0.4') continue;
+      }
       issues.push(`pi-subagents-enhanced contains a package-local Pi core peer: ${peer}`);
     } catch (error) {
       if (error?.code !== "ENOENT") issues.push(`unable to inspect pi-subagents-enhanced peer ownership: ${peer}: ${error.message}`);
@@ -400,22 +426,21 @@ export async function inspectConfiguration(repoRoot, options = {}) {
     issues.push(`missing Pi package: pi-subagents@${PI_SUBAGENTS_VERSION}`);
   }
 
-  const typeboxRoot = join(packageRoot, "node_modules", "typebox");
-  const typeboxPackagePath = join(typeboxRoot, "package.json");
   try {
-    const metadata = JSON.parse(await readFile(typeboxPackagePath, "utf8"));
-    if (metadata.version !== TYPEBOX_VERSION) {
-      issues.push(`unexpected typebox version: ${metadata.version ?? "unknown"}; expected ${TYPEBOX_VERSION}`);
-    } else {
-      try {
-        createRequire(packagePath).resolve("typebox/compile");
-      } catch (error) {
-        issues.push(`typebox/compile is not resolvable from pi-subagents: ${error.message}`);
-      }
+    const hostRoot = join(repoRoot,'node_modules/@earendil-works/pi-coding-agent');
+    const hostRequire = createRequire(join(hostRoot,'package.json'));
+    for (const specifier of ['typebox','typebox/compile','typebox/value']) hostRequire.resolve(specifier);
+    const entry=hostRequire.resolve('typebox');
+    let cursor=dirname(entry);let metadata;
+    for (;;) {
+      try { const value=JSON.parse(await readFile(join(cursor,'package.json'),'utf8'));if(value.name==='typebox'){metadata=value;break;} } catch(error){if(error?.code!=='ENOENT')throw error;}
+      const parent=dirname(cursor);if(parent===cursor)throw new Error('Host TypeBox metadata缺失');cursor=parent;
     }
-  } catch {
-    issues.push(`missing Pi package: typebox@${TYPEBOX_VERSION}`);
-  }
+    if (metadata.version !== '1.3.27') issues.push(`unexpected Host TypeBox version: ${metadata.version}; expected 1.3.27`);
+    const schedulerTypebox=JSON.parse(await readFile(join(repoRoot,'pi/npm/node_modules/typebox/package.json'),'utf8'));
+    if (schedulerTypebox.version !== TYPEBOX_VERSION) issues.push(`unexpected scheduler typebox version: ${schedulerTypebox.version}; expected ${TYPEBOX_VERSION}`);
+    createRequire(join(repoRoot,'pi/npm/package.json')).resolve('typebox/compile');
+  } catch(error) { issues.push(`TypeBox public closure is unavailable: ${error.message}`); }
 
   const piNpmPackagePath = join(repoRoot, "pi", "npm", "package.json");
   try {
@@ -457,6 +482,7 @@ const isMain = process.argv[1] && import.meta.url === pathToFileURL(resolve(proc
 if (isMain) {
   const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   try {
+    await probePhysicalHost({ hostRoot: process.env.PI_HOST_ROOT ?? join(repoRoot,"node_modules/@earendil-works/pi-coding-agent"), nodeBin: process.execPath, enhancedPackageRoot: join(repoRoot,"packages/pi-subagents-enhanced") });
     const lifecycle = await inspectWorktreeLifecycle(repoRoot);
     const issues = await inspectConfiguration(repoRoot, { coordinatorAudit: lifecycle });
     for (const warning of formatWorktreeLifecycleWarnings(lifecycle)) console.warn(warning);

@@ -621,3 +621,164 @@ test("facade leaf resolution is confined to the adjacent runs root", (t) => {
   assert.equal(child.thinking, undefined);
   assert.equal(child.tokens, undefined);
 });
+
+const lifecycle = JSON.parse(fs.readFileSync(new URL('./fixtures/trial-browser-lifecycle.json', import.meta.url), 'utf8'));
+function trialPair(order = 'root-first') {
+  let state = new SubagentSessionBrowserState();
+  const root = () => { state.trackStarted(lifecycle.rootStarted); state.reconcileRun('trial-root', lifecycle.rootStatus); state.trackCompleted(lifecycle.rootComplete); };
+  const leaf = () => { state.trackStarted(lifecycle.leafStarted); state.reconcileRun('trial-leaf', lifecycle.leafStatus); };
+  if (order === 'leaf-first') { leaf(); state = SubagentSessionBrowserState.hydrate(state.serialize()); root(); }
+  else { root(); leaf(); }
+  return state;
+}
+function pressure(state, prefix, afterEach = () => {}) {
+  for (let index = 0; index < 21; index++) {
+    const id = `${prefix}-${index}`;
+    startRun(state, id, ['executor']);
+    state.trackCompleted({ runId: id, state: 'complete' });
+    afterEach();
+  }
+}
+
+for (const order of ['root-first', 'leaf-first']) {
+  test(`canonical ${order} retains actual leaf state, metadata, raw persistence and defensive copies`, () => {
+    const before = structuredClone(lifecycle);
+    const state = trialPair(order);
+    const snapshot = state.snapshot();
+    assert.deepEqual(snapshot.children.map(c => c.key), ['trial-leaf:0']);
+    assert.equal(snapshot.activeChildren.length, 1);
+    assert.equal(snapshot.recentChildren.length, 0);
+    assert.equal(snapshot.children[0].state, 'running');
+    assert.equal(snapshot.children[0].label, '审阅任务');
+    assert.equal(snapshot.children[0].model, 'fixture/reviewer');
+    assert.equal(snapshot.children[0].tokens, 4321);
+    assert.equal(snapshot.children[0].sessionFile, lifecycle.leafStatus.steps[0].sessionFile);
+    const persisted = state.serialize();
+    assert.equal(persisted.children.length, 2);
+    assert.equal(persisted.children.find(c => c.runId === 'trial-root').facadeLeafRunId, 'trial-leaf');
+    assert.deepEqual(SubagentSessionBrowserState.hydrate(persisted).snapshot().children, snapshot.children);
+    const tracked = state.trackedRuns();
+    assert.deepEqual(new Set(tracked.map(r => r.id)), new Set(['trial-root','trial-leaf']));
+    tracked[0].id = 'tampered'; snapshot.children[0].agent = 'tampered'; persisted.children[0].workflowKey = 'tampered';
+    assert.equal(state.trackedRuns().some(r => r.id === 'tampered'), false);
+    assert.equal(state.snapshot().children[0].agent, 'reviewer');
+    state.trackCompleted(lifecycle.leafComplete);
+    assert.deepEqual(state.snapshot().recentChildren.map(c => c.key), ['trial-leaf:0']);
+    assert.equal(state.snapshot().activeChildren.length, 0);
+    assert.deepEqual(SubagentSessionBrowserState.hydrate(state.serialize()).snapshot().children, state.snapshot().children);
+    assert.deepEqual(lifecycle, before);
+  });
+}
+
+test('canonical selected workflow placeholder migrates through reviewer step without exiting', () => {
+  const state = new SubagentSessionBrowserState();
+  state.trackStarted(lifecycle.rootStarted);
+  assert.equal(state.snapshot().children[0].agent, 'workflow');
+  state.enter();
+  state.reconcileRun('trial-root', lifecycle.rootStatus);
+  assert.equal(state.snapshot().selected.agent, 'reviewer');
+  state.trackCompleted(lifecycle.rootComplete);
+  state.trackStarted(lifecycle.leafStarted);
+  state.reconcileRun('trial-leaf', lifecycle.leafStatus);
+  assert.equal(state.snapshot().active, true);
+  assert.equal(state.snapshot().selectedKey, 'trial-leaf:0');
+  assert.equal(state.snapshot().selected.state, 'running');
+});
+
+test('canonical relation requires explicit matching parent/key/session/agent/single and never sessionFile or label alone', () => {
+  const cases = [
+    f => { delete f.rootStatus.steps[0].runId; },
+    f => { delete f.rootStatus.steps[0].workflowKey; },
+    f => { f.leafStarted.parentWorkflowRunId = f.leafStatus.parentWorkflowRunId = 'other'; },
+    f => { delete f.leafStarted.parentWorkflowRunId; delete f.leafStatus.parentWorkflowRunId; },
+    f => { f.leafStarted.workflowKey = f.leafStatus.workflowKey = 'other'; },
+    f => { delete f.leafStarted.workflowKey; delete f.leafStatus.workflowKey; },
+    f => { f.leafStarted.sessionId = 'other'; },
+    f => { delete f.rootStarted.sessionId; },
+    f => { delete f.leafStarted.sessionId; },
+    f => { f.leafStarted.agent = f.leafStatus.steps[0].agent = 'executor'; },
+    f => { delete f.leafStarted.mode; delete f.leafStatus.mode; },
+    f => { f.leafStarted.mode = f.leafStatus.mode = 'workflow'; },
+    f => { f.leafStatus.steps.push({...f.leafStatus.steps[0]}); },
+  ];
+  for (const mutate of cases) {
+    const f = structuredClone(lifecycle); mutate(f);
+    const state = new SubagentSessionBrowserState();
+    state.trackStarted(f.rootStarted); state.reconcileRun('trial-root',f.rootStatus);
+    state.trackStarted(f.leafStarted); state.reconcileRun('trial-leaf',f.leafStatus);
+    assert.equal(state.snapshot().children.some(c => c.key === 'trial-root:0'), true);
+  }
+  const state = trialPair();
+  state.trackStarted({...lifecycle.leafStarted, id:'resume', parentWorkflowRunId:undefined, workflowKey:undefined});
+  state.reconcileRun('resume',{...lifecycle.leafStatus, runId:'resume', parentWorkflowRunId:undefined, workflowKey:undefined});
+  assert.deepEqual(state.snapshot().children.map(c => c.key), ['trial-leaf:0','resume:0']);
+});
+
+test('canonical history eviction never splits a leaf-first confirmed component under 21 terminal runs', () => {
+  const state = trialPair('leaf-first');
+  state.trackCompleted(lifecycle.leafComplete);
+  pressure(state, 'history', () => {
+    assert.equal(state.snapshot().children.some(c => c.key === 'trial-root:0'), false);
+    const ids = state.trackedRuns().map(r => r.id);
+    assert.equal(ids.includes('trial-root'), ids.includes('trial-leaf'));
+    const restored = SubagentSessionBrowserState.hydrate(state.serialize());
+    assert.equal(restored.snapshot().children.some(c => c.key === 'trial-root:0'), false);
+  });
+  assert.equal(state.trackedRuns().some(r => r.id === 'trial-root' || r.id === 'trial-leaf'), false);
+  assert.equal(state.trackedRuns().length, 20);
+});
+
+test('facade dispatch completion retains raw root for live/selected leaf, later steps and exit budget convergence', () => {
+  const state = trialPair();
+  pressure(state, 'live');
+  assert.equal(state.trackedRuns().some(r => r.id === 'trial-root'), true);
+  assert.deepEqual(state.snapshot().activeChildren.map(c => c.key), ['trial-leaf:0']);
+  const rootStatus = structuredClone(lifecycle.rootStatus);
+  rootStatus.steps.push({...rootStatus.steps[0], runId:'second', workflowKey:'second-key'});
+  state.reconcileRun('trial-root',rootStatus);
+  assert.equal(state.snapshot().children.some(c => c.key === 'trial-root:1'), true);
+  state.trackStarted({...lifecycle.leafStarted, id:'second', workflowKey:'second-key'});
+  state.reconcileRun('second',{...lifecycle.leafStatus, runId:'second', workflowKey:'second-key'});
+  assert.equal(state.snapshot().children.some(c => c.runId === 'trial-root'), false);
+  state.enter();
+  assert.equal(state.snapshot().selectedKey, 'trial-leaf:0');
+  state.trackCompleted(lifecycle.leafComplete);
+  state.trackCompleted({runId:'second',state:'complete'});
+  pressure(state, 'selected');
+  assert.equal(state.trackedRuns().some(r => r.id === 'trial-root'), true);
+  assert.equal(state.trackedRuns().some(r => r.id === 'trial-leaf'), true);
+  state.exit();
+  assert.ok(state.trackedRuns().length <= 20);
+  pressure(state, 'released');
+  assert.equal(state.trackedRuns().some(r => ['trial-root','trial-leaf','second'].includes(r.id)), false);
+  assert.equal(state.trackedRuns().length, 20);
+});
+
+test('canonical trim does not protect an unconfirmed mismatching parent relation', () => {
+  const state = new SubagentSessionBrowserState();
+  state.trackStarted(lifecycle.rootStarted); state.reconcileRun('trial-root',lifecycle.rootStatus);
+  state.trackStarted({...lifecycle.leafStarted,workflowKey:'conflict'});
+  state.reconcileRun('trial-leaf',{...lifecycle.leafStatus,workflowKey:'conflict'});
+  pressure(state,'unconfirmed');
+  assert.equal(state.trackedRuns().some(r => r.id === 'trial-root'), false);
+  assert.equal(state.trackedRuns().some(r => r.id === 'trial-leaf'), true);
+});
+
+test('canonical selected large component exceeds budget only until exit, then disappears without tombstones', () => {
+  const state = new SubagentSessionBrowserState();
+  state.trackStarted(lifecycle.rootStarted);
+  const steps = Array.from({length:21}, (_,i) => ({...lifecycle.rootStatus.steps[0],runId:`large-${i}`,workflowKey:`large-key-${i}`}));
+  state.reconcileRun('trial-root',{...lifecycle.rootStatus,steps});
+  for (let i=0;i<21;i++) {
+    state.trackStarted({...lifecycle.leafStarted,id:`large-${i}`,workflowKey:`large-key-${i}`});
+  }
+  state.enter();
+  for (let i=0;i<21;i++) state.trackCompleted({runId:`large-${i}`,state:'complete'});
+  assert.equal(state.trackedRuns().length,22);
+  assert.equal(state.snapshot().selectedKey,'large-0:0');
+  state.exit();
+  assert.equal(state.trackedRuns().length,0);
+  assert.equal(state.serialize().children.length,0);
+  state.trackStarted(lifecycle.rootStarted);
+  assert.equal(state.snapshot().children[0].agent,'workflow');
+});

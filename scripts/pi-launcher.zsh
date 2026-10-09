@@ -4,14 +4,17 @@ setopt err_return no_unset pipe_fail
 
 root=${${(%):-%N}:A:h:h}
 launcher_path=${(%):-%N:A}
-if [[ -n "${PI_REAL_BIN:-}" ]]; then
-  [[ "$PI_REAL_BIN" == /* ]] || { print -u2 -- "PI_REAL_BIN must be an absolute executable path"; exit 1; }
-  real_bin=${PI_REAL_BIN:A}
-else
-  real_bin=$(whence -p pi 2>/dev/null) || { print -u2 -- "pi executable not found; set PI_REAL_BIN"; exit 1; }
-  real_bin=${real_bin:A}
-fi
-[[ -f "$real_bin" && -x "$real_bin" && "$real_bin" != "$launcher_path" ]] || { print -u2 -- "pi executable not found; set PI_REAL_BIN"; exit 1; }
+node_bin=${PI_HOST_NODE:-$(whence -p node 2>/dev/null)}
+[[ "$node_bin" == /* && -f "$node_bin" && -x "$node_bin" ]] || { print -u2 -- "physical Host Node不可用"; exit 1; }
+node_bin=${node_bin:A}
+"$node_bin" "$root/scripts/assert-session-tool-policy.ts" "$@" || exit 1
+node_ok=$("$node_bin" -p 'const [a,b]=process.versions.node.split(".").map(Number);a>22||(a===22&&b>=19)?"yes":"no"') || exit 1
+[[ "$node_ok" == yes ]] || { print -u2 -- "Node必须>=22.19.0"; exit 1; }
+export PI_HOST_ROOT="${PI_HOST_ROOT:-$root/node_modules/@earendil-works/pi-coding-agent}"
+real_bin=$("$node_bin" "$root/scripts/resolve-physical-pi.ts") || exit 1
+export PI_REAL_BIN="$real_bin"
+export PI_PACKAGE_DIR="${PI_HOST_ROOT:A}"
+export PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT="$PI_PACKAGE_DIR"
 
 decision_dir=$(mktemp -d "${TMPDIR:-/tmp}/pi-session-owner.XXXXXXXX") || exit 1
 chmod 700 "$decision_dir" || { rmdir "$decision_dir"; exit 1; }
@@ -44,7 +47,7 @@ private_text() {
 stdin_tty=0; stdout_tty=0
 [[ -t 0 ]] && stdin_tty=1
 [[ -t 1 ]] && stdout_tty=1
-node "$root/scripts/pi-session-owner.ts" prepare --pid "$$" --cwd "$PWD" --stdin-tty "$stdin_tty" --stdout-tty "$stdout_tty" --decision-dir "$decision_dir" --pi-binary "$real_bin" -- "$@" >/dev/null || exit 1
+"$node_bin" "$root/scripts/pi-session-owner.ts" prepare --pid "$$" --cwd "$PWD" --stdin-tty "$stdin_tty" --stdout-tty "$stdout_tty" --decision-dir "$decision_dir" --pi-binary "$real_bin" -- "$@" >/dev/null || exit 1
 
 private_directory "$decision_dir" || { print -u2 -- "Pi launch decision is invalid"; exit 1; }
 private_text action || { print -u2 -- "Pi launch decision is invalid"; exit 1; }
@@ -54,7 +57,7 @@ case "$action" in
   bypass)
     unset PI_SESSION_OWNER_ID PI_SESSION_OWNER_REGISTRY
     cleanup; trap - EXIT HUP INT TERM
-    exec "$real_bin" "$@"
+    exec "$node_bin" "$real_bin" "$@"
     ;;
   pass|pin-session) ;;
   *) print -u2 -- "Pi launch decision is invalid"; exit 1 ;;
@@ -89,4 +92,4 @@ fi
 export PI_SESSION_OWNER_ID="$owner_id"
 export PI_SESSION_OWNER_REGISTRY="${PI_SESSION_OWNER_REGISTRY:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/pi-session-owner-${EUID}}"
 cleanup; trap - EXIT HUP INT TERM
-exec "$real_bin" -e "$root/pi/extensions/session-owner.ts" "${args[@]}"
+exec "$node_bin" "$real_bin" -e "$root/pi/extensions/session-owner.ts" "${args[@]}"

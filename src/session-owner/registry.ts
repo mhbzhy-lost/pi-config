@@ -103,7 +103,8 @@ function privateJson(store: RegistryStore, path: string, label: string): unknown
   try {
     fd = openSync(path, noFollow(constants.O_RDONLY));
     const opened = fstatSync(fd);
-    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino || checkedUid(store, path, opened.uid) !== callerUid(store)) throw unavailable(`${label} changed while opening`);
+    if (!opened.isFile() || (opened.mode & 0o777) !== 0o600 || checkedUid(store, path, opened.uid) !== callerUid(store)) throw unavailable(`${label} must be a caller-owned 0600 regular file`);
+    if (opened.dev !== before.dev || opened.ino !== before.ino) throw unavailable(`${label} changed while opening`);
     let content = "";
     const buffer = Buffer.alloc(opened.size);
     let offset = 0;
@@ -180,7 +181,9 @@ function acquireGuard(store: RegistryStore): Guard {
     try { observed = privateJson(store, guardPath(store), "registry guard"); }
     catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT" && Date.now() < deadline) continue;
+      // guard在原子替换窗口内可能已经被另一合法owner发布；只对这个精确竞态重读，
+      // malformed、权限、owner、类型和symlink异常仍然fail closed。
+      if ((code === "ENOENT" || (error as Error).message === "registry guard changed while opening") && Date.now() < deadline) continue;
       throw unavailable("registry guard is invalid", error, guardSnapshot(store));
     }
     // 共享 guard 陈旧或损坏时只能人工确认后恢复，当前进程绝不能删除它。

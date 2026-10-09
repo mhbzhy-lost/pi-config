@@ -253,7 +253,7 @@ test("project typed worktree commit completes Auto Integration and release", { s
     const contract = {
       title: "Run real workflow leaf",
       agent: "executor",
-      task: "Commit the child marker to README.md through the managed worktree. Use the project-owned typed facade. Only modify README.md. Known fact: pi-subagents is pinned to 0.71.0. Bind only the leaf run. Do not create a worktree.",
+      task: "Commit the child marker to README.md through the managed worktree. Use the project-owned typed facade. Only modify README.md. Known fact: pi-subagents is pinned to 0.75.0. Bind only the leaf run. Do not create a worktree.",
       writePaths: ["README.md"],
       acceptance: { criteria: ["The child returns the deterministic marker."] },
       cwd: projectRoot,
@@ -398,7 +398,7 @@ Return the deterministic child marker without modifying files.
     // profile（registerBuiltinAgentsViaEvents 在扩展加载期读取）。
     await mkdir(join(configRoot, "agents"), { recursive: true });
     for (const name of ["delegate", "executor", "reviewer"]) {
-      await copyFile(join(repoRoot, "pi", "agents", `${name}.md`), join(configRoot, "agents", `${name}.md`));
+      await writeFile(join(configRoot,"agents",`${name}.md`),`---\nname: ${name}\ndescription: fixture\nmodel: fake/deterministic\ntools: read,bash\nextensions: ${provider}\n---\nfixture\n`);
     }
 
     const runtimeEntries = join(projectRoot, ".pi-subagents");

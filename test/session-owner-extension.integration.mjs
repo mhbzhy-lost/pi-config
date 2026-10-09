@@ -6,7 +6,9 @@ import test from "node:test";
 
 const api = await import("../src/session-owner/index.ts").catch(() => ({}));
 const registry = await import("../src/session-owner/registry.ts");
-const { createAgentSession, DefaultResourceLoader, SessionManager } = await import(join((await import("node:child_process")).spawnSync("npm", ["root", "-g"], { encoding: "utf8" }).stdout.trim(), "@earendil-works", "pi-coding-agent", "dist", "index.js"));
+import { loadPiTestRuntime } from './helpers/pi-runtime.mjs';
+const {codingAgent:{createAgentSession,DefaultResourceLoader,SessionManager}}=await loadPiTestRuntime(import.meta.url);
+
 
 function runner() {
   const handlers = new Map();

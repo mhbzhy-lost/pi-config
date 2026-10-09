@@ -7,6 +7,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 
+import { physicalLauncherFixture } from "./helpers/physical-launcher-fixture.mjs";
+
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 test("shell integration makes bare pi use the repository configuration", async () => {
@@ -25,7 +27,7 @@ test("shell integration makes bare pi use the repository configuration", async (
       ["-f", "-c", `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; pi --version`],
       {
         encoding: "utf8",
-        env: { ...process.env, PI_REAL_BIN: fakePi, OUTPUT: output, PI_CODING_AGENT_SESSION_DIR: "", PI_CODING_AGENT_GOAL_DIR: "", PI_CODING_AGENT_WORKSPACE_DIR: "", PI_CODING_GOAL_DIR: "", PI_CODING_WORKSPACE_DIR: "" },
+        env: { ...process.env, ...physicalLauncherFixture(fakePi), OUTPUT: output, PI_CODING_AGENT_SESSION_DIR: "", PI_CODING_AGENT_GOAL_DIR: "", PI_CODING_AGENT_WORKSPACE_DIR: "", PI_CODING_GOAL_DIR: "", PI_CODING_WORKSPACE_DIR: "" },
       },
     );
 
@@ -36,7 +38,7 @@ test("shell integration makes bare pi use the repository configuration", async (
       sessions: join(repoRoot, "var", "sessions"),
       goals: join(repoRoot, "var", "goals"),
       workspaces: join(repoRoot, "var", "workspaces"),
-      args: ["--no-skills", "--version"],
+      args: ["--no-skills", "--tui-mode", "fullscreen", "--version"],
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -54,7 +56,7 @@ test("shell integration preserves an absolute custom workspace state directory",
     const result = spawnSync(
       "zsh",
       ["-f", "-c", `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; pi --version`],
-      { encoding: "utf8", env: { ...process.env, PI_REAL_BIN: fakePi, OUTPUT: output, PI_CODING_AGENT_GOAL_DIR: "", PI_CODING_AGENT_WORKSPACE_DIR: "", PI_CODING_WORKSPACE_DIR: "/tmp/custom-pi-workspaces" } },
+      { encoding: "utf8", env: { ...process.env, ...physicalLauncherFixture(fakePi), OUTPUT: output, PI_CODING_AGENT_GOAL_DIR: "", PI_CODING_AGENT_WORKSPACE_DIR: "", PI_CODING_WORKSPACE_DIR: "/tmp/custom-pi-workspaces" } },
     );
 
     assert.equal(result.status, 0, result.stderr);
@@ -79,7 +81,7 @@ test("shell integration preserves a custom Goal state directory", async () => {
         encoding: "utf8",
         env: {
           ...process.env,
-          PI_REAL_BIN: fakePi,
+          ...physicalLauncherFixture(fakePi),
           OUTPUT: output,
           PI_CODING_AGENT_GOAL_DIR: "",
           PI_CODING_GOAL_DIR: "/tmp/custom-pi-goals",
@@ -114,7 +116,7 @@ test("shell integration keeps explicit agent-prefixed state roots isolated from 
         encoding: "utf8",
         env: {
           ...process.env,
-          PI_REAL_BIN: fakePi,
+          ...physicalLauncherFixture(fakePi),
           OUTPUT: output,
           PI_CODING_AGENT_GOAL_DIR: join(repoRoot, "var", "goals"),
           PI_CODING_AGENT_WORKSPACE_DIR: join(repoRoot, "var", "workspaces"),
@@ -148,13 +150,13 @@ test("bare pi forwards without shell ANSI output", async () => {
       ["-f", "-c", `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; pi`],
       {
         encoding: "utf8",
-        env: { ...process.env, PI_REAL_BIN: fakePi, PI_ALT_SCREEN: "always", OUTPUT: output },
+        env: { ...process.env, ...physicalLauncherFixture(fakePi), PI_ALT_SCREEN: "always", OUTPUT: output },
       },
     );
 
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, "");
-    assert.equal(await readFile(output, "utf8"), "--no-skills\n");
+    assert.equal(await readFile(output, "utf8"), "--no-skills\n--tui-mode\nfullscreen\n");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -173,7 +175,7 @@ test("pi-inline requests official regular TUI mode", async () => {
       ["-f", "-c", `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; pi-inline --version`],
       {
         encoding: "utf8",
-        env: { ...process.env, PI_REAL_BIN: fakePi, PI_ALT_SCREEN: "always", OUTPUT: output },
+        env: { ...process.env, ...physicalLauncherFixture(fakePi), PI_ALT_SCREEN: "always", OUTPUT: output },
       },
     );
 
@@ -198,7 +200,7 @@ test("pi-full requests official fullscreen TUI mode", async () => {
       ["-f", "-c", `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; pi-full --version`],
       {
         encoding: "utf8",
-        env: { ...process.env, PI_REAL_BIN: fakePi, OUTPUT: output },
+        env: { ...process.env, ...physicalLauncherFixture(fakePi), OUTPUT: output },
       },
     );
 
@@ -224,7 +226,7 @@ test("pi-lite launches the lean read-only exploration mode", async () => {
       ["-f", "-c", `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; pi-lite --version`],
       {
         encoding: "utf8",
-        env: { ...process.env, PI_REAL_BIN: fakePi, OUTPUT: output },
+        env: { ...process.env, ...physicalLauncherFixture(fakePi), OUTPUT: output },
       },
     );
 
@@ -253,6 +255,52 @@ test("pi-lite launches the lean read-only exploration mode", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// Catches a compatibility entry that bypasses pi and maintains its own defaults.
+test("pi-full reuses the pi entry when its launch policy is overridden", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-full-entry-"));
+  try {
+    const output = join(root, "args.txt");
+    const fakePi = join(root, "pi-real");
+    await writeFile(fakePi, "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$OUTPUT\"\n");
+    await chmod(fakePi, 0o755);
+    const result = spawnSync("zsh", ["-f", "-c",
+      `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; pi() { _pi_config_invoke --tui-mode regular "$@"; }; pi-full --version`,
+    ], { encoding: "utf8", env: { ...process.env, ...physicalLauncherFixture(fakePi), OUTPUT: output } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(await readFile(output, "utf8"), "--no-skills\n--tui-mode\nregular\n--version\n");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Catches defaults appended after explicit options, lost quoting/--, or divergent entries.
+for (const entry of ["pi", "pi-full"]) {
+  for (const explicit of [false, true]) {
+    test(`${entry} forwards ${explicit ? "explicit regular ahead of the prompt" : "fullscreen defaults"} and package environment`, async () => {
+      const root = await mkdtemp(join(tmpdir(), "pi-tui-forward-"));
+      try {
+        const output = join(root, "invocation.json");
+        const fakePi = join(root, "pi-real");
+        await writeFile(fakePi, `#!/usr/bin/env bash\nnode -e 'require("fs").writeFileSync(process.env.OUTPUT, JSON.stringify({ args: process.argv.slice(1), packageDir: process.env.PI_PACKAGE_DIR, config: process.env.PI_CODING_AGENT_DIR, owner: process.env.PI_SESSION_OWNER_ID ?? null }))' -- "$@"\n`);
+        await chmod(fakePi, 0o755);
+        const result = spawnSync("zsh", ["-f", "-c",
+          `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; ${entry} ${explicit ? "--tui-mode regular" : ""} --version -- 'prompt with spaces' '--tui-mode' 'regular'`,
+        ], { encoding: "utf8", env: { ...process.env, ...physicalLauncherFixture(fakePi), OUTPUT: output,
+          PI_CODING_AGENT_DIR: "/stale-repo/pi", PI_SESSION_OWNER_ID: "stale-owner" } });
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(result.stdout, "");
+        assert.deepEqual(JSON.parse(await readFile(output, "utf8")), {
+          args: ["--no-skills", "--tui-mode", "fullscreen", ...(explicit ? ["--tui-mode", "regular"] : []),
+            "--version", "--", "prompt with spaces", "--tui-mode", "regular"],
+          packageDir: realpathSync(join(root,"physical/node_modules/@earendil-works/pi-coding-agent")), config: join(repoRoot, "pi"), owner: null,
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+}
 
 test("shell delegates TUI ownership to Pi official settings", async () => {
   const shell = await readFile(join(repoRoot, "scripts", "pi-shell.zsh"), "utf8");

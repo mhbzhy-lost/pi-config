@@ -6,6 +6,7 @@ export type SupervisorRequestV1 = {
   schemaVersion: "supervisor-request.v1"; requestId: string; runId: string; rootSessionId: string;
   ownerGeneration: number; requestGeneration: number; requestDigest: string;
   createdAt: number; expiresAt: number; state: SupervisorRequestState;
+  correlation?: { asyncDir: string; pid: number; lifecycleSessionId: string; processBirth: string; sessionFile: string; childSessionId: string; toolCallId: string; agent: string; childIndex: number; reason: string; requestBodyDigest: string };
 };
 export type SupervisorControlIntentV1 = {
   schemaVersion: "supervisor-control-intent.v1"; intentId: string; runId: string;
@@ -31,11 +32,20 @@ function exact(o: Record<string, any>, keys: string[], name: string) { if (Objec
 
 export function parseSupervisorRequestV1(value: unknown): SupervisorRequestV1 {
   if (!isObject(value)) throw new Error("request must be object");
-  exact(value, ["schemaVersion","requestId","runId","rootSessionId","ownerGeneration","requestGeneration","requestDigest","createdAt","expiresAt","state"], "request");
+  exact(value, ["schemaVersion","requestId","runId","rootSessionId","ownerGeneration","requestGeneration","requestDigest","createdAt","expiresAt","state", ...(Object.hasOwn(value,"correlation") ? ["correlation"] : [])], "request");
   if (value.schemaVersion !== "supervisor-request.v1") throw new Error("request schema unsupported");
   safeId(value.requestId,"requestId"); safeId(value.runId,"runId"); safeId(value.rootSessionId,"rootSessionId");
   positive(value.ownerGeneration,"ownerGeneration"); positive(value.requestGeneration,"requestGeneration"); digestRef(value.requestDigest,"requestDigest");
   if (!["pending","replying","replied","expired","failed"].includes(value.state) || typeof value.createdAt !== "number" || typeof value.expiresAt !== "number" || value.expiresAt < value.createdAt) throw new Error("request timing/state invalid");
+  if (value.correlation !== undefined) {
+    const c = value.correlation;
+    if (!isObject(c)) throw new Error('request correlation invalid');
+    exact(c, ['asyncDir','pid','lifecycleSessionId','processBirth','sessionFile','childSessionId','toolCallId','agent','childIndex','reason','requestBodyDigest'], 'request correlation');
+    for (const field of ['asyncDir','lifecycleSessionId','processBirth','sessionFile','childSessionId','toolCallId','agent','reason']) if (typeof c[field] !== 'string' || !c[field]) throw new Error('request correlation invalid');
+    if (!Number.isSafeInteger(c.pid) || c.pid <= 0) throw new Error('request pid invalid');
+    if (!Number.isSafeInteger(c.childIndex) || c.childIndex < 0) throw new Error('request childIndex invalid');
+    digestRef(c.requestBodyDigest,'requestBodyDigest');
+  }
   return value as SupervisorRequestV1;
 }
 export function parseSupervisorControlIntentV1(value: unknown): SupervisorControlIntentV1 {
@@ -68,6 +78,7 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
   const now = options.now ?? (() => Date.now());
   const id = options.randomId ?? (() => `${now()}-${Math.random().toString(36).slice(2)}`);
   const storage = options.persistenceRoot ? new DurableStorage({ root: options.persistenceRoot }) : undefined;
+  const lockedRoots = new Set<string>();
   const loadedRoots = new Set<string>();
   const corruptRoots = new Set<string>();
   const stateKey = (root: string) => `supervisor-${createHash("sha256").update(root).digest("hex")}`;
@@ -92,15 +103,17 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
       for (const raw of value.requests) {
         const request = parseSupervisorRequestV1(raw);
         if (request.rootSessionId !== root) throw new Error("request root mismatch");
-        if (request.state === "pending" && now() < request.expiresAt) requests.set(`${root}:${request.runId}:${request.ownerGeneration}:${request.requestId}:${request.requestDigest}`, request);
-        else if (request.state === "pending") report({ type: "supervisor-persistence-rejected", rootSessionId: root, requestId: request.requestId, code: "SUPERVISOR_REQUEST_EXPIRED" });
+        if (request.state === 'pending' && now() >= request.expiresAt) {
+          request.state = 'expired'; report({ type: 'supervisor-persistence-rejected', rootSessionId: root, requestId: request.requestId, code: 'SUPERVISOR_REQUEST_EXPIRED' });
+        }
+        requests.set(`${root}:${request.runId}:${request.ownerGeneration}:${request.requestId}:${request.requestDigest}`, request);
       }
       for (const raw of value.receipts) {
         if (!isObject(raw) || Object.keys(raw).some(key => !["receiptId", "idempotencyKey", "kind", "status", "consumed", "runId", "requestId", "code", "rootSessionId", "ownerGeneration", "requestGeneration", "requestDigest"].includes(key)) || typeof raw.idempotencyKey !== "string" || typeof raw.receiptId !== "string" || raw.rootSessionId !== root || typeof raw.runId !== "string" || !Number.isSafeInteger(raw.ownerGeneration) || (raw.requestGeneration !== undefined && !Number.isSafeInteger(raw.requestGeneration)) || (raw.requestDigest !== undefined && !DIGEST.test(raw.requestDigest))) throw new Error("receipt schema invalid");
         receipts.set(raw.idempotencyKey, raw as SupervisorDeliveryReceipt);
       }
       for (const raw of value.replyPayloads) {
-        if (typeof raw !== "string" || !raw.startsWith(`${root}:`) || !DIGEST.test(raw.slice(raw.lastIndexOf(":") + 1))) throw new Error("reply payload schema invalid");
+        if (typeof raw !== "string" || !raw.startsWith(`${root}:`) || !/:sha256:[a-f0-9]{64}$/.test(raw)) throw new Error("reply payload schema invalid");
         replyPayloads.add(raw);
       }
       loadedRoots.add(root);
@@ -116,10 +129,27 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
     const value = { ...stateBody, stateDigest: stateDigest(stateBody) };
     for (let attempt = 0; attempt < 8; attempt++) {
       const prior = await storage.read(stateKey(root));
-      try { await storage.write(stateKey(root), value, prior?.revision ?? 0); return; }
+      try { if (lockedRoots.has(root)) await storage.writeLocked(stateKey(root), value, prior?.revision ?? 0); else await storage.write(stateKey(root), value, prior?.revision ?? 0); return; }
       catch (error) { if ((error as any)?.code !== "DURABLE_REVISION_CONFLICT") throw error; }
     }
     throw new Error("SUPERVISOR_PERSISTENCE_CONFLICT");
+  }
+  // 所有公开durable操作在同一root锁内重载最新状态，禁止对陈旧snapshot只重试写。
+  async function transaction<T>(root: string, operation: () => Promise<T>): Promise<T> {
+    if (!storage) return operation();
+    let release: (() => Promise<void>) | undefined;
+    const deadline = Date.now() + 5000;
+    for (;;) {
+      try { release = await storage.acquireLock(stateKey(root)); break; }
+      catch (error) { if (error?.code !== 'DURABLE_LOCK_HELD' || Date.now() >= deadline) throw error; await new Promise(resolve => setTimeout(resolve, 10)); }
+    }
+    try {
+      for (const [key, r] of requests) if (r.rootSessionId === root) requests.delete(key);
+      for (const [key, r] of receipts) if (r.rootSessionId === root) receipts.delete(key);
+      for (const payload of replyPayloads) if (payload.startsWith(root + ':')) replyPayloads.delete(payload);
+      loadedRoots.delete(root); lockedRoots.add(root);
+      return await operation();
+    } finally { lockedRoots.delete(root); await release(); }
   }
   const blocked = (code: string, extra: Record<string, unknown> = {}) => ({ status: "blocked" as const, code, ...extra });
   // owner 读取三态：依赖缺失或抛异常一律 unavailable（无法证明非受管），
@@ -151,7 +181,7 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
     const key = `${owner.rootSessionId}:${native.runId}:${owner.ownerGeneration}:${requestId}:${requestDigest}`;
     const existing = requests.get(key); if (existing) return { status: "registered" as const, request: existing };
     const t = now();
-    const request = parseSupervisorRequestV1({ schemaVersion: "supervisor-request.v1", requestId, runId: native.runId, rootSessionId: owner.rootSessionId, ownerGeneration: owner.ownerGeneration, requestGeneration: Number.isSafeInteger(native.requestGeneration) ? native.requestGeneration : 1, requestDigest, createdAt: t, expiresAt: t + 20 * 60 * 1000, state: "pending" });
+    const request = parseSupervisorRequestV1({ ...(native.correlation ? { correlation: native.correlation } : {}), schemaVersion: "supervisor-request.v1", requestId, runId: native.runId, rootSessionId: owner.rootSessionId, ownerGeneration: owner.ownerGeneration, requestGeneration: Number.isSafeInteger(native.requestGeneration) ? native.requestGeneration : 1, requestDigest, createdAt: t, expiresAt: t + 20 * 60 * 1000, state: "pending" });
     requests.set(key, request); await saveRoot(owner.rootSessionId); return { status: "registered" as const, request };
   }
   function findPending(intent: SupervisorControlIntentV1) { return [...requests.values()].find(r => r.state === "pending" && r.runId === intent.runId && r.rootSessionId === intent.rootSessionId && r.ownerGeneration === intent.ownerGeneration && r.requestId === intent.requestId && r.requestGeneration === intent.requestGeneration); }
@@ -167,7 +197,9 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
       ? [...requests.values()].find(r => r.state === "pending" && r.runId === intent.runId && r.rootSessionId === intent.rootSessionId && r.ownerGeneration === intent.ownerGeneration)
       : findPending(intent);
     const key = intent.kind === "reply" ? `${intent.requestId}:${intent.requestGeneration}:${intent.payloadDigest}` : `${intent.runId}:${intent.ownerGeneration}:${intent.payloadDigest}:${intent.liveRunEpoch}`;
-    const prior = receipts.get(key); if (prior) return { status: "idempotent" as const, receipt: prior };
+    const prior = receipts.get(key);
+    if (prior && (prior.rootSessionId !== intent.rootSessionId || prior.runId !== intent.runId || prior.ownerGeneration !== intent.ownerGeneration)) return blocked('SUPERVISOR_RECEIPT_IDENTITY_MISMATCH');
+    if (prior) return { status: "idempotent" as const, receipt: prior };
     if (pending && intent.kind === "steer") return blocked("SUPERVISOR_REPLY_REQUIRED");
     if (!pending && intent.kind === "reply") return blocked("SUPERVISOR_REQUEST_NOT_PENDING");
     if (pending && now() >= pending.expiresAt) { pending.state = "expired"; return blocked("SUPERVISOR_REQUEST_EXPIRED"); }
@@ -184,7 +216,7 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
       if (input.consumed === true && decision.receipt.status === "queued") {
         decision.receipt.status = "delivered";
         decision.receipt.consumed = true;
-        const request = intent.kind === "reply" ? findPending(intent) : undefined;
+        const request = intent.kind === 'reply' ? [...requests.values()].find(r=>r.state!=='failed' && r.runId===intent.runId && r.rootSessionId===intent.rootSessionId && r.ownerGeneration===intent.ownerGeneration && r.requestId===intent.requestId && r.requestGeneration===intent.requestGeneration) : undefined;
         if (request) request.state = "replied";
         if (intent.kind === "reply") replyPayloads.add(`${intent.rootSessionId}:${intent.runId}:${intent.ownerGeneration}:${intent.payloadDigest}`);
         await saveRoot(intent.rootSessionId);
@@ -206,9 +238,54 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
   async function markDeliveryConsumed(intent: unknown, hostRootSessionId?: string) {
     return commitDelivery({ intent, consumed: true }, hostRootSessionId);
   }
-  return Object.freeze({ registerSupervisorRequest, resolveSupervisorControl, commitDelivery, markDeliveryConsumed,
-    ready: async (rootSessionId: string) => loadRoot(rootSessionId),
-    findRequestAsync: async (requestId: string, rootSessionId?: string) => { if (storage && typeof rootSessionId !== "string") return undefined; if (rootSessionId && !(await loadRoot(rootSessionId))) return undefined; return [...requests.values()].find(r => r.requestId === requestId && (!rootSessionId || r.rootSessionId === rootSessionId)); },
+  async function closeRootRequests(root: string) {
+    if (!(await loadRoot(root))) return blocked('SUPERVISOR_PERSISTENCE_CORRUPT');
+    for (const request of requests.values()) if (request.rootSessionId === root && ['pending','replying'].includes(request.state)) request.state = 'failed';
+    for (const receipt of receipts.values()) if (receipt.rootSessionId === root && receipt.status === 'queued') { receipt.status = 'failed'; receipt.code = 'SUPERVISOR_PARENT_CLOSED'; }
+    await saveRoot(root);
+    return { status: 'committed' as const };
+  }
+  async function expireTerminalRequests(runId: string, hostRootSessionId: string, terminalState: "expired" | "failed" = "expired") {
+    if (!(await loadRoot(hostRootSessionId))) return blocked('SUPERVISOR_PERSISTENCE_CORRUPT');
+    const identity = await readOwnerState(runId);
+    if (identity.state === 'unavailable' || (identity.state === 'owned' && identity.receipt.rootSessionId !== hostRootSessionId)) return blocked('SUPERVISOR_STALE_OWNER');
+    let expired = 0;
+    for (const request of requests.values()) {
+      if (request.runId !== runId || request.rootSessionId !== hostRootSessionId || request.state !== 'pending') continue;
+      if (identity.state === 'owned' && identity.receipt.ownerGeneration !== request.ownerGeneration) continue;
+      request.state = terminalState; expired++;
+    }
+    await saveRoot(hostRootSessionId);
+    return { status: 'committed' as const, expired };
+  }
+  async function observeReplyConsumption(observation: { runId: string; requestId: string; payloadDigest: string }, hostRootSessionId: string) {
+    if (!(await loadRoot(hostRootSessionId))) return blocked('SUPERVISOR_PERSISTENCE_CORRUPT');
+    const request = [...requests.values()].find(r => r.rootSessionId === hostRootSessionId && r.runId === observation.runId && r.requestId === observation.requestId);
+    if (!request) return blocked('SUPERVISOR_REQUEST_NOT_PENDING');
+    const key = `${request.requestId}:${request.requestGeneration}:${observation.payloadDigest}`;
+    const receipt = receipts.get(key);
+    if (!receipt || receipt.kind !== 'reply' || receipt.rootSessionId !== hostRootSessionId || receipt.runId !== request.runId || receipt.ownerGeneration !== request.ownerGeneration || receipt.requestGeneration !== request.requestGeneration || receipt.status === 'failed') return blocked('SUPERVISOR_CONSUMPTION_MISMATCH');
+    const intent = { schemaVersion: 'supervisor-control-intent.v1' as const, intentId: receipt.receiptId, rootSessionId: request.rootSessionId, runId: request.runId, ownerGeneration: request.ownerGeneration, kind: 'reply' as const, requestId: request.requestId, requestGeneration: request.requestGeneration, payloadDigest: observation.payloadDigest };
+    return markDeliveryConsumed(intent, hostRootSessionId);
+  }
+  return Object.freeze({
+    registerSupervisorRequest: async (native: any, hostRootSessionId?: string) => {
+      const identity = await readOwnerState(native?.runId);
+      const root = identity.state === 'owned' ? identity.receipt.rootSessionId : hostRootSessionId;
+      return typeof root === 'string' ? transaction(root, () => registerSupervisorRequest(native, hostRootSessionId)) : registerSupervisorRequest(native, hostRootSessionId);
+    },
+    resolveSupervisorControl: (intent: any, root?: string) => transaction(intent.rootSessionId, () => resolveSupervisorControl(intent, root)),
+    commitDelivery: (input: any, root?: string) => transaction(input.intent.rootSessionId, () => commitDelivery(input, root)),
+    markDeliveryConsumed: (intent: any, root?: string) => transaction(intent.rootSessionId, () => markDeliveryConsumed(intent, root)),
+    observeReplyConsumption: (value: any, root: string) => transaction(root, () => observeReplyConsumption(value, root)),
+    closeRootRequests: (root: string) => transaction(root, () => closeRootRequests(root)),
+    expireTerminalRequests: (runId: string, root: string, state?: 'expired' | 'failed') => transaction(root, () => expireTerminalRequests(runId, root, state)),
+    ready: async (rootSessionId: string) => transaction(rootSessionId, () => loadRoot(rootSessionId)),
+    findRequestAsync: async (requestId: string, rootSessionId?: string) => {
+      if (storage && typeof rootSessionId !== 'string') return undefined;
+      const find = async () => { if (rootSessionId && !(await loadRoot(rootSessionId))) return undefined; return [...requests.values()].find(r => r.requestId === requestId && (!rootSessionId || r.rootSessionId === rootSessionId)); };
+      return rootSessionId ? transaction(rootSessionId, find) : find();
+    },
     identityForRun: async (runId: string): Promise<SupervisorRunIdentity> => {
       const { state, receipt } = await readOwnerState(runId);
       let runtime: SupervisorRunIdentity["runtime"];

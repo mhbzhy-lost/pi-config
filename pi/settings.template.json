@@ -1,4 +1,5 @@
 {
+  "hideThinkingBlock": true,
   "packages": [
     {
       "source": "../packages/pi-subagents-enhanced"
@@ -18,5 +19,15 @@
         "disabled": false
       }
     }
-  }
+  },
+  "defaultTools": [
+    "+codemode",
+    "-tool_search"
+  ],
+  "extensions": [
+    "-builtin:tool-search",
+    "-builtin:llama.cpp",
+    "-builtin:codemode",
+    "-builtin:mcp"
+  ]
 }

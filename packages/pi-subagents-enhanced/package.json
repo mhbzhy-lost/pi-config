@@ -24,6 +24,7 @@
   },
   "exports": {
     "./dispatch-ir": "./src/contracts/dispatch-ir.ts",
+    "./host-runtime": "./src/host-runtime/index.ts",
     "./workspace": "./src/workspace/service.ts",
     "./workspace/admin": "./src/workspace/administration.ts"
   },
@@ -34,14 +35,14 @@
     "verify:package": "node scripts/verify-package.ts"
   },
   "dependencies": {
-    "pi-subagents": "0.71.0",
+    "pi-subagents": "0.75.0",
     "typescript": "5.9.3"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.87.1",
-    "@earendil-works/pi-ai": "0.87.1",
-    "@earendil-works/pi-coding-agent": "0.87.1",
-    "@earendil-works/pi-tui": "0.87.1"
+    "@earendil-works/pi-agent-core": "1.0.4",
+    "@earendil-works/pi-ai": "1.0.4",
+    "@earendil-works/pi-coding-agent": "1.0.4",
+    "@earendil-works/pi-tui": "1.0.4"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",

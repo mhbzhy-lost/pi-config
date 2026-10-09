@@ -9,11 +9,13 @@ import { promisify } from "node:util";
 const execFile = promisify(execFileCallback);
 const scriptPath = fileURLToPath(import.meta.url);
 const defaultPackageRoot = resolve(import.meta.dirname, "..");
-const UPSTREAM_VERSION = "0.71.0";
+const defaultNpmCache = resolve(defaultPackageRoot, "../..", "var/tmp/npm-cache");
+const UPSTREAM_VERSION = "0.75.0";
 const expectedExtensions = ["./extensions/subagent-runtime.ts", "./extensions/custom-footer.ts"];
 const expectedFiles = ["AGENTS.md", "README.md", "extensions", "child-extensions", "scripts", "src"];
 const expectedExports = {
   "./dispatch-ir": "./src/contracts/dispatch-ir.ts",
+    "./host-runtime": "./src/host-runtime/index.ts",
   "./workspace": "./src/workspace/service.ts",
   "./workspace/admin": "./src/workspace/administration.ts",
 };
@@ -21,7 +23,7 @@ const implementationRoots = ["extensions", "src", "child-extensions", "scripts"]
 const requiredTarballPaths = [
   "extensions/subagent-runtime.ts", "extensions/custom-footer.ts", "child-extensions/root-session-owner.ts",
   "child-extensions/acceptance-evidence.ts", "scripts/setup-runtime-deps.ts", "scripts/verify-package.ts",
-  "src/subagent-dispatch/extension.ts", "src/subagent-dispatch/root-broker-server.ts",
+  "src/compat/pi-subagents-0.75.ts", "src/subagent-dispatch/extension.ts", "src/subagent-dispatch/root-broker-server.ts",
   "src/tui/native-conversation.ts", "src/tui/session-browser.ts", "src/contracts/dispatch-ir.ts",
   "src/workspace/contract.ts", "src/workspace/ledger.ts",
   "src/workspace/git-worktree.ts", "src/workspace/service.ts", "src/workspace/registry.ts",
@@ -29,6 +31,7 @@ const requiredTarballPaths = [
   "node_modules/pi-subagents/package.json",
 ];
 const retiredTarballPaths = [
+  "src/compat/pi-subagents-0.71.ts",
   "src/subagent-dispatch/workspace.ts", "src/subagent-dispatch/workspace-controller.ts",
   "src/subagent-dispatch/workspace-ledger.ts", "src/worktree-lifecycle/inventory.ts",
   "src/worktree-lifecycle/managed-worktree.ts", "src/worktree-lifecycle/registry.ts",
@@ -100,10 +103,10 @@ async function fileMap(root: string) {
   return result;
 }
 
-async function npmPackUpstream(version: string) {
+export async function npmPackUpstream(version: string) {
   const temp = await mkdtemp(resolve(tmpdir(), "pi-subagents-registry-"));
   try {
-    const env = { ...process.env, NPM_CONFIG_REGISTRY: "https://registry.npmjs.org", npm_config_cache: process.env.npm_config_cache ?? `${process.env.HOME}/pi-config-upgrade/var/tmp/npm-cache` };
+    const env = { ...process.env, NPM_CONFIG_REGISTRY: "https://registry.npmjs.org", npm_config_cache: process.env.npm_config_cache ?? defaultNpmCache };
     const { stdout } = await execFile("npm", ["pack", `pi-subagents@${version}`, "--json", "--ignore-scripts"], { cwd: temp, env, maxBuffer: 16 * 1024 * 1024 });
     const report = JSON.parse(stdout);
     const archive = resolve(temp, report[0]?.filename);
@@ -151,8 +154,8 @@ function verifyTarball(pack: any) {
   return { fileCount: paths.length, unpackedSize: pack.unpackedSize };
 }
 
-async function npmPackDryRun(packageRoot: string) {
-  const env = { ...process.env, NPM_CONFIG_REGISTRY: "https://registry.npmjs.org", npm_config_cache: process.env.npm_config_cache ?? `${process.env.HOME}/pi-config-upgrade/var/tmp/npm-cache` };
+export async function npmPackDryRun(packageRoot: string) {
+  const env = { ...process.env, NPM_CONFIG_REGISTRY: "https://registry.npmjs.org", npm_config_cache: process.env.npm_config_cache ?? defaultNpmCache };
   const { stdout } = await execFile("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], { cwd: packageRoot, env, maxBuffer: 16 * 1024 * 1024 });
   const result = JSON.parse(stdout);
   if (!Array.isArray(result) || result.length !== 1) throw new Error("npm pack dry-run returned an unexpected report.");
@@ -162,7 +165,7 @@ async function npmPackDryRun(packageRoot: string) {
 export async function verifyEnhancedPackage({ packageRoot = defaultPackageRoot, runPack = npmPackDryRun } = {}) {
   const manifest = await json(resolve(packageRoot, "package.json"));
   if (manifest.name !== "pi-subagents-enhanced" || manifest.version !== "0.1.0") throw new Error("Enhanced package identity must be pi-subagents-enhanced@0.1.0.");
-  if (manifest.dependencies?.["pi-subagents"] !== UPSTREAM_VERSION || manifest.dependencies?.typescript !== "5.9.3" || JSON.stringify(manifest.bundleDependencies) !== JSON.stringify(["pi-subagents"]) || Object.hasOwn(manifest, "bundledDependencies")) throw new Error("Enhanced package must declare pi-subagents@0.71.0 and canonical bundleDependencies.");
+  if (manifest.dependencies?.["pi-subagents"] !== UPSTREAM_VERSION || manifest.dependencies?.typescript !== "5.9.3" || JSON.stringify(manifest.bundleDependencies) !== JSON.stringify(["pi-subagents"]) || Object.hasOwn(manifest, "bundledDependencies")) throw new Error("Enhanced package must declare pi-subagents@0.75.0 and canonical bundleDependencies.");
   if (JSON.stringify(manifest.pi?.extensions) !== JSON.stringify(expectedExtensions)) throw new Error("Enhanced package must declare exactly the runtime and footer extensions.");
   if (JSON.stringify(manifest.exports) !== JSON.stringify(expectedExports)) throw new Error("Enhanced package exports must expose only canonical prompt, dispatch, and workspace APIs.");
   if (JSON.stringify(manifest.files) !== JSON.stringify(expectedFiles)) throw new Error("Enhanced package files allowlist is incomplete or unexpected.");

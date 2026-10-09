@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { Compile } from "../packages/pi-subagents-enhanced/node_modules/pi-subagents/node_modules/typebox/build/compile/index.mjs";
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
+const { Compile } = await import(pathToFileURL(createRequire(new URL('../packages/pi-subagents-enhanced/package.json',import.meta.url)).resolve('typebox/compile')));
 import { TYPED_SUBAGENT_PARAMETERS } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
 
 // The v2 public schema is flat. Nested values are no longer part of the

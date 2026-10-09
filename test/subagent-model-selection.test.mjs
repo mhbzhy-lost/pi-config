@@ -7,16 +7,16 @@ import {
 } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/model-selection.ts";
 
 const availableModels = [
-  { provider: "codex-pool", id: "gpt-5.6-sol" },
-  { provider: "openai", id: "gpt-5.6-sol" },
-  { provider: "codex-pool", id: "gpt-5.6-luna" },
+  { provider: "codex-pool", id: "gpt-5.6-sol", api: "openai-completions" },
+  { provider: "openai", id: "gpt-5.6-sol", api: "openai-completions" },
+  { provider: "codex-pool", id: "gpt-5.6-luna", api: "openai-completions" },
 ];
 
 test("provider blacklist rejects qualified models and skips blocked agent candidates", () => {
   assert.throws(() => resolveModelSelection({
     requestedModel: "deepseek/deepseek-v4-pro",
     agentName: "delegate",
-    availableModels: [{ provider: "deepseek", id: "deepseek-v4-pro" }],
+    availableModels: [{ provider: "deepseek", id: "deepseek-v4-pro", api: "openai-completions" }],
     blockedProviders: ["deepseek"],
   }), /blocked|available/i);
   assert.deepEqual(resolveModelSelection({
@@ -24,8 +24,8 @@ test("provider blacklist rejects qualified models and skips blocked agent candid
     agentName: "delegate",
     agentModels: ["deepseek/gpt-5.6-sol", "codex-pool/gpt-5.6-sol"],
     availableModels: [
-      { provider: "deepseek", id: "gpt-5.6-sol" },
-      { provider: "codex-pool", id: "gpt-5.6-sol" },
+      { provider: "deepseek", id: "gpt-5.6-sol", api: "openai-completions" },
+      { provider: "codex-pool", id: "gpt-5.6-sol", api: "openai-completions" },
     ],
     blockedProviders: ["deepseek"],
   }).model, "codex-pool/gpt-5.6-sol");
@@ -56,6 +56,7 @@ test("accepts only an exact qualified model from the available catalog", () => {
   assert.deepEqual(selection({ requestedModel: " codex-pool/gpt-5.6-sol " }), {
     model: "codex-pool/gpt-5.6-sol",
     source: "qualified",
+    resolvedApi: "openai-completions",
   });
 
   expectModelSelectionFailure(() => selection({ requestedModel: "other-pool/gpt-5.6-sol" }));
@@ -67,12 +68,13 @@ test("uses the first currently available declared agent candidate for a bare mod
     requestedModel: "gpt-5.6-luna",
     agentModels: ["codex-pool/gpt-5.6-luna", "openai-codex/gpt-5.6-luna", "alpha/gpt-5.6-luna"],
     availableModels: [
-      { provider: "alpha", id: "gpt-5.6-luna" },
-      { provider: "openai-codex", id: "gpt-5.6-luna" },
+      { provider: "alpha", id: "gpt-5.6-luna", api: "openai-completions" },
+      { provider: "openai-codex", id: "gpt-5.6-luna", api: "openai-completions" },
     ],
   }), {
     model: "openai-codex/gpt-5.6-luna",
     source: "agent-candidates",
+    resolvedApi: "openai-completions",
   });
 });
 
@@ -81,7 +83,7 @@ test("fails a bare candidate miss without selecting outside the agent candidates
     requestedModel: "gpt-5.6-sol",
     agentName: "delegate",
     agentModels: ["codex-pool/gpt-5.6-luna"],
-    availableModels: [{ provider: "openai-codex", id: "gpt-5.6-sol" }],
+    availableModels: [{ provider: "openai-codex", id: "gpt-5.6-sol", api: "openai-completions" }],
   }));
 });
 
@@ -90,12 +92,13 @@ test("resolves bare IDs from a canonically sorted global catalog and warns", () 
     requestedModel: "gpt-5.6-sol",
     agentName: "delegate",
     availableModels: [
-      { provider: "openai", id: "gpt-5.6-sol" },
-      { provider: "codex-pool", id: "gpt-5.6-sol" },
+      { provider: "openai", id: "gpt-5.6-sol", api: "openai-completions" },
+      { provider: "codex-pool", id: "gpt-5.6-sol", api: "openai-completions" },
     ],
   }), {
     model: "codex-pool/gpt-5.6-sol",
     source: "global-catalog",
+    resolvedApi: "openai-completions",
     warnings: [{
       code: "MODEL_MATCH_USED_GLOBAL_CATALOG",
       agent: "delegate",

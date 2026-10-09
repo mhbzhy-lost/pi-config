@@ -18,6 +18,10 @@ export interface BrowserChild {
   model?: string;
   thinking?: string;
   tokens?: number;
+  runMode?: "single" | "workflow";
+  facadeLeafRunId?: string;
+  parentWorkflowRunId?: string;
+  workflowKey?: string;
 }
 
 export interface BrowserSnapshot {
@@ -119,6 +123,10 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+function runModeValue(value: unknown): BrowserChild["runMode"] {
+  return value === "single" || value === "workflow" ? value : undefined;
+}
+
 function numberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
@@ -169,10 +177,12 @@ export class SubagentSessionBrowserState {
       const presentation = persistedPresentation && PRESENTATION_STATUSES.has(persistedPresentation as SubagentPresentationStatus)
         ? persistedPresentation as SubagentPresentationStatus : undefined;
       const child: BrowserChild = { key, runId, index, agent, state: stringValue(candidate.state) ?? "unknown", asyncDir, cwd, ...(presentation ? { presentation } : {}) };
-      for (const field of ["sessionId", "sessionFile", "label", "transcriptPath", "model", "thinking"] as const) {
+      for (const field of ["sessionId", "sessionFile", "label", "transcriptPath", "model", "thinking", "facadeLeafRunId", "parentWorkflowRunId", "workflowKey"] as const) {
         const fieldValue = stringValue(candidate[field]);
         if (fieldValue) child[field] = fieldValue;
       }
+      const mode = runModeValue(candidate.runMode);
+      if (mode) child.runMode = mode;
       const tokens = numberValue(candidate.tokens);
       if (tokens !== undefined) child.tokens = tokens;
       const sessionId = stringValue(candidate.sessionId);
@@ -190,7 +200,7 @@ export class SubagentSessionBrowserState {
   }
 
   serialize(): BrowserRosterPersistence {
-    return { version: 1, children: this.children().map((child) => ({ ...child })) };
+    return { version: 1, children: this.rawChildren().map((child) => ({ ...child })) };
   }
 
   trackStarted(event: unknown): void {
@@ -208,6 +218,9 @@ export class SubagentSessionBrowserState {
 
     const sessionId = stringValue(event.sessionId);
     const title = stringValue(event.title);
+    const runMode = runModeValue(event.mode);
+    const parentWorkflowRunId = stringValue(event.parentWorkflowRunId);
+    const workflowKey = stringValue(event.workflowKey);
     const existingRun = this.runs.get(id);
     if (existingRun) {
       if (!existingRun.sessionId && sessionId) existingRun.sessionId = sessionId;
@@ -223,11 +236,14 @@ export class SubagentSessionBrowserState {
       cwd,
       ...(sessionId ? { sessionId } : {}),
       ...(title ? { label: title } : {}),
+      ...(runMode ? { runMode } : {}),
+      ...(parentWorkflowRunId ? { parentWorkflowRunId } : {}),
+      ...(workflowKey ? { workflowKey } : {}),
     }));
 
     this.runs.set(id, { id, asyncDir, cwd, ...(sessionId ? { sessionId } : {}), children });
-    this.trimRuns();
     this.ensureSelection();
+    this.trimRuns();
   }
 
   reconcileRun(runId: string, status: unknown): void {
@@ -235,6 +251,9 @@ export class SubagentSessionBrowserState {
     if (!run || !isRecord(status) || !Array.isArray(status.steps)) return;
 
     const runState = stringValue(status.state);
+    const runMode = runModeValue(status.mode) ?? run.children[0]?.runMode;
+    const parentWorkflowRunId = stringValue(status.parentWorkflowRunId) ?? run.children[0]?.parentWorkflowRunId;
+    const workflowKey = stringValue(status.workflowKey) ?? run.children[0]?.workflowKey;
     if (status.steps.length === 0 && classifyState(runState) === "active") {
       this.ensureSelection();
       return;
@@ -261,6 +280,9 @@ export class SubagentSessionBrowserState {
         cwd: run.cwd,
         ...(run.sessionId ? { sessionId: run.sessionId } : {}),
         ...(existing?.presentation ? { presentation: existing.presentation } : {}),
+        ...(runMode ? { runMode } : {}),
+        ...(parentWorkflowRunId ? { parentWorkflowRunId } : {}),
+        ...(runMode === "single" && workflowKey ? { workflowKey } : {}),
       };
       const label = stringValue(step.label) ?? stringValue(step.title) ?? existing?.label;
       const sessionFile = stringValue(step.sessionFile);
@@ -275,6 +297,12 @@ export class SubagentSessionBrowserState {
           if (thinking === undefined) thinking = stringValue(leafStep.thinking);
           if (tokens === undefined && isRecord(leafStep.tokens)) tokens = numberValue(leafStep.tokens.total);
         }
+      }
+      if (runMode === "workflow") {
+        const leafRunId = stringValue(step.runId);
+        const stepKey = stringValue(step.workflowKey);
+        if (leafRunId) child.facadeLeafRunId = leafRunId;
+        if (stepKey) child.workflowKey = stepKey;
       }
       if (label) child.label = label;
       if (sessionFile) child.sessionFile = sessionFile;
@@ -323,6 +351,7 @@ export class SubagentSessionBrowserState {
   exit(): void {
     this.active = false;
     this.selectedKey = undefined;
+    this.trimRuns();
   }
 
   move(delta: -1 | 1): void {
@@ -334,6 +363,7 @@ export class SubagentSessionBrowserState {
       return;
     }
     this.selectedKey = children[(index + delta + children.length) % children.length].key;
+    this.trimRuns();
   }
 
   snapshot(): BrowserSnapshot {
@@ -356,21 +386,46 @@ export class SubagentSessionBrowserState {
     if (!options?.preserveRuns) this.runs.clear();
   }
 
+  trackedRuns(): ReadonlyArray<{ id: string; asyncDir: string }> {
+    return [...this.runs.values()].map(({ id, asyncDir }) => ({ id, asyncDir }));
+  }
+
+  private rawChildren(): BrowserChild[] {
+    const runs = [...this.runs.values()];
+    return [
+      ...runs.filter((run) => !this.isTerminalRun(run)).flatMap((run) => run.children),
+      ...runs.filter((run) => this.isTerminalRun(run)).reverse().flatMap((run) => run.children),
+    ];
+  }
+
+  // 只以完整双向身份确认显示关系；标题、正文和 sessionFile 不参与判断。
+  private confirmedFacades(): Map<string, BrowserChild> {
+    const confirmed = new Map<string, BrowserChild>();
+    for (const root of this.runs.values()) {
+      for (const facade of root.children) {
+        if (facade.runMode !== "workflow" || !facade.facadeLeafRunId || !facade.workflowKey || !facade.sessionId) continue;
+        const leafRun = this.runs.get(facade.facadeLeafRunId);
+        if (!leafRun || leafRun.id === root.id || leafRun.children.length !== 1) continue;
+        const leaf = leafRun.children[0];
+        if (leaf.runMode === "single" && leaf.parentWorkflowRunId === root.id
+          && leaf.workflowKey === facade.workflowKey && leaf.sessionId === facade.sessionId
+          && leaf.agent === facade.agent) confirmed.set(facade.key, leaf);
+      }
+    }
+    return confirmed;
+  }
+
   private children(): BrowserChild[] {
-    return [...this.activeChildren(), ...this.recentChildren()];
+    const confirmed = this.confirmedFacades();
+    return this.rawChildren().filter((child) => !confirmed.has(child.key));
   }
 
   private activeChildren(): BrowserChild[] {
-    return [...this.runs.values()]
-      .filter((run) => !this.isTerminalRun(run))
-      .flatMap((run) => run.children);
+    return this.children().filter((child) => !this.isTerminalRun(this.runs.get(child.runId)!));
   }
 
   private recentChildren(): BrowserChild[] {
-    return [...this.runs.values()]
-      .filter((run) => this.isTerminalRun(run))
-      .reverse()
-      .flatMap((run) => run.children);
+    return this.children().filter((child) => this.isTerminalRun(this.runs.get(child.runId)!));
   }
 
   private isTerminalRun(run: BrowserRun): boolean {
@@ -379,21 +434,42 @@ export class SubagentSessionBrowserState {
 
   private ensureSelection(): void {
     if (!this.active) return;
+    const leaf = this.selectedKey ? this.confirmedFacades().get(this.selectedKey) : undefined;
+    if (leaf) this.selectedKey = leaf.key;
     if (!this.selectedKey || !this.children().some((child) => child.key === this.selectedKey)) this.exit();
   }
 
   private trimRuns(): void {
-    while (this.terminalRunCount() > RECENT_RUN_LIMIT) {
-      const selectedRunId = this.children().find((child) => child.key === this.selectedKey)?.runId;
-      const oldest = [...this.runs.values()].find(
-        (run) => run.id !== selectedRunId && this.isTerminalRun(run),
-      );
-      if (!oldest) return;
-      this.runs.delete(oldest.id);
+    // 确认过的 root/leaf 共用一个临时无向组件，不保留关系墓碑。
+    const edges = new Map([...this.runs.keys()].map((id) => [id, new Set<string>()]));
+    const confirmed = this.confirmedFacades();
+    for (const root of this.runs.values()) {
+      for (const facade of root.children) {
+        const leaf = confirmed.get(facade.key);
+        if (!leaf) continue;
+        edges.get(root.id)!.add(leaf.runId);
+        edges.get(leaf.runId)!.add(root.id);
+      }
     }
-  }
-
-  private terminalRunCount(): number {
-    return [...this.runs.values()].filter((run) => this.isTerminalRun(run)).length;
+    const selectedRunId = this.children().find((child) => child.key === this.selectedKey)?.runId;
+    const visited = new Set<string>();
+    let terminalCount = [...this.runs.values()].filter((run) => this.isTerminalRun(run)).length;
+    // Map 的插入顺序即最老成员顺序；整组淘汰允许预算少于20。
+    for (const run of this.runs.values()) {
+      if (terminalCount <= RECENT_RUN_LIMIT) break;
+      if (visited.has(run.id)) continue;
+      const component: BrowserRun[] = [];
+      const pending = [run.id];
+      while (pending.length) {
+        const id = pending.pop()!;
+        if (visited.has(id)) continue;
+        visited.add(id);
+        component.push(this.runs.get(id)!);
+        pending.push(...edges.get(id)!);
+      }
+      if (component.some((member) => member.id === selectedRunId || !this.isTerminalRun(member))) continue;
+      for (const member of component) this.runs.delete(member.id);
+      terminalCount -= component.length;
+    }
   }
 }

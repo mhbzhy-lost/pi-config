@@ -204,3 +204,30 @@ test("keeps PID and owner token across a real zsh to Node exec", { skip: process
   });
   assert.match(output, new RegExp(`^${child.pid} ${ownerId}$`));
 });
+
+// 捕获把opened owner/type失败误当成可重试inode竞争，从而在异常消失后继续抢锁。
+test('guard打开后owner失败立即拒绝，不能等异常消失后重试抢锁', async t => {
+  const { unlinkSync } = await import('node:fs');
+  const root=await temporaryStore();t.after(()=>rm(root,{recursive:true,force:true}));
+  const guard=join(root,'.guard');await writeFile(guard,JSON.stringify({protocol:'pi-session-owner.guard.v1',pid:process.pid,token:'owner-check'}),{mode:0o600});
+  let checks=0;
+  const storeWithOwner={...store(root),ownershipUid(path,uid){
+    if(path===guard&&++checks===2){unlinkSync(guard);return uid+1;}
+    return uid;
+  }};
+  await assert.rejects(api.listLiveRecords(storeWithOwner),error=>error.code==='REGISTRY_UNAVAILABLE');
+  assert.equal(checks,2,'opened owner失败不得再次竞争guard');
+});
+
+// 使用现有ownership校验接点，在真实lstat与open之间复现合法owner原子发布新inode。
+test('guard合法inode替换后重读，不放宽文件owner检查', async t => {
+  const { unlinkSync, writeFileSync } = await import('node:fs');
+  const root=await temporaryStore();t.after(()=>rm(root,{recursive:true,force:true}));
+  const guard=join(root,'.guard');const content=JSON.stringify({protocol:'pi-session-owner.guard.v1',pid:process.pid,token:'inode-check'});
+  await writeFile(guard,content,{mode:0o600});let checks=0;
+  const observed={...store(root),ownershipUid(path,uid){
+    if(path===guard){checks++;if(checks===1){unlinkSync(guard);writeFileSync(guard,content,{mode:0o600});}else if(checks===3){unlinkSync(guard);}}
+    return uid;
+  }};
+  assert.deepEqual(await api.listLiveRecords(observed),[]);
+});

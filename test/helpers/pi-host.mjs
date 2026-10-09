@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { resolvePiCodingAgentRoot } from "./pi-runtime.mjs";
 
@@ -113,7 +114,7 @@ export function resolvePiHostPaths(options = {}) {
   ));
   return {
     piHostRoot,
-    piHostJitiUrl: pathToFileURL(join(piHostRoot, "node_modules/jiti/lib/jiti.mjs")).href,
+    piHostJitiUrl: pathToFileURL(createRequire(pathToFileURL(join(piHostRoot, "package.json"))).resolve("jiti").replace(/jiti\.cjs$/, "jiti.mjs")).href,
     piHostModuleUrl: pathToFileURL(piHostAliases["@earendil-works/pi-coding-agent"]).href,
     piHostAliases,
   };

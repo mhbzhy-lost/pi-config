@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { realpathSync } from "node:fs";
 import test from "node:test";
+import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -32,11 +33,11 @@ test("Pi host paths derive every alias from the explicit candidate root", () => 
     readGlobalNodeModules: () => "/global/node_modules",
   });
   assert.equal(paths.piHostRoot, explicitCandidateRoot);
-  assert.ok(paths.piHostAliases["@earendil-works/pi-coding-agent"].startsWith(explicitCandidateRealRoot));
-  assert.ok(paths.piHostAliases["@earendil-works/pi-tui"].startsWith(explicitCandidateRealRoot));
-  assert.ok(paths.piHostAliases["@earendil-works/pi-ai/compat"].startsWith(explicitCandidateRealRoot));
+  assert.ok(paths.piHostAliases["@earendil-works/pi-coding-agent"].startsWith(realpathSync(resolve(explicitCandidateRealRoot,".."))));
+  assert.ok(paths.piHostAliases["@earendil-works/pi-tui"].startsWith(realpathSync(resolve(explicitCandidateRealRoot,".."))));
+  assert.ok(paths.piHostAliases["@earendil-works/pi-ai/compat"].startsWith(realpathSync(resolve(explicitCandidateRealRoot,".."))));
   assert.equal(paths.piHostModuleUrl, pathToFileURL(paths.piHostAliases["@earendil-works/pi-coding-agent"]).href);
-  assert.equal(paths.piHostJitiUrl, pathToFileURL(`${explicitCandidateRoot}/node_modules/jiti/lib/jiti.mjs`).href);
+  assert.equal(paths.piHostJitiUrl, pathToFileURL(createRequire(`${explicitCandidateRoot}/package.json`).resolve("jiti").replace(/jiti\.cjs$/,"jiti.mjs")).href);
 });
 
 test("runtime loader exposes the resolved public package entries of one candidate instance", async () => {
@@ -52,7 +53,7 @@ test("runtime loader exposes the resolved public package entries of one candidat
   assert.equal(runtime.paths.piAgentCore, hostPaths.piHostAliases["@earendil-works/pi-agent-core"]);
   assert.equal(runtime.paths.jiti, hostPaths.piHostJitiUrl);
   for (const path of [runtime.paths.piTui, runtime.paths.piAi, runtime.paths.piAiCompat, runtime.paths.piAgentCore]) {
-    assert.ok(path.startsWith(explicitCandidateRealRoot), `${path} must resolve inside the candidate root`);
+    assert.ok(path.startsWith(realpathSync(resolve(explicitCandidateRealRoot,".."))), `${path} must resolve inside the candidate root`);
   }
 });
 

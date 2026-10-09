@@ -38,6 +38,7 @@ __pycache__/
 # Pi runtime (subagent artifacts)
 /.pi-subagents/
 /.pi/subagents/
+/pi/pi-subagents/last-seen-version.json
 /src/session-owner/.pi/
 /.state/goal-engine/
 /.state/worktree-lifecycle/

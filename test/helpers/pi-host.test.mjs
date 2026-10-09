@@ -48,6 +48,8 @@ async function createPiHostFixture({ piAiCompatEntry = "./dist/compat.js" } = {}
   });
   await writeFixtureFile(parent, join("candidate", "dist", "index.js"));
   await writeFixtureFile(parent, join("candidate", "node_modules", "jiti", "lib", "jiti.mjs"));
+  await writeFixtureManifest(parent, join("candidate","node_modules","jiti"),{name:'jiti',main:'lib/jiti.cjs'});
+  await writeFixtureFile(parent,join("candidate","node_modules","jiti","lib","jiti.cjs"));
   await writeFixtureManifest(parent, join("candidate", "node_modules", "@earendil-works", "pi-ai"), {
     name: "@earendil-works/pi-ai",
     version: "0.85.1",

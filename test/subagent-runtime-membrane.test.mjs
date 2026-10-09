@@ -200,7 +200,7 @@ test("v2 routing selects coding by writePaths and rejects legacy version inputs"
   assert.equal(result.isError, false, result.content?.[0]?.text);
   const spawnCall = rpc.calls.find((call) => call.method === "spawn");
   assert.ok(spawnCall, "spawn was not called");
-  const leafAgent = JSON.parse(spawnCall.params.workflowScript.match(/runs\.run\([^,]+, (.*)\);$/s)[1]).agent;
+  const leafAgent = JSON.parse(spawnCall.params.script.match(/runs\.run\([^,]+, (.*)\);$/s)[1]).agent;
   assert.equal(leafAgent, "executor");
   const deprecated = await execute(pi.tools[0], { ...codingContract(), version: "dispatch-ir.v1" });
   assert.equal(deprecated.isError, true);
@@ -324,7 +324,7 @@ function createRpc(overrides = {}) {
 
 test("production runtime wires no compat completion notifier; upstream native notify owns delivery", async () => {
   const entry = await readFile(join(enhancedPackageRoot, "extensions", "subagent-runtime.ts"), "utf8");
-  const compat = await readFile(join(enhancedPackageRoot, "src", "compat", "pi-subagents-0.71.ts"), "utf8");
+  const compat = await readFile(join(enhancedPackageRoot, "src", "compat", "pi-subagents-0.75.ts"), "utf8");
   // 用户决策：删除增强层 completion notifier 包装（asyncComplete→sendMessage 转发链），
   // 完成投递+ack 完全依赖上游 pi-subagents@0.71 原生 notify 语义。
   for (const wrapper of ["createCompletionNotifier", "subscribeAsyncComplete", "completionNotifierFactory", "initializeCompletionNotifierState"]) {
@@ -1213,10 +1213,10 @@ test("compiles a coding contract into one workflow root and returns its correlat
   assert.equal(Object.hasOwn(spawn.params, "timeoutMs"), false);
   assert.equal(Object.hasOwn(spawn.params.child ?? {}, "timeoutMs"), false);
 
-  assert.match(spawn.params.workflowScript, /runs\.run\("typed-dispatch-1"/);
-  assert.match(spawn.params.workflowScript, /# Dispatch Contract/);
-  assert.match(spawn.params.workflowScript, /"level":"checked"/);
-  assert.doesNotMatch(spawn.params.workflowScript, /"verify"/);
+  assert.match(spawn.params.script, /runs\.run\("typed-dispatch-1"/);
+  assert.match(spawn.params.script, /# Dispatch Contract/);
+  assert.match(spawn.params.script, /"level":"checked"/);
+  assert.doesNotMatch(spawn.params.script, /"verify"/);
   assert.doesNotMatch(result.content[0].text, /Authoritative Known Facts/);
   assert.equal(
     result.content[0].text,
@@ -1294,7 +1294,7 @@ test("generic dispatch compiles a non-coding agent prompt into the unified dispa
   }
   // The raw task (with surrounding whitespace) must not appear verbatim in the top-level spawn params
   assert.equal(Object.hasOwn(spawn.params, "task"), false, "task must not be a top-level spawn param");
-  const workflowRun = spawn.params.workflowScript.match(/^return await runs\.run\("typed-generic-1", (.+)\);$/);
+  const workflowRun = spawn.params.script.match(/^return await runs\.run\("typed-generic-1", (.+)\);$/);
   assert.ok(workflowRun, "workflow script must contain a serialized child leaf");
   const leaf = JSON.parse(workflowRun[1]);
   // v2: generic task is now compiled through the unified renderDispatchPrompt
@@ -1619,7 +1619,7 @@ test("standalone managed coding registers minimal Host authority before binding 
   const rpc = createRpc({
     async spawn(params) {
       this.calls.push({ method: "spawn", params });
-      const [workflowKey, leaf] = JSON.parse(`[${params.workflowScript.match(/^return await runs\.run\((.*)\);$/s)[1]}]`);
+      const [workflowKey, leaf] = JSON.parse(`[${params.script.match(/^return await runs\.run\((.*)\);$/s)[1]}]`);
       queueMicrotask(() => pi.events.emit("subagent:async-started", {
         parentWorkflowRunId: "workflow-managed", workflowKey, runId: "leaf-managed", asyncDir: "/tmp/leaf-managed",
         sessionId: "session-1", pid: 4242, agent: leaf.agent,
@@ -1662,7 +1662,7 @@ test("standalone grant failure rejects dispatch, preserves the allocated workspa
   const rpc = createRpc({
     async spawn(params) {
       this.calls.push({ method: "spawn", params });
-      const [workflowKey, leaf] = JSON.parse(`[${params.workflowScript.match(/^return await runs\.run\((.*)\);$/s)[1]}]`);
+      const [workflowKey, leaf] = JSON.parse(`[${params.script.match(/^return await runs\.run\((.*)\);$/s)[1]}]`);
       queueMicrotask(() => pi.events.emit("subagent:async-started", {
         parentWorkflowRunId: "workflow-denied", workflowKey, runId: "leaf-denied", asyncDir: "/tmp/leaf-denied",
         sessionId: "session-1", pid: 4343, agent: leaf.agent,

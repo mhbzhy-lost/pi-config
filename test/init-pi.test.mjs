@@ -60,6 +60,7 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     await mkdir(join(home, ".local", "share", "opencode"), { recursive: true });
     await mkdir(fakeBin, { recursive: true });
     await copyFile(join(repoRoot, "init-pi.sh"), join(fixtureRepo, "init-pi.sh"));
+    await copyFile(join(repoRoot,"scripts/assert-session-tool-policy.ts"),join(fixtureRepo,"scripts/assert-session-tool-policy.ts"));
     await copyFile(join(repoRoot, "scripts", "pi-shell.zsh"), join(fixtureRepo, "scripts", "pi-shell.zsh"));
     await copyFile(join(repoRoot, "scripts", "pi-launcher.zsh"), join(fixtureRepo, "scripts", "pi-launcher.zsh"));
     await copyFile(join(repoRoot, "scripts", "ensure-pi-settings.ts"), join(fixtureRepo, "scripts", "ensure-pi-settings.ts"));
@@ -75,7 +76,7 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     const fakeNpm = join(fakeBin, "npm");
     await writeFile(
       fakeNpm,
-      "#!/usr/bin/env bash\nprintf 'npm registry=%s %s markers=%s,%s,%s,%s\\n' \"${NPM_CONFIG_REGISTRY:-}\" \"$*\" \"${PI_SUBAGENT_CHILD:-}\" \"${PI_SUBAGENT_FANOUT_CHILD:-}\" \"${PI_SUBAGENT_PARENT_SESSION:-}\" \"${PI_ROOT_SUBAGENT_BROKER_ENABLED:-}\" >> \"$COMMAND_LOG\"\nif [[ \"$*\" == *\"run setup:subagents-enhanced\"* ]]; then mkdir -p \"$FIXTURE_REPO/packages/pi-subagents-enhanced/node_modules/pi-subagents\"; printf '{\\\"version\\\":\\\"0.71.0\\\"}' > \"$FIXTURE_REPO/packages/pi-subagents-enhanced/node_modules/pi-subagents/package.json\"; fi\n",
+      "#!/usr/bin/env bash\nprintf 'npm registry=%s %s markers=%s,%s,%s,%s\\n' \"${NPM_CONFIG_REGISTRY:-}\" \"$*\" \"${PI_SUBAGENT_CHILD:-}\" \"${PI_SUBAGENT_FANOUT_CHILD:-}\" \"${PI_SUBAGENT_PARENT_SESSION:-}\" \"${PI_ROOT_SUBAGENT_BROKER_ENABLED:-}\" >> \"$COMMAND_LOG\"\nif [[ \"$*\" == *\"run setup:subagents-enhanced\"* ]]; then mkdir -p \"$FIXTURE_REPO/packages/pi-subagents-enhanced/node_modules/pi-subagents\"; printf '{\\\"version\\\":\\\"0.75.0\\\"}' > \"$FIXTURE_REPO/packages/pi-subagents-enhanced/node_modules/pi-subagents/package.json\"; fi\n",
     );
     await chmod(fakeNpm, 0o755);
     for (const [command, executable] of [["chmod", "/bin/chmod"], ["mkdir", "/bin/mkdir"], ["dirname", "/usr/bin/dirname"]]) {
@@ -135,7 +136,8 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
 
     const commands = await readFile(commandLog, "utf8");
     assert.doesNotMatch(commands, /submodule/);
-    assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org --no-audit --no-fund install -g --ignore-scripts @earendil-works\/pi-coding-agent@0\.87\.1/);
+    assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org --no-audit --no-fund --prefix .* ci --ignore-scripts/);
+    assert.doesNotMatch(commands, /install -g/);
 
     assert.doesNotMatch(commands, /pi-real registry=.*install npm:pi-subagents/);
     assert.match(commands, /node check-subagent-upgrade/);

@@ -13,9 +13,8 @@ import { createRegistryStore, listLiveRecords, prepareLaunch } from "../src/sess
 import { installSessionOwnerExtension } from "../src/session-owner/extension.ts";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const npmRoot = spawnSync("npm", ["root", "-g"], { encoding: "utf8" });
-assert.equal(npmRoot.status, 0, npmRoot.stderr);
-const host = await import(join(npmRoot.stdout.trim(), "@earendil-works", "pi-coding-agent", "dist", "index.js"));
+import { loadPiTestRuntime } from './helpers/pi-runtime.mjs';
+const { codingAgent: host } = await loadPiTestRuntime(import.meta.url);
 
 async function reserve(store, ownerId, reservation = { kind: "new" }) {
   const result = await prepareLaunch({
@@ -60,7 +59,7 @@ async function createRealRuntime(root, ownerId, { failReplacement = false, cance
 
 const launcher = join(repoRoot, "scripts", "pi-launcher.zsh");
 const provider = join(repoRoot, "test", "fixtures", "deterministic-provider.mjs");
-const repoLocalPi = join(repoRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "bundle", "cli.js");
+const repoLocalPi = join(repoRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
 const piArgs = ["--offline", "--provider", "fake", "--model", "fake/deterministic", "-e", provider, "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files"];
 
 async function ptyFixture(t) {
@@ -78,7 +77,7 @@ async function ptyFixture(t) {
     PATH: process.env.PATH ?? "", HOME: join(root, "home"), PI_CODING_AGENT_DIR: fixture.agentDir,
     PI_CODING_AGENT_SESSION_DIR: fixture.sessionDir, PI_SESSION_OWNER_REGISTRY: store.root,
     PI_CODING_WORKSPACE_DIR: fixture.workspaceDir, PI_CODING_GOAL_DIR: fixture.goalDir,
-    TMPDIR: join(root, "tmp"), PI_REAL_BIN: piBinary, T8_PI_VERSION: piVersion.stdout.trim(), LAUNCHER: launcher,
+    PI_HOST_NODE: process.execPath, PI_HOST_ROOT: process.env.PI_TEST_CODING_AGENT_ROOT, PI_PACKAGE_DIR: process.env.PI_TEST_CODING_AGENT_ROOT, PI_SKIP_VERSION_CHECK:"1", PI_TELEMETRY:"0", TMPDIR: join(root, "tmp"), PI_REAL_BIN: piBinary, T8_PI_VERSION: piVersion.stdout.trim(), LAUNCHER: launcher,
     PROVIDER: provider, TERM: "xterm-256color",
   } };
 }
@@ -388,7 +387,7 @@ expect {
         PATH: process.env.PATH ?? "",
         HOME: join(root, "home"), PI_CODING_AGENT_DIR: join(root, "agent"),
         PI_CODING_AGENT_SESSION_DIR: join(root, "sessions"), PI_SESSION_OWNER_REGISTRY: store.root,
-        TMPDIR: join(root, "tmp"), PI_REAL_BIN: process.env.T8_PI_REAL_BIN ?? repoLocalPi,
+        PI_HOST_NODE: process.execPath, PI_HOST_ROOT: process.env.PI_TEST_CODING_AGENT_ROOT, PI_PACKAGE_DIR: process.env.PI_TEST_CODING_AGENT_ROOT, PI_SKIP_VERSION_CHECK:"1", PI_TELEMETRY:"0", TMPDIR: join(root, "tmp"), PI_REAL_BIN: process.env.T8_PI_REAL_BIN ?? repoLocalPi,
         LAUNCHER: join(repoRoot, "scripts", "pi-launcher.zsh"),
         PROVIDER: join(repoRoot, "test", "fixtures", "deterministic-provider.mjs"), TERM: "xterm-256color",
       },

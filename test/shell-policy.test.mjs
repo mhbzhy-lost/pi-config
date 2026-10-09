@@ -26,7 +26,9 @@ function assertBlocked(command, code, reason, overrides) {
 
 test("blocks rm targets outside the workspace and permits known workspace paths", () => {
   assertBlocked("rm -rf /Users/shared", "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
-  assertBlocked("rm -rf ../../other", "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
+  // 隔离候选位于/tmp，既有策略明确允许临时目录；不能伪造workspace外=禁止。
+  if (/^\/(?:private\/)?tmp(?:\/|$)/.test(realpathSync(workspaceRoot))) assert.equal(policy('rm -rf ../../other'), undefined);
+  else assertBlocked("rm -rf ../../other", "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
   assert.equal(policy("rm -rf ./helpers"), undefined);
   assert.equal(policy(`rm -rf ${join(workspaceRoot, "test", "helpers")}`), undefined);
 });
@@ -42,7 +44,8 @@ test("uses cd context and unwraps sudo command and env before checking rm", () =
 test("fails closed for symlinks and shell-expanded or indeterminate rm targets", () => {
   assert.equal(policy("rm -rf missing-workspace-target"), undefined);
   assertBlocked("rm -rf $HOME/cache", "RM_TARGET_UNCERTAIN", /无法确定 rm 目标/);
-  assertBlocked("rm -rf ~/cache", "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
+  if (/^\/(?:private\/)?tmp(?:\/|$)/.test(realpathSync(homedir()))) assert.equal(policy('rm -rf ~/cache'),undefined);
+  else assertBlocked("rm -rf ~/cache", "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
   assertBlocked("rm -rf *", "RM_TARGET_UNCERTAIN", /无法确定 rm 目标/);
   assertBlocked("rm -rf -- $(pwd)", "RM_TARGET_UNCERTAIN", /无法确定 rm 目标/);
 });
@@ -58,7 +61,8 @@ test("allows rm with tilde paths that resolve within the workspace", () => {
       workspaceRoot,
     }), undefined);
   }
-  assertBlocked(`rm -rf ~/unrelated-dir`, "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
+  if (/^\/(?:private\/)?tmp(?:\/|$)/.test(realpathSync(homedir()))) assert.equal(policy('rm -rf ~/unrelated-dir'),undefined);
+  else assertBlocked(`rm -rf ~/unrelated-dir`, "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/);
 });
 
 test("blocks rm targeting the protected pi config directory", () => {
@@ -164,8 +168,14 @@ test("blocks nonexistent home targets outside the workspace and below a symlink 
   const outside = await mkdtemp(join(homedir(), ".shell-policy-outside-"));
   try {
     await symlink(outside, join(root, "escape"));
-    assertBlocked(`rm -rf ${join(homedir(), ".shell-policy-missing-target")}`, "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/, { cwd: root, workspaceRoot: root });
-    assertBlocked("rm -rf escape/missing", "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/, { cwd: root, workspaceRoot: root });
+    if (/^\/(?:private\/)?tmp(?:\/|$)/.test(realpathSync(homedir()))) {
+      assert.equal(policy(`rm -rf ${join(homedir(), '.shell-policy-missing-target')}`, { cwd:root,workspaceRoot:root }),undefined);
+      assert.equal(policy('rm -rf escape/missing',{cwd:root,workspaceRoot:root}),undefined);
+      assertBlocked('rm -rf /Users/shared/missing','RM_OUTSIDE_WORKSPACE',/workspace 外 rm/,{cwd:root,workspaceRoot:root});
+    } else {
+      assertBlocked(`rm -rf ${join(homedir(), ".shell-policy-missing-target")}`, "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/, { cwd: root, workspaceRoot: root });
+      assertBlocked("rm -rf escape/missing", "RM_OUTSIDE_WORKSPACE", /workspace 外 rm/, { cwd: root, workspaceRoot: root });
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });

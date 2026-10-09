@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { MarkdownTheme } from "@earendil-works/pi-tui";
+import { parseFrontmatter as hostParseFrontmatter } from "@earendil-works/pi-coding-agent";
 import upstreamSubagentRuntime from "pi-subagents";
 import { registerAgentViaEvents as registerPublicAgentViaEvents } from "pi-subagents/agents";
 import type { RuntimeAgentDefinition, RuntimeAgentRegistration } from "pi-subagents/agents";
@@ -43,33 +44,78 @@ export function registerAgentViaEvents(input: {
 }
 export type { RuntimeAgentDefinition, RuntimeAgentRegistration };
 
-type BuiltinAdmissionAgent = {
+export type BuiltinAdmissionAgent = {
   name: string;
   description: string;
   systemPrompt: string;
   models?: string[];
   model?: string;
   thinking?: string | false;
+  tools?: string[];
+  /** Host 公开 parser 保留的完整原始 frontmatter 解析对象（不含 YAML body/systemPrompt 正文）；仅供 tool list 元数据展示，dispatch 校验仍只认上方已识别字段。 */
+  metadata: Record<string, unknown>;
 };
 
-function parseBuiltinAgent(filePath: string): BuiltinAdmissionAgent {
-  const source = fs.readFileSync(filePath, "utf8");
-  const match = source.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
-  if (!match) throw new Error(`Invalid agent profile: ${filePath}`);
-  const frontmatter = match[1];
-  const body = match[2].trim();
-  const name = frontmatter.match(/^name:\s*(\S+)\s*$/m)?.[1];
-  const description = frontmatter.match(/^description:\s*(.*)$/m)?.[1]?.trim();
-  const thinking = frontmatter.match(/^thinking:\s*(.*)$/m)?.[1]?.trim();
-  const models = [...frontmatter.matchAll(/^  -\s+(.+)$/gm)].map((entry) => entry[1].trim());
-  if (!name || !description || !body) throw new Error(`Invalid agent profile: ${filePath}`);
+/** 原始 frontmatter 元数据的防御性深拷贝：禁止让 list 消费方暴露 admission 缓存的可变引用。 */
+function cloneFrontmatterMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
+  return structuredClone(metadata);
+}
+
+/** 通过 Host 的公开 YAML 解析器读取准入元数据，避免把其他 YAML 列表误认成 models。 */
+export function parseFrontmatter(source: string): BuiltinAdmissionAgent {
+  let parsed: { frontmatter: Record<string, unknown>; body: string };
+  try { parsed = hostParseFrontmatter<Record<string, unknown>>(source); } catch { throw new Error("Invalid agent profile"); }
+  const frontmatter = parsed.frontmatter;
+  const body = parsed.body.trim();
+  const textField = (key: string): string | undefined => {
+    if (!Object.hasOwn(frontmatter, key)) return undefined;
+    const value = frontmatter[key];
+    if (typeof value !== "string" || !value.trim()) throw new Error("Invalid agent profile");
+    return value.trim();
+  };
+  const name = textField("name");
+  const description = textField("description");
+  if (!name || !description || !body) throw new Error("Invalid agent profile");
+  const parseStringArray = (key: "models" | "tools"): string[] | undefined => {
+    if (!Object.hasOwn(frontmatter, key)) return undefined;
+    const value = frontmatter[key];
+    if (key === "tools" && typeof value === "string") {
+      const items = value.split(",").map((item) => item.trim());
+      if (items.length === 0 || items.some((item) => !item)) throw new Error("Invalid agent profile");
+      return items;
+    }
+    if (!Array.isArray(value) || value.length === 0 || value.some((item) => typeof item !== "string" || !item.trim())) {
+      throw new Error("Invalid agent profile");
+    }
+    return key === "tools"
+      ? value.flatMap((item) => (item as string).split(",").map((part) => part.trim())).filter(Boolean)
+      : value.map((item) => (item as string).trim());
+  };
+  const models = parseStringArray("models");
+  const tools = parseStringArray("tools");
+  const rawModel = textField("model");
+  let thinking: string | false | undefined;
+  if (Object.hasOwn(frontmatter, "thinking")) {
+    const value = frontmatter.thinking;
+    if (value !== false && (typeof value !== "string" || !value.trim())) throw new Error("Invalid agent profile");
+    thinking = value === false ? false : value.trim();
+  }
   return {
     name,
     description,
     systemPrompt: body,
-    ...(models.length ? { models } : {}),
-    ...(thinking ? { thinking } : {}),
+    ...(models ? { models } : {}),
+    ...(rawModel ? { model: rawModel } : {}),
+    ...(thinking !== undefined ? { thinking } : {}),
+    ...(tools ? { tools } : {}),
+    // 完整原始 frontmatter（返回前深拷贝）：保留未识别字段与 false/数组/number 等原类型，供 list 元数据展示。
+    metadata: cloneFrontmatterMetadata(frontmatter),
   };
+}
+
+function parseBuiltinAgent(filePath: string): BuiltinAdmissionAgent {
+  try { return parseFrontmatter(fs.readFileSync(filePath, "utf8")); }
+  catch { throw new Error(`Invalid agent profile: ${filePath}`); }
 }
 
 /**
@@ -91,7 +137,16 @@ export function registerBuiltinAgentsViaEvents(input: {
         throw error;
       }
       if (process.env.T11B1_DEBUG === "1") console.error(`[admission-debug] discover requested=${String(requestedName)} agents=${agents.map((a) => a.name).join(",")}`);
-      return { agents: agents.map((agent) => ({ ...agent, models: agent.models ? [...agent.models] : undefined })), admission: "repository-configured" as const };
+      return {
+        agents: agents.map((agent) => ({
+          ...agent,
+          ...(agent.models ? { models: [...agent.models] } : {}),
+          ...(agent.tools ? { tools: [...agent.tools] } : {}),
+          // metadata 每次调用深拷贝返回，不暴露 admission 缓存引用。
+          metadata: cloneFrontmatterMetadata(agent.metadata),
+        })),
+        admission: "repository-configured" as const,
+      };
     },
     dispose() { agents.splice(0); },
   };

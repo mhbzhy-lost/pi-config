@@ -2,7 +2,7 @@
 
 `pi-subagents-enhanced` 是 `pi-config` monorepo 内维护和发行的 Pi package。源码、发布配置与问题跟踪均归属同一个 `pi-config` 仓库，不另建 GitHub 仓库。
 
-该 package 固定封装 `pi-subagents@0.71.0`，提供项目自有的 typed `subagent` runtime、Root broker、统一 managed workspace service、child extensions，以及 footer、browser 和 transcript renderer。所有 upstream 内部 API 必须经 `src/compat/pi-subagents-0.71.ts` 导入。
+该 package 固定封装 `pi-subagents@0.75.0`，提供项目自有的 typed `subagent` runtime、Root broker、统一 managed workspace service、child extensions，以及 footer、browser 和 transcript renderer。所有 upstream 内部 API 必须经 `src/compat/pi-subagents-0.75.ts` 导入。
 
 普通 subagent、Goal task 和 Goal validation 都通过同一 workspace service 分配、绑定、检查与处置 worktree。package 对外只发布三项代码 API：`./dispatch-ir`、`./workspace` 和 `./workspace/admin`；Git mutation、owner token 与 durable ledger 的实现均只归 `src/workspace/` 所有。
 
@@ -36,13 +36,13 @@ npm:pi-subagents-enhanced@0.1.0
 
 ## Repository merge-queue acceptance probe
 
-T9 的聚焦验收入口是 `node scripts/probes/repository-merge-queue-acceptance.ts`。它只接受 `PI_REAL_BIN` 指向的真实 Pi 0.87.1 Host；合同测试使用 `node --test test/repository-merge-queue-acceptance-probe.test.mjs`，不会运行五 child 验收或全量 `npm test`。
+T9 的聚焦验收入口是 `node scripts/probes/repository-merge-queue-acceptance.ts`。它只接受 `PI_REAL_BIN` 指向的真实 Pi 1.0.2 physical Host；合同测试使用 `node --test test/repository-merge-queue-acceptance-probe.test.mjs`，不会运行五 child 验收或全量 `npm test`。
 
 Probe 使用独立 temporary repo、session、state 和 socket roots。失败时保留现场并在 receipt 中记录路径；不要手动删除失败现场，需先检查两个 Host、queue、worktree 和 terminal proof。barrier fixture 位于 `test/fixtures/repository-merge-queue-acceptance/`，仅可通过 `subagentOnlyExtensions` 注入测试 Host。
 
 合同层同时验证 trusted `run/cwd/HEAD/PID` barrier、来自 Git 事实的冲突 digest（含非零 rebase、unmerged entries、sequencer）和 public `agent_end`/follow-up/next `agent_start` 计数；`agent_settled` 不是 Auto Integration 成功信号。`ACCEPTANCE_OVERALL_TIMEOUT_MS` 覆盖 barrier、child settlement 与 public audit settlement，失败时保留 repository/worktree/receipts。
 
-两种来源互斥，同一 Pi 配置中只能启用一种。不得同时安装或启用 standalone `npm:pi-subagents@0.71.0`，否则会形成重复 runtime、tool、message renderer 或模块身份。
+两种来源互斥，同一 Pi 配置中只能启用一种。不得同时安装或启用 standalone `npm:pi-subagents@0.75.0`，否则会形成重复 runtime、tool、message renderer 或模块身份。
 
 ## 准备与升级
 

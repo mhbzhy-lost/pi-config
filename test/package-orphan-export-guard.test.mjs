@@ -36,7 +36,7 @@ function walkTs(dir) {
   return out;
 }
 
-const IMPORT_SPECIFIER = /(?:from\s*|import\s*\(\s*|require\s*\(\s*)["']([^"']+)["']/g;
+const IMPORT_SPECIFIER = /(?:from\s*|import\s*\(\s*|require\s*\(\s*|new URL\s*\(\s*)["']([^"']+)["']/g;
 
 function resolvesTo(consumerFile, specifier, targetFile) {
   if (!specifier.startsWith(".")) return false;

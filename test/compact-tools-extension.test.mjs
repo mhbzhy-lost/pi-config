@@ -44,6 +44,24 @@ test("compact overrides retain every non-bash native non-renderer field", () => 
   }
 });
 
+test("Host折叠入口在展开错误后恢复成功摘要且不重复添加状态", () => {
+  const tool = registerCompactTools(compactTools).find((tool) => tool.name === "edit");
+  const theme = { bold: (text) => text, fg: (_color, text) => text };
+  const args = { path: "/tmp/fixture.txt", edits: [{ oldText: "a", newText: "b" }] };
+  const context = { args, state: {}, isError: true, expanded: true };
+  const failure = { content: [{ type: "text", text: "edit conflict" }], details: undefined };
+  tool.renderResult(failure, { expanded: true, isPartial: false }, theme, context);
+  context.expanded = false;
+  const failed = tool.renderResult(failure, { expanded: false, isPartial: false }, theme, context);
+  assert.match(failed.render(100).join("\n"), /✗ edit conflict/);
+  context.isError = false;
+  context.expanded = false;
+  const success = { content: [{ type: "text", text: "updated" }], details: undefined };
+  const output = tool.renderResult(success, { expanded: false, isPartial: false }, theme, context);
+  const lines = [...tool.renderCall(args, theme, context).render(100), ...output.render(100)].filter((line) => line.trim());
+  assert.deepEqual(lines, ["∗ edit /tmp/fixture.txt (1 edit) · done"]);
+});
+
 test("registered execute selects the live cwd native tool and forwards five arguments", async () => {
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "compact-tools-execute-"));
   try {

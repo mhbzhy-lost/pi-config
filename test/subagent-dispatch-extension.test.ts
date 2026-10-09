@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 import { createTypedSubagentExtension, preparePublicCodingDispatch } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
@@ -33,7 +34,7 @@ function setup({ sessionId = "s" }: { sessionId?: string } = {}) {
     async ping() { return { version: 1, methods: ["spawn"], session: { sessionId, cwd: "/repo" } }; },
     async spawn(params, options) {
       calls.push({ params, options });
-      const match = params.workflowScript.match(/^return await runs\.run\(([^,]+), (.*)\);$/);
+      const match = params.script.match(/^return await runs\.run\(([^,]+), (.*)\);$/);
       const workflowKey = JSON.parse(match[1]); const { agent } = JSON.parse(match[2]);
       queueMicrotask(() => events.emit("subagent:async-started", {
         parentWorkflowRunId: "run-1", runId: "leaf-1", asyncDir: "/tmp/leaf-1", sessionId, pid: 123, agent, workflowKey,
@@ -46,7 +47,7 @@ function setup({ sessionId = "s" }: { sessionId?: string } = {}) {
 }
 
 function workflowLeaf(params: any) {
-  const match = String(params.workflowScript).match(/runs\.run\("[^"]+", (.*)\);/);
+  const match = String(params.script).match(/runs\.run\("[^"]+", (.*)\);/);
   assert.ok(match?.[1]);
   return JSON.parse(match[1]);
 }
@@ -241,7 +242,23 @@ test("caller timeout is rejected even with an active coordinator that issues no 
   assert.equal(calls.length, 0, "spawn");
 });
 
-test("Host owns coding execution timeout while generic workflow omits it", async () => {
+// 窄 characterization：省略 timeout 会被上游补默认，验证真实 resolver 消费派发值。
+async function assertUpstreamExecutionWindow(params: any) {
+  const upstream = await import(pathToFileURL(path.resolve("packages/pi-subagents-enhanced/node_modules/pi-subagents/src/runs/foreground/subagent-executor.js")).href);
+  const leaf = workflowLeaf(params);
+  for (const configDefault of [undefined, 30 * 60_000]) {
+    assert.deepEqual(upstream.resolveSingleAgentLaunchTimeout(leaf, true, configDefault), { timeoutMs: 2_147_000_000 });
+  }
+  const timer = setTimeout(() => assert.fail("长 execution timer 不得立即到期"), leaf.timeoutMs);
+  try {
+    assert.equal((timer as any)._idleTimeout, 2_147_000_000, "真实 Node timer 没有溢出成 1ms");
+    assert.equal(childStartTimeoutMs(undefined, leaf.timeoutMs), 120_000);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+test("Host 的 coding child 覆盖上游 30 分钟默认值且不超过 timer 上限", async () => {
   const { pi, rpc, calls, tools } = setup();
   createTestExtension(pi, { rpc, cleanupStore: {} });
 
@@ -251,11 +268,12 @@ test("Host owns coding execution timeout while generic workflow omits it", async
   }, undefined, undefined, { cwd: "/repo" });
 
   assert.equal(coding.isError, false, coding.content[0]?.text);
-  assert.equal(workflowLeaf(calls[0].params).timeoutMs, 30 * 60_000);
+  assert.equal(workflowLeaf(calls[0].params).timeoutMs, 2_147_000_000);
+  await assertUpstreamExecutionWindow(calls[0].params);
 
 });
 
-test("generic workflow omits execution timeout while the Host collector remains bounded", async () => {
+test("generic child 显式覆盖上游 30 分钟默认值且 collector 仍有界", async () => {
   const { pi, rpc, calls, tools } = setup();
   createTestExtension(pi, { rpc, cleanupStore: {} });
   const generic = await tools[0].execute("host-generic-timeout", {
@@ -263,10 +281,12 @@ test("generic workflow omits execution timeout while the Host collector remains 
   }, undefined, undefined, { cwd: "/repo" });
 
   assert.equal(generic.isError, false, generic.content[0]?.text);
-  assert.equal(workflowLeaf(calls[0].params).timeoutMs, undefined);
+  assert.equal(workflowLeaf(calls[0].params).timeoutMs, 2_147_000_000);
+  assert.equal(calls[0].params.timeoutMs, undefined, "root workflow 不增加 execution deadline");
+  await assertUpstreamExecutionWindow(calls[0].params);
 });
 
-test("generic facade passes the 120000ms default to the child-start collector while the workflow omits its timeout", async () => {
+test("generic child 使用长 execution deadline，child-start collector 仍为 120000ms", async () => {
   const { pi, rpc, calls, tools } = setup();
   createTestExtension(pi, { rpc, cleanupStore: {} });
 
@@ -274,7 +294,8 @@ test("generic facade passes the 120000ms default to the child-start collector wh
     agent: "reviewer", title: "Review", task: "Inspect.",
   }, undefined, undefined, { cwd: "/repo" });
 
-  assert.equal(workflowLeaf(calls[0].params).timeoutMs, undefined);
+  assert.equal(workflowLeaf(calls[0].params).timeoutMs, 2_147_000_000);
+  assert.equal(calls[0].params.timeoutMs, undefined, "root workflow 不增加 execution deadline");
   assert.equal(childStartTimeoutMs(undefined, 120_000), 120_000);
   assert.equal(result.isError, false, result.content[0]?.text);
 });
@@ -362,7 +383,7 @@ test("Goal trusted contract keeps a non-default caller timeout and canonical has
 
   assert.equal(result.isError, false, result.content[0]?.text);
   assert.equal(result.details.contractHash, expectedHash);
-  assert.equal(workflowLeaf(calls[0].params).timeoutMs, 30 * 60_000);
+  assert.equal(workflowLeaf(calls[0].params).timeoutMs, 2_147_000_000);
 
 });
 
@@ -720,7 +741,7 @@ test("coding spawn resolves the first available bare model from executor metadat
   });
   const result = await tools[0].execute("model-luna", { ...contract, model: "gpt-5.6-luna" }, undefined, undefined, {
     cwd: "/repo",
-    modelRegistry: { getAvailable() { return [{ provider: "openai-codex", id: "gpt-5.6-luna" }]; } },
+    modelRegistry: { getAvailable() { return [{ provider: "openai-codex", id: "gpt-5.6-luna", api: "openai-completions" }]; } },
   });
   assert.equal(workflowLeaf(calls[0]?.params).model, "openai-codex/gpt-5.6-luna");
   assert.deepEqual(result.details.modelSelection, { requestedModel: "gpt-5.6-luna", resolvedModel: "openai-codex/gpt-5.6-luna", source: "agent-candidates" });
@@ -817,4 +838,15 @@ test("generic and control dispatches never prepare or resolve coding spawn ident
   await tools[0].execute("generic-call", { agent: "reviewer", title: "Review", task: "Inspect." }, undefined, undefined, { cwd: "/repo" });
   await tools[0].execute("control-call", { action: "status", id: "run-1" }, undefined, undefined, { cwd: "/repo" });
   assert.equal(resolved, 0); assert.equal(prepared, 0);
+});
+
+test('省略model也校验profile virtual，RPC与workspace副作用为0', async () => {
+  const { pi, rpc, calls, tools } = setup();
+  createTestExtension(pi, { rpc, cleanupStore: {}, discoverAgents: () => ({ agents: [{ name: 'executor', models: ['fixture/virtual'] }] }) });
+  const result = await tools[0].execute('virtual-default', contract, undefined, undefined, {
+    cwd: '/repo', modelRegistry: { getAvailable: () => [{ provider: 'fixture', id: 'virtual', api: 'pi-virtual' }] },
+  });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /VIRTUAL_MODEL_UNSUPPORTED_BY_DISPATCH/);
+  assert.deepEqual(calls, []);
 });

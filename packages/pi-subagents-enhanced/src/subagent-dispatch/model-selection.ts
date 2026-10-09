@@ -1,7 +1,10 @@
-export type AvailableModel = {
-  provider: string;
-  id: string;
-};
+import type { Api, Model } from '@earendil-works/pi-ai';
+export type AvailableModel = Pick<Model<Api>, 'provider' | 'id' | 'api'>;
+
+export function assertDispatchModelApi(model: AvailableModel): void {
+  if (typeof model.api !== 'string' || !model.api.trim()) throw Object.assign(new Error('MODEL_API_UNAVAILABLE'), { code: 'MODEL_API_UNAVAILABLE' });
+  if (model.api === 'pi-virtual') throw Object.assign(new Error('VIRTUAL_MODEL_UNSUPPORTED_BY_DISPATCH'), { code: 'VIRTUAL_MODEL_UNSUPPORTED_BY_DISPATCH' });
+}
 
 export type ModelSelectionWarning = {
   code: "MODEL_MATCH_USED_GLOBAL_CATALOG";
@@ -14,6 +17,7 @@ export type ModelSelection = {
   model?: string;
   source: "default" | "qualified" | "agent-candidates" | "global-catalog";
   warnings?: ModelSelectionWarning[];
+  resolvedApi?: string;
 };
 
 export type ModelSelectionInput = {
@@ -117,7 +121,9 @@ export function resolveModelCandidates(profile: ModelCandidateProfile): string[]
       availableCandidates: [...available],
     });
   }
-  return candidates.filter((candidate) => available.has(candidate));
+  const resolved = candidates.filter((candidate) => available.has(candidate));
+  for (const id of resolved) assertDispatchModelApi(profile.availableModels.find(model => fullModelId(model) === id)!);
+  return resolved;
 }
 
 function suggestBareModelId(requested: string, declaredFullIds: readonly string[], availableFullIds: ReadonlySet<string>): string | undefined {
@@ -148,7 +154,7 @@ export function resolveModelSelection({
 
   if (requested.includes("/")) {
     const matched = allowedModels.find((model) => fullModelId(model) === requested);
-    if (matched) return { model: fullModelId(matched), source: "qualified" };
+    if (matched) { assertDispatchModelApi(matched); return { model: fullModelId(matched), source: 'qualified', resolvedApi: matched.api }; }
     throw new ModelSelectionError(requested, agentName, {
       availableCandidates: allowedModels.map(fullModelId),
     });
@@ -160,7 +166,7 @@ export function resolveModelSelection({
       !blocked.has(candidateProvider(model)?.toLowerCase() ?? "")
       && candidateModelId(model) === requested && availableModelIds.has(model)
     ));
-    if (matched) return { model: matched, source: "agent-candidates" };
+    if (matched) { const model = allowedModels.find(m => fullModelId(m) === matched)!; assertDispatchModelApi(model); return { model: matched, source: 'agent-candidates', resolvedApi: model.api }; }
     const declaredCandidates = agentModels.filter((model) => !blocked.has(candidateProvider(model)?.toLowerCase() ?? ""));
     throw new ModelSelectionError(requested, agentName, {
       declaredCandidates,
@@ -180,10 +186,12 @@ export function resolveModelSelection({
     availableCandidates: allowedModels.map(fullModelId),
   });
 
+  assertDispatchModelApi(matched);
   const resolvedModel = fullModelId(matched);
   return {
     model: resolvedModel,
     source: "global-catalog",
+    resolvedApi: matched.api,
     warnings: [{
       code: "MODEL_MATCH_USED_GLOBAL_CATALOG",
       agent: agentName,

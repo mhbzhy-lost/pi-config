@@ -56,15 +56,33 @@ function expandedBlock(text, theme, Text, Container, maxLines) {
   return container;
 }
 
-function resultRenderer({ Text, Container, summary, maxLines = 60 }) {
+function resultRenderer({ Text, Container, truncateToWidth, summary, maxLines = 60 }) {
   return (result, options, theme, context) => {
     const text = textOutput(result);
-    const resultSummary = summary(text);
+    const failed = context?.isError === true || result?.isError === true;
+    const resultSummary = failed ? "失败" : summary(text);
     if (options.expanded) {
       if (text) return expandedBlock(text, theme, Text, Container, maxLines);
       return new Text(theme.fg("dim", `  └ ${resultSummary}`), 1, 0);
     }
     if (context?.state) context.state[COMPACT_SUMMARY_KEY] = resultSummary;
+    if (failed) {
+      const errorText = `✗ ${text.trim() || "工具执行失败（未提供错误信息）"}`;
+      let body = new Text(theme.fg("error", errorText), 1, 0);
+      return {
+        render(width) {
+          // 先按终端列宽换行，再限制物理行，原始结果始终不变。
+          const lines = body.render(width);
+          return lines.length <= 4 ? lines : [
+            ...lines.slice(0, 3),
+            truncateToWidth(theme.fg("dim", "… 展开查看完整错误"), width, "…"),
+          ];
+        },
+        invalidate() {
+          body = new Text(theme.fg("error", errorText), 1, 0);
+        },
+      };
+    }
     return new Text("", 0, 0);
   };
 }
@@ -148,8 +166,11 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
         return pathCall("read", shortPath(args?.path || args?.file_path), range, theme, context);
       },
       renderResult(result, options, theme, context) {
-        if (!options.expanded && skillName(context?.args)) return new Text("", 0, 0);
-        return resultRenderer({ Text, Container, summary: (text) => `${nonEmptyLineCount(text)} lines` })(
+        if (!options.expanded && skillName(context?.args) && context?.isError !== true && result?.isError !== true) {
+          if (context?.state) delete context.state[COMPACT_SUMMARY_KEY];
+          return new Text("", 0, 0);
+        }
+        return resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} lines` })(
           result,
           options,
           theme,
@@ -162,7 +183,7 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
         const command = truncate(String(args?.command || "...").replace(/\s+/g, " ").trim(), 70);
         return singleLine(title("bash", theme.fg("accent", `"${command}"`), theme), theme, context);
       },
-      renderResult: resultRenderer({ Text, Container, summary: (text) => `${nonEmptyLineCount(text)} lines` }),
+      renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} lines` }),
     },
     edit: {
       renderCall(args, theme, context) {
@@ -175,13 +196,13 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
           context,
         );
       },
-      renderResult: resultRenderer({ Text, Container, summary: () => "done", maxLines: 30 }),
+      renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: () => "done", maxLines: 30 }),
     },
     write: {
       renderCall(args, theme, context) {
         return pathCall("write", shortPath(args?.path || args?.file_path), "", theme, context);
       },
-      renderResult: resultRenderer({ Text, Container, summary: () => "done", maxLines: 20 }),
+      renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: () => "done", maxLines: 20 }),
     },
     find: {
       renderCall(args, theme, context) {
@@ -189,7 +210,7 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
         const detail = `${theme.fg("accent", `"${pattern}"`)} ${theme.fg("dim", `in ${shortPath(args?.path || args?.dir)}`)}`;
         return singleLine(title("find", detail, theme), theme, context);
       },
-      renderResult: resultRenderer({ Text, Container, summary: (text) => `${nonEmptyLineCount(text)} matches`, maxLines: 40 }),
+      renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} matches`, maxLines: 40 }),
     },
     grep: {
       renderCall(args, theme, context) {
@@ -197,13 +218,13 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
         const detail = `${theme.fg("accent", `"${pattern}"`)} ${theme.fg("dim", `in ${shortPath(args?.path || args?.dir)}`)}`;
         return singleLine(title("grep", detail, theme), theme, context);
       },
-      renderResult: resultRenderer({ Text, Container, summary: (text) => `${nonEmptyLineCount(text)} matches`, maxLines: 40 }),
+      renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} matches`, maxLines: 40 }),
     },
     ls: {
       renderCall(args, theme, context) {
         return pathCall("ls", shortPath(args?.path), "", theme, context);
       },
-      renderResult: resultRenderer({ Text, Container, summary: (text) => `${nonEmptyLineCount(text)} entries`, maxLines: 40 }),
+      renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} entries`, maxLines: 40 }),
     },
   };
 

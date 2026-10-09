@@ -217,6 +217,19 @@ for (const [name, expectedStatus] of Object.entries({
   });
 }
 
+test("错误转为成功skill读取时清理旧失败摘要", () => {
+  const renderers = setup();
+  const plainTheme = { bold: (text) => text, fg: (_color, text) => text };
+  const args = { path: "/tmp/test-driven-development/SKILL.md" };
+  const context = { args, state: {}, isError: true, expanded: false };
+  const failure = { content: [{ type: "text", text: "permission denied" }], details: undefined };
+  const failed = renderers.read.renderResult(failure, { expanded: false }, plainTheme, context);
+  assert.match(failed.render(100).join("\n"), /✗ permission denied/);
+  context.isError = false;
+  renderers.read.renderResult(result, { expanded: false }, plainTheme, context);
+  assert.deepEqual(renderers.read.renderCall(args, plainTheme, context).render(100), ["∗ skill test-driven-development"]);
+});
+
 test("expanded output is bounded and never falls through to an undefined component", () => {
   const renderers = setup();
   const component = renderers.edit.renderResult(result, { expanded: true }, theme);

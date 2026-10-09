@@ -35,7 +35,7 @@ export class LaunchIntentError extends Error {
   constructor(code: "missing-value" | "conflicting-intents" | "unverifiable-cwd" | "unverifiable-path", message: string) { super(message); this.name = "LaunchIntentError"; this.code = code; }
 }
 
-const VALUE_OPTIONS = new Set(["-p", "--print", "-e", "--extension", "--skill", "--prompt-template", "--theme", "--provider", "--model", "--models", "--thinking", "--tools", "--exclude-tools", "--api-key", "--name", "--system-prompt", "--append-system-prompt", "--session-dir", "--session", "--session-id", "--fork", "--mode", "--export"]);
+const VALUE_OPTIONS = new Set(["-n", "-t", "-xt", "--use-theme", "--tui-mode", "-p", "--print", "-e", "--extension", "--skill", "--prompt-template", "--theme", "--provider", "--model", "--models", "--thinking", "--tools", "--exclude-tools", "--api-key", "--name", "--system-prompt", "--append-system-prompt", "--session-dir", "--session", "--session-id", "--fork", "--mode", "--export"]);
 type Token = Readonly<{ index: number; value: string }>;
 
 function consumedTokens(argv: readonly string[]): readonly Token[] {

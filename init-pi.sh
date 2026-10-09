@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-PI_VERSION="0.87.1"
+PI_VERSION="1.0.4"
 PI_PACKAGE="@earendil-works/pi-coding-agent@$PI_VERSION"
 NPM_REGISTRY="https://registry.npmjs.org"
 BASIC_MEMORY_VERSION="0.22.1"
@@ -30,19 +30,13 @@ fi
 
 node "$SCRIPT_DIR/scripts/setup-subagent-runtime-deps.ts" --check-upgrade
 
-pi_binary="${PI_REAL_BIN:-$(command -v pi || true)}"
-installed_version=""
-if [[ -n "$pi_binary" && -x "$pi_binary" ]]; then
-  installed_version="$($pi_binary --version 2>/dev/null || true)"
-fi
-if [[ "$installed_version" != "$PI_VERSION" ]]; then
-  NPM_CONFIG_REGISTRY="$NPM_REGISTRY" npm_config_cache="$SCRIPT_DIR/var/tmp/npm-cache" npm --no-audit --no-fund install -g --ignore-scripts "$PI_PACKAGE"
-  pi_binary="${PI_REAL_BIN:-$(command -v pi || true)}"
-fi
-if [[ -z "$pi_binary" || ! -x "$pi_binary" ]]; then
-  printf 'Pi executable not found after installing %s\n' "$PI_PACKAGE" >&2
-  exit 1
-fi
+# 仓库root拥有physical Host安装；不再修改global Pi。
+export PI_HOST_ROOT="$SCRIPT_DIR/node_modules/@earendil-works/pi-coding-agent"
+NPM_CONFIG_REGISTRY="$NPM_REGISTRY" npm_config_cache="$SCRIPT_DIR/var/tmp/npm-cache" npm --no-audit --no-fund --prefix "$SCRIPT_DIR" ci --ignore-scripts
+pi_binary="$PI_HOST_ROOT/dist/cli.js"
+export PI_REAL_BIN="$pi_binary"
+export PI_PACKAGE_DIR="$PI_HOST_ROOT"
+export PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT="$PI_HOST_ROOT"
 
 NPM_CONFIG_REGISTRY="$NPM_REGISTRY" npm_config_cache="$SCRIPT_DIR/var/tmp/npm-cache" npm --no-audit --no-fund --prefix "$SCRIPT_DIR" run setup:subagents-enhanced
 

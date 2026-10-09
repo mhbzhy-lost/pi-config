@@ -38,7 +38,7 @@ export async function loadPublicPiModule({ globalNodeModules, resolveGlobalNodeM
 }
 
 export const REQUIRED_METHODS = ["ping", "status", "spawn", "steer", "interrupt", "stop", "resume"];
-export const SUPPORTED_PI_VERSIONS = ["0.87.1"];
+export const SUPPORTED_PI_VERSIONS = ["1.0.4"];
 
 export async function assertBrowserTranscriptCompatibility({
   packageRoot,
@@ -62,7 +62,7 @@ export async function assertBrowserTranscriptCompatibility({
   ]) {
     if (typeof resolvedPiModule[capability] !== "function") throw new Error(`pi-subagents browser compatibility missing ${capability}`);
   }
-  const compat = await jiti.import(join(packageRoot, "src/compat/pi-subagents-0.71.ts"));
+  const compat = await jiti.import(join(packageRoot, "src/compat/pi-subagents-0.75.ts"));
   for (const name of ["readFleetTranscript", "renderFleetTranscript"]) {
     if (typeof compat[name] !== "function") throw new Error(`pi-subagents browser compatibility missing ${name}`);
   }
@@ -118,7 +118,7 @@ export function evaluatePlanHarnessCompatibility(report) {
   const failures = [];
 
   if (!SUPPORTED_PI_VERSIONS.includes(report.piVersion)) failures.push(`unsupported Pi version: ${report.piVersion}`);
-  if (report.version !== "0.71.0") failures.push(`unexpected pi-subagents version: ${report.version}`);
+  if (report.version !== "0.75.0") failures.push(`unexpected pi-subagents version: ${report.version}`);
   if (report.typeboxVersion !== "1.1.38") failures.push(`unexpected typebox version: ${report.typeboxVersion}`);
   if (report.typeboxCompileResolvable !== true) failures.push("typebox/compile is not resolvable from pi-subagents");
   if (report.rpcVersion !== 1) failures.push(`unexpected RPC version: ${report.rpcVersion}`);

@@ -7,17 +7,21 @@ import {
   registerBuiltinAgentsViaEvents,
   resolveCurrentSessionId,
   upstreamSubagentRuntime,
-} from "../src/compat/pi-subagents-0.71.ts";
+} from "../src/compat/pi-subagents-0.75.ts";
+import { registerCompletionNotices } from "../src/tui/completion-notices.ts";
 import {
   formatCompactSubagentNotification,
   formatCompactSubagentWorkspaceReminder,
   formatCompactSubagentSpawnSummary,
   formatCompactSubagentToolResult,
   formatCompactSupervisorRequest,
+  formatCompactSupervisorReply,
   formatCompactSupervisorToolResult,
 } from "../src/tui/compact-rendering.ts";
 import { createSubagentDispatchTraceFileSink, installHeadlessTypedSubagentRuntime } from "../src/subagent-dispatch/extension.ts";
-import { createSupervisorControlPlane } from "../src/subagent-dispatch/supervisor-control-plane.ts";
+import { captureSupervisorCorrelation, reconcileSupervisorConsumption } from "../src/subagent-dispatch/supervisor-consumption.ts";
+import { registerConfiguredChildToolCeiling } from "../src/subagent-dispatch/child-tool-policy.ts";
+import { createSupervisorControlPlane, supervisorCanonicalDigest } from "../src/subagent-dispatch/supervisor-control-plane.ts";
 import { runtimeFromStatus } from "../src/subagent-dispatch/runtime-state.ts";
 import { createRenewableTypedSubagentRpcClient, createTypedSubagentRpcClient } from "../src/subagent-dispatch/rpc-client.ts";
 import { createCoordinatorProofOutbox } from "../src/subagent-dispatch/coordinator-proof-outbox.ts";
@@ -205,13 +209,6 @@ export function projectManagedWorkspaceTerminalProof(
   throw error;
 }
 
-function notificationColor(text: string): "error" | "warning" | "success" | "dim" {
-  if (text.split("\n").some((line) => line.startsWith("✗"))) return "error";
-  if (text.split("\n").some((line) => /^(?:\?|!|Ⅱ|■)/.test(line))) return "warning";
-  if (text.split("\n").some((line) => line.startsWith("◇"))) return "dim";
-  return "success";
-}
-
 const SUBAGENT_SPAWN_SUMMARY_KEY = "subagentSpawnSummary";
 
 function spawnStartingSummary(args: any): string | undefined {
@@ -233,21 +230,28 @@ export function createSubagentToolRenderers() {
   };
   const renderSubagentCall = (args: any, theme: any, context: any) => {
     const starting = spawnStartingSummary(args);
-    if (!starting) return new Text("", 0, 0);
+    if (!starting) {
+      const action = typeof args?.action === "string" ? args.action.trim() : "";
+      const target = args?.id ?? args?.runId ?? args?.index ?? args?.dir;
+      return new Text(theme.fg("dim", `subagent${action ? ` ${action}` : ""}${target !== undefined ? ` · ${String(target)}` : ""}`), 0, 0);
+    }
     const summary = context?.state?.[SUBAGENT_SPAWN_SUMMARY_KEY] ?? starting;
     return new Text(typeof summary === "string" ? theme.fg("dim", summary) : "", 0, 0);
   };
   const renderSubagentResult = (result: any, _options: any, theme: any, context: any) => {
     const args = context?.args;
+    const isError = context?.isError === true || result?.isError === true;
     const summary = args && !Object.hasOwn(args, "action")
-      ? formatCompactSubagentSpawnSummary(result)
+      ? formatCompactSubagentSpawnSummary(result, { isError })
       : undefined;
     if (summary) {
       if (context?.state) context.state[SUBAGENT_SPAWN_SUMMARY_KEY] = summary;
-      return new Text("", 0, 0);
+      if (!isError) return new Text(context?.state ? "" : theme.fg("dim", summary), 0, 0);
     }
-    const text = formatCompactSubagentToolResult(result, args ?? {});
-    return new Text(theme.fg(result?.isError ? "error" : "dim", text), 0, 0);
+    // context.args 是 Host 权威原入参；isError 同样用现有 context 正确传（Host 只
+    // 透传 {content, details}），不向执行返回注入任何 TUI 字段。
+    const text = formatCompactSubagentToolResult(result, args ?? {}, { isError });
+    return new Text(theme.fg(isError ? "error" : "dim", text), 0, 0);
   };
   const renderSupervisorRequest = (message: any, options: any, theme: any) => {
     const text = formatCompactSupervisorRequest(message);
@@ -257,19 +261,31 @@ export function createSubagentToolRenderers() {
   const renderControlNotice = () => new Text("", 0, 0);
   const renderSupervisorCall = (args: any, theme: any) => {
     const action = typeof args?.action === "string" ? args.action.trim() : "";
-    return new Text(action === "reply" ? "" : theme.fg("dim", `subagent_supervisor${action ? ` ${action}` : ""}`), 0, 0);
+    // call 标题只保简短动作 + 完整 replyTo；回复正文仅在 result 卡完整展示，
+    // 避免同一绿色工具卡内 call 与 result 重复正文。
+    const replyTo = typeof args?.replyTo === "string" ? args.replyTo.trim() : "";
+    return new Text(theme.fg("dim", `subagent_supervisor${action ? ` ${action}` : ""}${replyTo ? ` · request: ${replyTo}` : ""}`), 0, 0);
   };
   const renderSupervisorResult = (result: any, _options: any, theme: any, context: any) => {
-    const text = formatCompactSupervisorToolResult(result, context?.args ?? {});
-    return new Text(theme.fg(result?.isError ? "error" : "dim", text), 0, 0);
+    // Host 只透传 {content, details} 给 renderResult；isError 的权威信号在
+    // context.isError（tool-execution.js），错误保 error 色且原文可见不折叠。
+    const isError = result?.isError === true || context?.isError === true;
+    const text = formatCompactSupervisorToolResult(result, context?.args ?? {}, { isError });
+    return new Text(theme.fg(isError ? "error" : "dim", text), 0, 0);
   };
+  // runtime 主动回执只用 dim 无框投影；工具卡的状态背景由 Host 原生外壳负责。
+  // 水平 padding 取 1 与原生 status 行一致（Host showStatus 以 ThemedText(…,1,0) 渲染），
+  // 使「回复已提交」与其他 dim 回执左缘对齐；仅组件 padding，不改 entry 数据与文案。
+  const renderSupervisorReplyEntry = (entry: any, options: any, theme: any) => {
+    void options;
+    return new Text(theme.fg("dim", formatCompactSupervisorReply(entry)), 1, 0);
+  };
+  // 可见 completion 回执（如「派发完成…」）同样对齐原生 status 行水平 padding，
+  // 仅展示层统一左缘，不改消息数据与文案。
   const renderCompletionNotification = (message: any, theme: any) => {
-    const text = formatCompactSubagentNotification(message);
-    const color = notificationColor(text);
-    const background = color === "success" ? "toolSuccessBg" : color === "error" || color === "warning" ? "toolErrorBg" : "toolPendingBg";
-    return messageBox(text, background, theme);
+    return new Text(theme.fg("dim", formatCompactSubagentNotification(message)), 1, 0);
   };
-  return { renderSubagentCall, renderSubagentResult, renderSupervisorRequest, renderControlNotice, renderSupervisorCall, renderSupervisorResult, renderCompletionNotification };
+  return { renderSubagentCall, renderSubagentResult, renderSupervisorRequest, renderControlNotice, renderSupervisorCall, renderSupervisorResult, renderSupervisorReplyEntry, renderCompletionNotification };
 }
 
 export default function subagentRuntime(pi: ExtensionAPI): void {
@@ -277,7 +293,17 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
   // 0.71 config is write-only at the public boundary (contract §4, types.d.ts:2592-2600).
   // Provider policy is owned by this package; do not read upstream private config.
   const providerBlacklist = ["deepseek"];
-  const { renderSubagentCall, renderSubagentResult, renderSupervisorRequest, renderControlNotice, renderSupervisorCall, renderSupervisorResult, renderCompletionNotification } = createSubagentToolRenderers();
+  const { renderSubagentCall, renderSubagentResult, renderSupervisorRequest, renderControlNotice, renderSupervisorCall, renderSupervisorResult, renderSupervisorReplyEntry, renderCompletionNotification } = createSubagentToolRenderers();
+  // Host binding：共享 AGENTS 注入项从可信 PI_CODING_AGENT_DIR 解析（与 repository
+  // agent admission 同一准入 env，缺失即失败，不做回退推断）。package 实现不得
+  // import root src / pi/extensions，只传 { id, path } 由 required-child 注册消费。
+  const piAgentDir = process.env.PI_CODING_AGENT_DIR;
+  if (!piAgentDir) throw new Error("PI_CODING_AGENT_DIR is required to resolve the shared agents binding");
+  const agentsSharedChildExtension = Object.freeze({
+    id: "agents-shared",
+    path: path.join(piAgentDir, "extensions", "agents-shared.ts"),
+  });
+  const completionNotices = registerCompletionNotices(pi);
   let brokerStarted = false;
   let brokerReady = false;
   let builtinAdmission: ReturnType<typeof registerBuiltinAgentsViaEvents> | undefined;
@@ -303,6 +329,7 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
   let workspaceService: any;
   let workspaceRootSessionId: string | undefined;
   let workspaceLifecycleSessionId: string | undefined;
+  let childToolCeilingRegistration: { dispose(): void } | undefined;
   const supervisorControlPlane = createSupervisorControlPlane({
     persistenceRoot: (typeof process.env.PI_CODING_WORKSPACE_DIR === "string" && process.env.PI_CODING_WORKSPACE_DIR.length > 0
       ? process.env.PI_CODING_WORKSPACE_DIR
@@ -342,8 +369,26 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
       }
     },
   });
+  const consumptionFlights = new Set<Promise<void>>();
+  const observeConsumption = (event: any) => {
+    const currentBroker = broker;
+    if (!brokerReady || !currentBroker || typeof event?.runId !== 'string') return;
+    // broker自己的同步terminal listener先接受proof，再读取canonical会话。
+    const flight = Promise.resolve().then(async () => {
+      await reconcileSupervisorConsumption({ broker: currentBroker, plane: supervisorControlPlane, runId: event.runId, rootSessionId: currentBroker.rootSessionId, diagnosticSink });
+    }).catch(error => {
+      try { diagnosticSink?.({ phase: 'supervisor-consumption-failed', runId: event.runId, error, cause: error?.cause }); } catch {}
+    });
+    consumptionFlights.add(flight);
+    void flight.finally(() => consumptionFlights.delete(flight));
+  };
+  const unsubscribeConsumption = pi.events.on("subagent:process-terminal", observeConsumption);
   const enabledSupervisorControlPlane = Object.freeze({
     ...supervisorControlPlane,
+    async registerSupervisorRequest(native: any, root?: string) {
+      if (!brokerReady || !broker || root !== broker.rootSessionId) throw new Error('ROOT_BROKER_UNAVAILABLE');
+      return supervisorControlPlane.registerSupervisorRequest({ ...native, correlation: await captureSupervisorCorrelation(broker, native) }, root);
+    },
     enabled: () => brokerReady && !!broker,
   });
   try {
@@ -351,8 +396,11 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     providerBlacklist,
     diagnosticSink,
     workingStateTrace: diagnosticSink,
+    requiredSharedChildExtension: agentsSharedChildExtension,
     extraDisposables: [
+      { dispose() { unsubscribeConsumption(); } },
       ...(diagnosticSink ? [diagnosticSink] : []),
+      completionNotices,
       { dispose() { builtinAdmission?.dispose(); builtinAdmission = undefined; } },
     ],
     bootstrap: upstreamSubagentRuntime,
@@ -388,6 +436,11 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
       const rootSessionId = resolveRootSessionId(ctx.sessionManager);
       await supervisorControlPlane.ready(rootSessionId);
       const lifecycleSessionId = readSessionIdentity(ctx.sessionManager).sessionFile ?? resolveCurrentSessionId(ctx.sessionManager);
+      // Host ceiling是显式opt-in；无配置时不得改变既有frontmatter工具行为。
+      childToolCeilingRegistration = registerConfiguredChildToolCeiling({
+        agentDir: process.env.PI_CODING_AGENT_DIR ?? "",
+        sessionId: lifecycleSessionId,
+      });
       // Root broker is the sole completion owner (contract §2.5); no upstream
       // completion-owner identity is generated in this integration layer.
       readSessionIdentity(ctx.sessionManager);
@@ -432,6 +485,8 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
           workspaceRootSessionId = undefined;
           workspaceLifecycleSessionId = undefined;
         }
+        childToolCeilingRegistration?.dispose();
+        childToolCeilingRegistration = undefined;
         if (brokerStarted) {
           await coordinatorRuntime?.close().catch(() => undefined);
           coordinatorRuntime = undefined;
@@ -447,6 +502,8 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     async beforeRuntimeDispose() {
       // Keep coordinator callbacks alive while Root Broker drains accepted child
       // integration requests and terminal proof delivery.
+      await Promise.all([...consumptionFlights]);
+      if (brokerReady && broker) await supervisorControlPlane.closeRootRequests(broker.rootSessionId);
       const cleanupErrors: unknown[] = [];
       if (brokerStarted && broker) {
         try { await closeAndUnbindRootBroker(pi, broker); } catch (error) {
@@ -454,10 +511,12 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
           try { diagnosticSink?.({ version: 1, phase: "root-broker-close-failed", error, cause: error?.cause }); } catch (diagnosticError) { console.error("[subagent-runtime] cleanup diagnostic sink failed", diagnosticError); }
         }
       }
+      if (cleanupErrors.length) throw new AggregateError(cleanupErrors, "subagent runtime cleanup failed", { cause: cleanupErrors[0] });
       try { await coordinatorRuntime?.close(); } catch (error) {
         cleanupErrors.push(error);
         try { diagnosticSink?.({ version: 1, phase: "coordinator-close-failed", error, cause: error?.cause }); } catch (diagnosticError) { console.error("[subagent-runtime] cleanup diagnostic sink failed", diagnosticError); }
       }
+      if (cleanupErrors.length) throw new AggregateError(cleanupErrors, "subagent runtime cleanup failed", { cause: cleanupErrors[0] });
       coordinatorRuntime = undefined;
       if (workspaceService && workspaceRootSessionId) {
         unbindManagedWorkspaceServiceSession(pi, workspaceRootSessionId, workspaceService);
@@ -465,6 +524,8 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
         workspaceRootSessionId = undefined;
         workspaceLifecycleSessionId = undefined;
       }
+      childToolCeilingRegistration?.dispose();
+      childToolCeilingRegistration = undefined;
       if (brokerStarted && broker) {
         if (previousBrokerMarker === undefined) delete process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED;
         else process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED = previousBrokerMarker;
@@ -497,6 +558,7 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
     retainOnBeforeDisposeFailure: true,
   });
   } catch (error) {
+    completionNotices.dispose();
     diagnosticSink?.dispose?.();
     throw error;
   }
@@ -511,4 +573,9 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
   });
   pi.registerMessageRenderer("subagent_supervisor_request", renderSupervisorRequest);
   pi.registerMessageRenderer("subagent_control_notice", renderControlNotice);
+  // 上游 bootstrap 经 membrane 把 registerEntryRenderer("subagent_supervisor_reply")
+  // 转发进本扩展的同一 entryRenderers Map（runner.getEntryRenderer 按扩展加载序
+  // 取首个命中，同名 customType 在同扩展内后注册覆盖先注册）；此处后注册覆盖
+  // 上游大框，仅改展示，不碰 entry 数据与会话内容。entry 本身不进 LLM 上下文。
+  pi.registerEntryRenderer("subagent_supervisor_reply", renderSupervisorReplyEntry);
 }

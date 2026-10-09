@@ -7,6 +7,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { createRegistryStore, listLiveRecords, prepareLaunch } from "../src/session-owner/registry.ts";
 
+import { physicalLauncherFixture } from "./helpers/physical-launcher-fixture.mjs";
+
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const launcher = join(repoRoot, "scripts", "pi-launcher.zsh");
 const decisionCli = join(repoRoot, "scripts", "pi-session-owner.ts");
@@ -35,7 +37,7 @@ function runLauncher(args, env) {
   return spawnSync("zsh", ["-f", launcher, ...args], {
     cwd: repoRoot,
     encoding: "utf8",
-    env: childSafeEnv,
+    env: { ...childSafeEnv, ...physicalLauncherFixture(env.PI_REAL_BIN) },
   });
 }
 
@@ -46,7 +48,7 @@ function runInteractiveLauncher(args, env) {
   return spawnSync("expect", ["-c", `spawn -noecho zsh -c {exec zsh -f "$@" 2>"$PI_TEST_LAUNCHER_STDERR"} zsh ${command}\nexpect eof\nexit [lindex [wait] 3]`], {
     cwd: repoRoot,
     encoding: "utf8",
-    env: childSafeEnv,
+    env: { ...childSafeEnv, ...physicalLauncherFixture(env.PI_REAL_BIN) },
   });
 }
 
@@ -105,7 +107,7 @@ test("prepare requires an explicit verified Pi binary", async () => {
   const decisionDir = await mkdtemp(join(tmpdir(), "pi-session-owner-decision-"));
   await chmod(decisionDir, 0o700);
   try {
-    const result = spawnSync("node", [decisionCli, "prepare", "--pid", String(process.pid), "--cwd", repoRoot, "--stdin-tty", "1", "--stdout-tty", "1", "--decision-dir", decisionDir, "--", "-c"], { cwd: repoRoot, encoding: "utf8", env: { ...process.env, PI_SUBAGENT_CHILD: undefined, PI_SUBAGENT_FANOUT_CHILD: undefined } });
+    const result = spawnSync("node", [decisionCli, "prepare", "--pid", String(process.pid), "--cwd", repoRoot, "--stdin-tty", "1", "--stdout-tty", "1", "--decision-dir", decisionDir, "--", "-c"], { cwd: repoRoot, encoding: "utf8", env: { ...process.env, PI_SUBAGENT_CHILD: undefined, PI_SUBAGENT_FANOUT_CHILD: undefined, PI_REAL_BIN: undefined } });
     assert.equal(result.status, 0, result.stderr);
     assert.equal(await readFile(join(decisionDir, "action"), "utf8"), "blocked\n");
   } finally { await rm(decisionDir, { recursive: true, force: true }); }

@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 
 import { createRegistryStore, listLiveRecords } from "../src/session-owner/registry.ts";
 
+import { physicalLauncherFixture } from "./helpers/physical-launcher-fixture.mjs";
+
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const systemPath = process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
 const childEnvironmentNames = [
@@ -32,7 +34,7 @@ function environment(state, extra = {}) {
     REAL_NODE: process.execPath,
     COMMAND_LOG: state.commandLog,
     FAKE_PI_MARKER: state.marker,
-    PI_REAL_BIN: state.fakePi,
+    ...physicalLauncherFixture(state.fakePi),
     PI_CODING_AGENT_DIR: join(state.root, "isolated-agent-dir"),
     PI_CODING_AGENT_SESSION_DIR: join(state.root, "isolated-sessions"),
     PI_SESSION_OWNER_REGISTRY: state.registry,
@@ -59,6 +61,7 @@ async function makeFixture() {
   await Promise.all([mkdir(repo, { recursive: true }), mkdir(home, { recursive: true }), mkdir(zsh, { recursive: true }), mkdir(bin, { recursive: true })]);
   await Promise.all([
     cp(join(repoRoot, "init-pi.sh"), join(repo, "init-pi.sh")),
+    cp(join(repoRoot,"packages/pi-subagents-enhanced/src/host-runtime"),join(repo,"packages/pi-subagents-enhanced/src/host-runtime"),{recursive:true}),
     cp(join(repoRoot, "scripts"), join(repo, "scripts"), { recursive: true }),
     cp(join(repoRoot, "src"), join(repo, "src"), { recursive: true }),
     cp(join(repoRoot, "pi", "extensions"), join(repo, "pi", "extensions"), { recursive: true }),
@@ -138,11 +141,11 @@ exit $status
 // （PI_PACKAGE_DIR 会改写包根：pi 会话内的 ambient 探测会拿到工作区版本而非 homebrew 实际版本）。
 // 期望值必须在 wrapper 同款隔离 env 下运行时探测 PI_REAL_BIN --version 构造，
 // 既避免版本演进再红，也避免本进程 ambient env 重定向探测结果。
-const officialPiBin = "/opt/homebrew/bin/pi";
+const officialPiBin = process.env.PI_REAL_BIN;
 
 function officialEnvironment(state) {
   return environment(state, {
-    PI_REAL_BIN: officialPiBin,
+    PI_HOST_ROOT: process.env.PI_TEST_CODING_AGENT_ROOT, PI_PACKAGE_DIR: process.env.PI_TEST_CODING_AGENT_ROOT, PI_HOST_NODE: process.execPath, PI_REAL_BIN: officialPiBin,
     ISOLATED_AGENT_DIR: join(state.root, "official-agent-dir"),
     ISOLATED_SESSION_DIR: join(state.root, "official-sessions"),
     ISOLATED_REGISTRY: state.registry,
@@ -195,7 +198,7 @@ async function verifyInstalled(state) {
   assert.equal(invocation.sessionDir, join(state.root, "isolated-sessions"));
   assert.ok(typeof invocation.ownerId === "string" && invocation.ownerId.length >= 8);
   assert.equal(invocation.registry, state.registry);
-  assert.deepEqual(invocation.argv, ["-e", join(await realpath(state.repo), "pi", "extensions", "session-owner.ts"), "--no-skills", "--no-extensions", "--", "fresh-install"]);
+  assert.deepEqual(invocation.argv, ["-e", join(await realpath(state.repo), "pi", "extensions", "session-owner.ts"), "--no-skills", "--tui-mode", "fullscreen", "--no-extensions", "--", "fresh-install"]);
 }
 
 test("fresh init installs an idempotent owner-wrapper shell entrypoint", async () => {

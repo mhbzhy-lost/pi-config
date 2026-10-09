@@ -94,7 +94,7 @@ node scripts/probes/repository-merge-queue-acceptance.ts
 
 ## Pi 0.87.1 TUI 与工具限制
 
-Pi 官方是 fullscreen 的唯一 owner；Shell 不发送 `DECSET/DECRST 1049`。`pi-inline` 和 `pi-full` 分别是官方 `--tui-mode regular` 与 `--tui-mode fullscreen` 的别名。
+Pi 官方是 fullscreen 的唯一 owner；Shell 不发送 `DECSET/DECRST 1049`。`pi` 默认使用官方 `--tui-mode fullscreen`；`pi-full` 是调用同一 `pi` 入口的薄兼容别名。显式 `pi --tui-mode regular`（或 `pi-full --tui-mode regular`）覆盖默认模式；`pi-inline` 保留为官方 regular 模式入口，`pi-lite` 的只读探索模式不变。新 shell 加载 `scripts/pi-shell.zsh` 后生效；现有 shell 可手动 source 此脚本，不影响已运行的 Pi Host。
 
 Child browser 使用 focused overlay。`Ctrl+Shift+F` 保持官方语义，只搜索 parent primary transcript，不搜索 child transcript。compact renderer 是官方 tool definition 上的薄适配；它会注册同名 extension tools，因此不启用 `defaultTools`。需要严格工具集合时使用官方 `--tools`（或 `--exclude-tools`/`--no-tools`）。
 

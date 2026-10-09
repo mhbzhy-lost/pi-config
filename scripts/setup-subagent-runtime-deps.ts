@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 
 const execFile = promisify(execFileCallback);
 const scriptPath = fileURLToPath(import.meta.url);
-const PI_SUBAGENTS_VERSION = "0.71.0";
+const PI_SUBAGENTS_VERSION = "0.75.0";
 const defaultEnhancedPackageRoot = resolve(import.meta.dirname, "../packages/pi-subagents-enhanced");
 const defaultPiNpmDir = resolve(import.meta.dirname, "../pi/npm");
 
@@ -52,7 +52,7 @@ export async function installSubagentRuntimeDependencies({
   run = execFile,
 } = {}) {
   await assertSafeSubagentRuntimeUpgrade({ enhancedPackageRoot, env });
-  const npmEnv = { ...env, NPM_CONFIG_REGISTRY: "https://registry.npmjs.org", npm_config_cache: env.npm_config_cache ?? `${env.HOME ?? process.env.HOME}/pi-config/var/tmp/npm-cache` };
+  const npmEnv = { ...env, PI_HOST_ROOT: env.PI_HOST_ROOT ?? resolve(import.meta.dirname,"../node_modules/@earendil-works/pi-coding-agent"), NPM_CONFIG_REGISTRY: "https://registry.npmjs.org", npm_config_cache: env.npm_config_cache ?? `${env.HOME ?? process.env.HOME}/pi-config/var/tmp/npm-cache` };
   await run("npm", ["--no-audit", "--no-fund", "uninstall", "--prefix", piNpmDir, "@juicesharp/rpiv-todo", "pi-subagents", "typebox"], { env: npmEnv });
   await run("npm", ["--no-audit", "--no-fund", "install", "--prefix", enhancedPackageRoot, "--ignore-scripts", "--omit=peer"], { env: npmEnv });
   await run("npm", ["--no-audit", "--no-fund", "--prefix", enhancedPackageRoot, "run", "setup:runtime"], { env: npmEnv });

@@ -22,13 +22,22 @@ export class DurableStorage {
   }
   async acquireLock(key: string): Promise<() => Promise<void>> {
     await this.ensureRoot(); const lock = this.file(key, ".lock"); const owner = randomUUID();
-    try { await writeFile(lock, JSON.stringify({ owner, processBirth: `${process.pid}:${process.uptime()}` }), { flag: "wx", mode: 0o600 }); }
-    catch (error: any) {
-      if (error?.code !== "EEXIST") throw error;
-      const info = await stat(lock); if (Date.now() - info.mtimeMs <= this.staleLockMs) throw new DurableStorageError("DURABLE_LOCK_HELD");
-      const quarantine = `${lock}.quarantine-${Date.now()}-${randomUUID()}`;
-      try { await rename(lock, quarantine); } catch (cause) { throw new DurableStorageError("DURABLE_LOCK_UNPROVEN", "DURABLE_LOCK_UNPROVEN", { cause }); }
-      return this.acquireLock(key);
+    const deadline = Date.now() + this.staleLockMs;
+    for (;;) {
+      try { await writeFile(lock, JSON.stringify({ owner, processBirth: `${process.pid}:${process.uptime()}` }), { flag: "wx", mode: 0o600 }); break; }
+      catch (error: any) {
+        if (error?.code !== "EEXIST") throw error;
+        let info;
+        try { info = await stat(lock); }
+        catch (statError: any) {
+          // 持有者刚释放lock的原子窗口只在既有deadline内重试；其他错误保持原样。
+          if (statError?.code === "ENOENT" && Date.now() < deadline) { await new Promise(resolve => setTimeout(resolve, 1)); continue; }
+          throw statError;
+        }
+        if (Date.now() - info.mtimeMs <= this.staleLockMs) throw new DurableStorageError("DURABLE_LOCK_HELD");
+        const quarantine = `${lock}.quarantine-${Date.now()}-${randomUUID()}`;
+        try { await rename(lock, quarantine); } catch (cause) { throw new DurableStorageError("DURABLE_LOCK_UNPROVEN", "DURABLE_LOCK_UNPROVEN", { cause }); }
+      }
     }
     return async () => { try { const raw = JSON.parse(await readFile(lock, "utf8")); if (raw.owner === owner) await unlink(lock); } catch {} };
   }

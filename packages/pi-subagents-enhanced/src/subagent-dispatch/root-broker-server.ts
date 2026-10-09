@@ -601,6 +601,12 @@ export class RootBrokerServer {
     const after = this.lstat(file); safeStat(after);
     if (before.dev !== opened.dev || before.ino !== opened.ino || after.dev !== opened.dev || after.ino !== opened.ino || opened.size !== bytes.length) throw new Error("official terminal artifact changed while reading");
     const value = JSON.parse(bytes.toString("utf8"));
+    if (value?.state === 'pending') {
+      const { runId, ...terminal } = value;
+      if (runId !== run.runId) throw new Error('official terminal runId mismatch');
+      parseProcessTerminal(terminal);
+      return undefined;
+    }
     return this.acceptTerminalProof(run, value);
   }
 
@@ -815,7 +821,7 @@ export class RootBrokerServer {
       try {
         const proof = this.readAndAcceptOfficialTerminalArtifact(run);
         if (cancelled()) return undefined;
-        return proof;
+        if (proof) return proof;
       } catch (error: any) {
         if (error?.code !== "ENOENT") {
           if (error instanceof Error && /official terminal/.test(error.message)) throw error;
@@ -1337,7 +1343,6 @@ export class RootBrokerServer {
     if (this.closePromise) return this.closePromise;
     if (this.teardown.released) return;
     this.closed = true;
-    this.announceClosing();
     const closing = (async () => {
       let startupTimeout: ReturnType<typeof setTimeout> | undefined;
       const startupDeadline = new Promise<never>((_, reject) => {

@@ -13,7 +13,8 @@ _pi_config_invoke() {
 }
 
 pi() {
-  _pi_config_invoke "$@"
+  # _pi_config_invoke "$@"
+  _pi_config_invoke --tui-mode fullscreen "$@"
 }
 
 pi-inline() {
@@ -21,7 +22,7 @@ pi-inline() {
 }
 
 pi-full() {
-  _pi_config_invoke --tui-mode fullscreen "$@"
+  pi "$@"
 }
 
 # 精简版只读探索模式：不加载上下文文件/extensions/skills 发现与 prompt 模板，

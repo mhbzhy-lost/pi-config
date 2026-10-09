@@ -43,8 +43,8 @@ const runtimeValidated = (schema, fallback) => ({ anyOf: [schema, fallback, { ty
 const looseObject = { type: "object", additionalProperties: true };
 const looseArray = { type: "array" };
 
-// Host 唯一决定 coding 执行超时；模型不得通过 public ABI 提供 timeoutMs。
-const HOST_CODING_TIMEOUT_MS = 30 * 60_000;
+// Host 统一覆盖上游 execution deadline 默认值；留出 timer 上限余量，不替代 owner/lease 心跳回收。
+const HOST_EXECUTION_TIMEOUT_MS = 2_147_000_000;
 
 // 根节点保持显式单一 object：glm/zai 等严格 OpenAI 兼容端对顶层联合组合子
 // （anyOf/oneOf/allOf）会生成空 arguments（docs/bugs/2026-09-14-glm-empty-tool-args-from-root-union-schema.md）。
@@ -114,9 +114,9 @@ export const TYPED_SUBAGENT_PARAMETERS = Object.freeze({
   },
 });
 
-export const TYPED_SUBAGENT_DESCRIPTION = `Delegate through the project-owned isolated subagent runtime. Use generic={agent,task} for research or text-only work, or coding={agent,task,writePaths,acceptance} for repository changes. Available agents: delegate (primary/complex), executor (deterministic), reviewer (review). Use {action:"list"} to see the current agent roster. Coding acceptance must be {criteria:[...]} and writePaths must contain at least one repository-relative path.
+export const TYPED_SUBAGENT_DESCRIPTION = `通过项目自有的隔离 subagent runtime 委派任务。参数为顶层扁平字段，无 generic/coding 包装键；runtime 按路由决定派发类型：action→control、writePaths→coding、其余→generic。只读调研或纯文本工作用 {agent,task}；仓库变更用 {agent,task,writePaths,acceptance:{criteria:[...]}}。可用 agent：delegate（主力/复杂任务）、executor（确定性执行）、reviewer（评审）。用 {action:"list"} 查看当前 agent 名单。coding 的 acceptance 必须为 {criteria:[...]}，writePaths 至少包含一个仓库相对路径。
 
-For coding work, provide the complete dispatch-ir.v2 contract; writePaths and acceptance are required. model is the only optional model selector. A qualified provider/model-id must exactly match the available catalog. A bare model-id with agent models matches the first currently available declared candidate with that ID, in declaration order; a miss fails and does not search the global catalog. A bare model-id with no agent models matches the available catalog by ascending full provider/model-id; that successful global-catalog path returns MODEL_MATCH_USED_GLOBAL_CATALOG in top-level details.warnings. Omitting model preserves agent metadata/default routing, including each profile's ordered models fallback chain. modelSelection reports requestedModel, resolvedModel, and source when applicable; neither requested nor resolved claims the actual child model. Runtime run/status/artifact actual-model metadata is authoritative. Worktrees use top-level worktree and cwd. All spawns are detached through RPC. Completion notifications are delivered automatically. After a successful spawn, do not use sleep, status polling, or supervisor pending to wait for completion. Continue only work independent of the children; if none remains, end the turn. Use status only for explicit user requests, intervention, or diagnostics. Supported control actions are status, steer, interrupt, resume, and stop. interrupt pauses the current turn; then use resume with a new non-empty message to continue it with new instructions. A stopped subagent cannot be resumed. When worktree=true, the response includes a workspace_id; after completion use subagent_worktree({action:"status"}) then integrate or discard to finish, or preserve temporarily and later release.`;
+coding 任务需提供完整 dispatch-ir.v2 合同；writePaths 与 acceptance 必填，model 是唯一可选的模型选择器。qualified provider/model-id 必须与可用 catalog 精确匹配。agent 声明了 models/model 时，声明候选链先于显式 model 被整体校验，API guard 覆盖全部已解析候选而非仅最终选中者；显式 model 不能绕过不可用候选、profile 全部缺失或 API guard。带 agent 声明的裸 model-id 按声明顺序匹配第一个当前可用且 ID 精确相等的候选；未命中即失败，不会检索全局 catalog。无 agent 声明的裸 model-id 按完整 provider/model-id 升序匹配可用 catalog；该路径成功时在顶层 details.warnings 返回 MODEL_MATCH_USED_GLOBAL_CATALOG。省略 model 时在启动期按声明顺序选择第一个当前可用的 profile 候选；这不是 provider 错误模型回退。modelSelection 在适用时报告 requestedModel、resolvedModel 与 source；requested 与 resolved 均不冒充子代理实际模型，runtime run/status/artifact 的 actual-model 元数据才是权威。worktree 隔离通过顶层 worktree 与 cwd 字段声明。所有 spawn 均经 RPC 以 detached 方式执行。完成通知自动送达；spawn 成功后不要用 sleep、轮询 status 或 supervisor pending 等待完成。只继续与子代理无关的工作，若无则结束当前 turn。status 仅用于用户明确要求、需要干预或诊断。支持的 control action 为 status、steer、interrupt、resume、stop。interrupt 中断当前 turn；resume 必须携带非空新消息，可将 paused/completed/failed 的 run 以新 run（新子会话）方式续跑并注入新指令，不承诺在原存活进程内就地继续；stopped 的 subagent 不可 resume。worktree=true 时响应携带 workspace_id，可用 subagent_worktree({action:"status"}) 查询状态与 allowed_dispositions。publication=allowed 的 coding 托管工作区（Auto Integration）集成由子代理 integration queue 自主拥有：父层不能对其执行 integrate（会返回 CHILD_OWNS_INTEGRATION），宿主不自动重放集成；子代理自行发布并释放，coding 任务待其 released 才算成功完成。已 released 的工作区无需额外处置；仍处于 active/preserved/cleanup-debt 的，按 subagent_worktree 状态权威返回的 allowed_dispositions、可用动作与 action_token 操作。并非所有 worktree 都禁止父层 integrate：publication=forbidden（generic）的工作区能否 integrate 以状态权威返回为准。`;
 
 const ASYNC_SPAWN_GUIDANCE = "Completion notifications arrive automatically; do not sleep, poll status, or call supervisor pending. If no independent work remains, end the turn.";
 const TRACE_PHASES = new Set([
@@ -356,7 +356,8 @@ export function codingWorkflowSpawnParams(ir, prompt, workflowKey, goalTicket?) 
     context: "fresh",
     child: {
       output: false,
-      timeoutMs: ir.timeoutMs,
+      ...(ir.worktree && ir.rootSessionId ? { extensionBindings: { 'pi-config.root/1': { rootSessionId: ir.rootSessionId } } } : {}),
+      timeoutMs: HOST_EXECUTION_TIMEOUT_MS,
       ...((ir.worktree || goalTicket) ? {
         subagentOnlyExtensions: [
           ...(ir.worktree ? [INTEGRATION_QUEUE_EXTENSION] : []),
@@ -375,7 +376,7 @@ export function codingWorkflowSpawnParams(ir, prompt, workflowKey, goalTicket?) 
 }
 
 function genericWorkflowSpawnParams(input, ctx, workflowKey) {
-  const child: Record<string, unknown> = {};
+  const child: Record<string, unknown> = { timeoutMs: HOST_EXECUTION_TIMEOUT_MS };
   for (const key of ["model", "output", "outputMode", "outputSchema", "skill", "reads", "progress", "acceptance"]) {
     if (input[key] !== undefined) child[key] = input[key];
   }
@@ -515,7 +516,13 @@ type DiscoveredAgent = {
   systemPrompt?: string;
   models?: string[];
   model?: string;
+  fallbackModels?: string[];
   thinking?: string | false;
+  tools?: string[];
+  disabled?: boolean;
+  filePath?: string;
+  /** repository admission 附带的完整原始 frontmatter 解析对象；仅 list 展示用，上游 discovery 来源没有。 */
+  metadata?: Record<string, unknown>;
 };
 type AgentDiscovery = { agents: DiscoveredAgent[]; admission?: string };
 
@@ -544,14 +551,14 @@ async function resolveSpawnModel(input, ctx, discover, trace, blockedProviders =
     error.code = admissionUnavailable ? "AGENT_ADMISSION_UNAVAILABLE" : "UNKNOWN_AGENT";
     throw error;
   }
-  if (!requestedModel) return { source: "default" };
+  const declaredProfile = agent.models !== undefined || agent.model !== undefined || agent.fallbackModels !== undefined;
+  if (!requestedModel && !declaredProfile) return { source: 'default' };
   const availableModels = ctx.modelRegistry?.getAvailable();
   if (!Array.isArray(availableModels)) {
     const error = new Error("MODEL_REGISTRY_UNAVAILABLE");
     error.code = "MODEL_REGISTRY_UNAVAILABLE";
     throw error;
   }
-  const declaredProfile = agent.models !== undefined || agent.model !== undefined || agent.fallbackModels !== undefined;
   const candidates = declaredProfile ? resolveModelCandidates({
     agentName: input.agent,
     models: agent.models,
@@ -560,6 +567,7 @@ async function resolveSpawnModel(input, ctx, discover, trace, blockedProviders =
     availableModels,
     blockedProviders,
   }) : undefined;
+  if (!requestedModel) return { source: "agent-default", model: candidates![0] };
   const selection = resolveModelSelection({
     requestedModel,
     agentName: input.agent,
@@ -578,10 +586,8 @@ async function resolveSpawnModel(input, ctx, discover, trace, blockedProviders =
 function modelSelectionDetails(selection) {
   return {
     source: selection.source,
-    ...(selection.requestedModel === undefined ? {} : {
-      requestedModel: selection.requestedModel,
-      resolvedModel: selection.model,
-    }),
+    ...(selection.model === undefined ? {} : { resolvedModel: selection.model }),
+    ...(selection.requestedModel === undefined ? {} : { requestedModel: selection.requestedModel }),
   };
 }
 
@@ -775,7 +781,7 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
   if (false && callerSuppliesExecutionTimeout(input)) {
     // Goal trusted contract: keep the caller-shaped timeout and its canonical
     // hash, but continue only when the Goal coordinator signs a ticket.
-    ir = compileDispatchIR(compileInput, { cwd: ctx.cwd, timeoutMs: HOST_CODING_TIMEOUT_MS });
+    ir = compileDispatchIR(compileInput, { cwd: ctx.cwd, timeoutMs: HOST_EXECUTION_TIMEOUT_MS });
     const bindingRequest = { toolCallId, contract: input, contractHash: ir.contractHash, ctx };
 
     ticket = await goalCoordinator?.prepareSpawn(bindingRequest);
@@ -788,7 +794,7 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
       );
     }
   } else {
-    ir = preparePublicCodingDispatch(compileInput, { cwd: ctx.cwd, timeoutMs: HOST_CODING_TIMEOUT_MS });
+    ir = preparePublicCodingDispatch(compileInput, { cwd: ctx.cwd, timeoutMs: HOST_EXECUTION_TIMEOUT_MS });
     const bindingRequest = { toolCallId, contract: input, contractHash: ir.contractHash, ctx };
 
     ticket = await goalCoordinator?.prepareSpawn(bindingRequest);
@@ -875,7 +881,7 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
       sessionId: lifecycleSessionIdentity(capabilities.session),
         timeoutMs: childStartTimeoutMs(workflowChildStartTimeoutMs, ir.timeoutMs),
 
-      params: codingWorkflowSpawnParams(dispatchThinkingLevel === undefined ? runtimeIr : { ...runtimeIr, thinkingLevel: dispatchThinkingLevel }, runtimePrompt, workflowKey, ticket),
+      params: codingWorkflowSpawnParams(dispatchThinkingLevel === undefined ? { ...runtimeIr, rootSessionId } : { ...runtimeIr, rootSessionId, thinkingLevel: dispatchThinkingLevel }, runtimePrompt, workflowKey, ticket),
       identity,
       titleRegistry,
       trace,
@@ -1165,7 +1171,7 @@ async function compensateSupervisorDelivery({ supervisorControlPlane, intent, ho
   }
 }
 
-async function executeControl(input, rpc, supervisorControlPlane, toolCallId, discover, ctx, resolveRootSessionId, diagnosticSink) {
+async function executeControl(input, rpc, supervisorControlPlane, toolCallId, discover, ctx, resolveRootSessionId, diagnosticSink, titleRegistry) {
 
   if (!CONTROL_ACTIONS.has(input.action)) {
     return failure("UNSUPPORTED_ACTION", `unsupported subagent RPC action: ${String(input.action)}`);
@@ -1174,12 +1180,21 @@ async function executeControl(input, rpc, supervisorControlPlane, toolCallId, di
     try {
       const discovery = await discover(ctx.cwd, "both", ctx.model?.provider);
       // 只返回项目 agent（pi/agents/ 目录），过滤 ~/.agents/ 下的 skill 定义
-      const agents = discovery.agents
-        .filter((a) => !a.disabled && a.filePath && !a.filePath.includes(".agents"))
-        .map((a) => ({ name: a.name, model: a.model ?? null, tools: a.tools ?? null }))
+      const visible = discovery.admission === "repository-configured"
+        ? discovery.agents.filter((a) => !a.disabled)
+        : discovery.agents.filter((a) => !a.disabled && a.filePath && !a.filePath.includes(".agents"));
+      const agents = visible
+        .map((a) => ({
+          name: a.name, description: a.description ?? "", model: a.model ?? null, models: a.models ?? [], tools: a.tools ?? null,
+          // 已准入 agent 附带完整原始 frontmatter（不含 systemPrompt 正文）；来源未提供时不得伪造默认字段。
+          ...(isRecord(a.metadata) ? { metadata: structuredClone(a.metadata) } : {}),
+        }))
         .sort((a, b) => a.name.localeCompare(b.name));
+      // list 是模型选择入口：agent 实际收到的 content 必须携带 frontmatter 元数据（仅改 TUI renderer 不足够），
+      // 输出 name+frontmatter 条目数组；structured details.agents 保留既有字段并附带同一 metadata。
+      const roster = agents.map(({ name, metadata }) => ({ name, ...(metadata ? { frontmatter: metadata } : {}) }));
       return {
-        content: [{ type: "text", text: `Available agents: ${agents.map((a) => a.name).join(", ")}` }],
+        content: [{ type: "text", text: JSON.stringify(roster, null, 2) }],
         isError: false,
         details: { agents },
       };
@@ -1231,14 +1246,23 @@ async function executeControl(input, rpc, supervisorControlPlane, toolCallId, di
       }
     }
   }
-  return rpcResult(await rpc[action](params));
+  const reply = await rpc[action](params);
+  if (action === "resume" && reply?.isError !== true) {
+    // 只沿用公开回复确认的新身份；不猜测提前 started 事件或目录、前缀的旧身份。
+    const oldRunId = params.id ?? params.runId;
+    const newRunId = reply?.details?.runId ?? reply?.details?.asyncId;
+    const title = titleRegistry.titleFor(oldRunId);
+    if (nonempty(newRunId) && title && !titleRegistry.titleFor(newRunId)) {
+      titleRegistry.remember(newRunId, title, titleRegistry.agentFor(oldRunId) ?? reply?.details?.agent);
+    }
+  }
+  return rpcResult(reply);
 }
 
 function createControlledSupervisorAdapter(adapter, supervisorControlPlane, registrationFailures, resolveRootSessionId, diagnosticSink) {
   if (!supervisorControlPlane) return adapter;
-  return Object.freeze({
-    bind: (...args) => adapter.bind(...args), dispose: () => adapter.dispose?.(), isBound: () => adapter.isBound?.(),
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
+  const flights = new Map<string, Promise<unknown>>();
+  const executeReply = async (toolCallId, params, signal, onUpdate, ctx) => {
       if (params?.action !== "reply" || supervisorControlPlane.enabled?.() === false) return adapter.execute(toolCallId, params, signal, onUpdate, ctx);
       let hostRootSessionId;
       try { hostRootSessionId = resolveRootSessionId?.(ctx?.sessionManager); } catch { /* fail closed below */ }
@@ -1273,6 +1297,16 @@ function createControlledSupervisorAdapter(adapter, supervisorControlPlane, regi
         const compensationError = await compensateSupervisorDelivery({ supervisorControlPlane, intent: decision.intent, hostRootSessionId, code: "SUPERVISOR_REPLY_DELIVERY_FAILED", primaryError: error, diagnosticSink, phase: "reply" });
         throw compensationError ? new AggregateError([error, compensationError], "supervisor reply delivery and compensation failed", { cause: error }) : error;
       }
+  };
+  return Object.freeze({
+    bind: (...args) => adapter.bind(...args), dispose: () => adapter.dispose?.(), isBound: () => adapter.isBound?.(),
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      if (params?.action !== 'reply' || typeof params.replyTo !== 'string') return executeReply(toolCallId, params, signal, onUpdate, ctx);
+      const key = params.replyTo;
+      const prior = flights.get(key);
+      const flight = Promise.resolve(prior).catch(() => undefined).then(() => executeReply(toolCallId, params, signal, onUpdate, ctx));
+      flights.set(key, flight);
+      try { return await flight; } finally { if (flights.get(key) === flight) flights.delete(key); }
     },
   });
 }
@@ -1438,6 +1472,9 @@ type TypedSubagentExtensionOptions = {
   providerBlacklist?: readonly string[];
   diagnosticSink?: (entry: unknown) => void;
   workingStateTrace?: (entry: unknown) => void;
+  // Host 声明的共享 AGENTS 注入项（如 { id: "agents-shared", path: <absolute> }）。
+  // 仅由真实 main entry 传入；无 Host 声明时不伪默认，既有调用与测试不受影响。
+  requiredSharedChildExtension?: { id: string; path: string };
 };
 
 export function createTypedSubagentExtension(
@@ -1473,6 +1510,7 @@ export function createTypedSubagentExtension(
     discoverAgents: discover = defaultDiscoverAgents,
     providerBlacklist = [],
     diagnosticSink,
+    requiredSharedChildExtension,
   }: TypedSubagentExtensionOptions = {},
 ) {
   // Durable debt retention supersedes this legacy opt-in; retain it for callers on the old API.
@@ -1537,6 +1575,7 @@ export function createTypedSubagentExtension(
 
   const tool = {
     name: "subagent",
+    exposure: "model-only" as const,
     label: "Subagent",
     description: TYPED_SUBAGENT_DESCRIPTION,
     parameters: TYPED_SUBAGENT_PARAMETERS,
@@ -1564,7 +1603,7 @@ export function createTypedSubagentExtension(
           return result;
         }
         if (Object.hasOwn(input, "action")) {
-          const result = await executeControl(input, rpc, supervisorControlPlane, toolCallId, discover, ctx, resolveRootSessionId, diagnosticSink);
+          const result = await executeControl(input, rpc, supervisorControlPlane, toolCallId, discover, ctx, resolveRootSessionId, diagnosticSink, titleRegistry);
           trace("tool-returned");
           return result;
         }
@@ -1686,11 +1725,18 @@ export function createTypedSubagentExtension(
         await repayDebts(debtLane, shutdownDebt, ctx);
         const sessionId = lifecycleSessionIdentity(ctx?.sessionManager);
         if (sessionId && !requiredChildExtensionsRegistration) {
+          // 同一现有 required-child 注册数组追加共享注入项，不得另起 register 造成
+          // same-session duplicate。requireForAllRunners 是 registration 顶层 flag
+          // （注册快照逐条只收 id/path，per-entry 形状会被拒绝），置位会把既有
+          // root-session-owner/integration-queue 义务一并改写，因此保持缺省。
           requiredChildExtensionsRegistration = registerRequiredChildExtensions({
             sessionId,
             extensions: [
               { id: "root-session-owner", path: ROOT_SESSION_OWNER_EXTENSION },
               { id: "integration-queue", path: INTEGRATION_QUEUE_EXTENSION },
+              ...(requiredSharedChildExtension
+                ? [{ id: requiredSharedChildExtension.id, path: requiredSharedChildExtension.path }]
+                : []),
             ],
           });
         }

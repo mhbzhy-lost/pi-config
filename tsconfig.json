@@ -10,10 +10,13 @@
     "skipLibCheck": true,
     "strict": false,
     "target": "ES2024",
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
   "include": [
-    "src/agents-append/**/*.ts",
+    "src/agents-shared/**/*.ts",
+    "src/agents-global/**/*.ts",
     "src/apply-patch/**/*.ts",
     "src/bash-cwd/**/*.ts",
     "src/basic-memory/**/*.ts",
@@ -24,6 +27,16 @@
     "src/skill-whitelist/**/*.ts",
     "src/session-owner/**/*.ts",
     "scripts/pi-session-owner.ts",
-    "pi/extensions/session-owner.ts"
+    "scripts/ensure-pi-settings.ts",
+    "pi/extensions/compact-tools.ts",
+    "pi/extensions/session-owner.ts",
+    "pi/extensions/agents-shared.ts",
+    "pi/extensions/agents-global.ts",
+    "src/mcp-policy/**/*.ts",
+    "src/task-scheduler/**/*.ts",
+    "pi/extensions/mcp-policy.ts",
+    "scripts/resolve-physical-pi.ts",
+    "scripts/assert-session-tool-policy.ts",
+    "scripts/probes/physical-host.ts"
   ]
 }

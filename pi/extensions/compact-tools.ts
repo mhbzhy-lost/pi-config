@@ -14,6 +14,7 @@ import { createCompactToolRenderers } from "../../src/compact-tools/renderer.ts"
 
 const COMPACT_SKILL_PATCH = Symbol.for("pi-config.compact-skill-renderer");
 const COMPACT_SUMMARY_KEY = "compactToolsEntrySummary";
+const SHARED_COMPACT_SUMMARY_KEY = "compactToolsSummary";
 
 function textOutput(result: any): string {
   return result?.content?.filter((item: any) => item?.type === "text").map((item: any) => item.text || "").join("\n") || "";
@@ -57,7 +58,11 @@ function installCompactReadSkillRenderer(readRenderer: any) {
   };
 
   readRenderer.renderResult = (result: any, options: any, theme: any, context: any) => {
-    if (!options.expanded && skillName(context?.args)) return new Text("", 0, 0);
+    const failed = context?.isError === true || result?.isError === true;
+    if (!options.expanded && skillName(context?.args) && !failed) {
+      if (context?.state) delete context.state[COMPACT_SUMMARY_KEY];
+      return new Text("", 0, 0);
+    }
     return renderResult(result, options, theme, context);
   };
 }
@@ -97,9 +102,23 @@ function installCollapsedSingleLineRenderer(name: ToolName, renderer: any) {
   };
 
   renderer.renderResult = (result: any, options: any, theme: any, context: any) => {
+    const failed = context?.isError === true || result?.isError === true;
+    if (failed) {
+      if (context?.state) {
+        delete context.state[COMPACT_SUMMARY_KEY];
+        delete context.state[SHARED_COMPACT_SUMMARY_KEY];
+      }
+      const output = renderResult(result, options, theme, context);
+      // Host外层消费共享错误组件后清理共享摘要，避免错误状态叠加旧成功摘要。
+      if (context?.state) delete context.state[SHARED_COMPACT_SUMMARY_KEY];
+      return output;
+    }
     if (options.expanded) return renderResult(result, options, theme, context);
     if (!(name === "read" && skillName(context?.args)) && context?.state) {
       context.state[COMPACT_SUMMARY_KEY] = compactSummary(name, result);
+    } else if (context?.state) {
+      delete context.state[COMPACT_SUMMARY_KEY];
+      delete context.state[SHARED_COMPACT_SUMMARY_KEY];
     }
     return new Text("", 0, 0);
   };

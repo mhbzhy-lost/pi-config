@@ -5,13 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-const npmRoot = spawnSync("npm", ["root", "-g"], { encoding: "utf8" });
-assert.equal(npmRoot.status, 0, npmRoot.stderr);
-const {
-  createAgentSession,
-  DefaultResourceLoader,
-  SessionManager,
-} = await import(join(npmRoot.stdout.trim(), "@earendil-works", "pi-coding-agent", "dist", "index.js"));
+import { loadPiTestRuntime } from './helpers/pi-runtime.mjs';
+const { codingAgent: { createAgentSession, DefaultResourceLoader, SessionManager } } = await loadPiTestRuntime(import.meta.url);
 import { installHeadlessTypedSubagentRuntime } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
 import { RootBrokerServer } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-server.ts";
 

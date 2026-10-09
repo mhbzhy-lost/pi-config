@@ -180,11 +180,11 @@ function schedulerFooterStatus(result) {
   }
   return undefined;
 }
-function wrapTool(definition, hooks = {}) {
+function wrapTool(definition, hooks: { refresh?: (ctx: any) => Promise<void> } = {}) {
   if (!ALLOWED_TOOLS.has(definition?.name)) { diagnostic(`dropped tool: ${definition?.name || "unknown"}`); return undefined; }
   const description = [TOOL_USAGE[definition.name], definition.description].filter(Boolean).join(" ");
-  if (definition.name === "scheduler_list" || definition.name === "scheduler_get") return { ...definition, description, execute: async (...args) => boundedResult(await definition.execute(...args)) };
-  return { ...definition, description, execute: async (...args) => {
+  if (definition.name === "scheduler_list" || definition.name === "scheduler_get") return { ...definition, exposure: "model-only", description, execute: async (...args) => boundedResult(await definition.execute(...args)) };
+  return { ...definition, exposure: "model-only", description, execute: async (...args) => {
     const params = args[1], ctx = args[4];
     if (definition.name === "scheduler_create") {
       scanPersistent(params?.prompt);

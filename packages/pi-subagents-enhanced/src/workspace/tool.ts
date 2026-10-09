@@ -26,11 +26,11 @@ export const SUBAGENT_WORKSPACE_PARAMETERS = Object.freeze({
   type: "object", anyOf: [WORKSPACE_LIST_SCHEMA, WORKSPACE_STATUS_SCHEMA, WORKSPACE_DISPOSE_SCHEMA, WORKSPACE_RELEASE_SCHEMA],
 });
 export const SUBAGENT_WORKSPACE_DESCRIPTION =
-  "Use this when a subagent dispatch with worktree=true returned a workspace_id and the run has completed. " +
-  "Every allocated workspace must be explicitly handled: integrate or discard to finish, or preserve temporarily and later release. " +
-  "Start with action:\"status\" to see allowed_dispositions and any integrate_blocked_reasons. " +
-  `Workspace states: ${MANAGED_WORKSPACE_STATES.join(" | ")}. ` +
-  `Agent-callable actions per state: ${MANAGED_WORKSPACE_STATES.map((state) => `${state}=[${allowedActionsFor(state).join(",") || "none"}]`).join("; ")}.`;
+  "当 worktree=true 的 subagent 派发返回 workspace_id 且 run 已完成时使用本工具。 " +
+  "每个已分配的工作区都必须显式处置，处置选项不固定：以 status 返回的 allowed_dispositions 与 integrate_blocked_reasons 为准，已 released 的即为终态、无需额外处置；先用 action:\"status\" 查看状态、allowed_dispositions 与 integrate_blocked_reasons，再按各状态可执行的动作携带 action_token 操作。 " +
+  "publication=allowed 的 coding 托管工作区（Auto Integration）集成由子代理 integration queue 自主拥有：父层对其执行 integrate 会被拒绝（CHILD_OWNS_INTEGRATION），子代理自行发布并释放；并非所有工作区都禁止父层 integrate，publication=forbidden（generic）的工作区能否 integrate 以状态权威返回为准。 " +
+  `工作区状态：${MANAGED_WORKSPACE_STATES.join(" | ")}。 ` +
+  `各状态下 agent 可执行的动作：${MANAGED_WORKSPACE_STATES.map((state) => `${state}=[${allowedActionsFor(state).join(",") || "none"}]`).join("; ")}。`;
 
 function nonempty(value) { return typeof value === "string" && value.length > 0; }
 function failure(code, message, detail = undefined, keypath = undefined) {
@@ -58,6 +58,7 @@ export function createSubagentWorkspaceTool({ service, resolveRootSessionId, ren
   if (!service || typeof resolveRootSessionId !== "function") throw new TypeError("subagent workspace tool requires service and root-session resolver");
   return {
     name: "subagent_worktree",
+    exposure: "model-only" as const,
     label: "Subagent Workspace",
     description: SUBAGENT_WORKSPACE_DESCRIPTION,
     parameters: SUBAGENT_WORKSPACE_PARAMETERS,
