@@ -1,6 +1,18 @@
 # Runtime 后续待办（不纳入当前现代化计划）
 
-本文是待办账本，不是实施计划，也不构成自动执行、真实流程验证、系统权限申请或提交授权。当前 `docs/plans/2026-10-10-pi104-runtime-modernization.md` 继续按既定 DAG 推进；以下三项均未实施。
+本文是待办账本，不是实施计划，也不构成自动执行、真实流程验证、系统权限申请或提交授权。`docs/plans/2026-10-10-pi104-runtime-modernization.md` 已在授权范围内收口，成果已由 commit `7aa0e18e102effa24f146773eb0999f35e3a7aff` 提交；但仍未完成真实 Host 验证，不能将计划收口表述为真实流程验收。以下三项均未实施。
+
+## 建议顺序 / 状态总览
+
+| 建议顺序 | 条目 | 当前状态与边界 |
+| --- | --- | --- |
+| 1 | RPC `rpc:v1/session` 协商调查 | 优先定位生产阻断；来源与首个偏离仍待补 provenance，未修复。 |
+| 2 | supervisor reply/pending/steer 视图调查 | 用于定位问题与澄清产品合同；现有身份、消费与权限门禁保持 fail-closed，未修控制面。 |
+| 3 | heartbeat / 孤儿清理覆盖 | 先核实合法 production 入口、权威身份、事件/进程顺序与首个偏离，完成来源分类；不将 heartbeat 结论写成其它条目的硬依赖，也未修复覆盖缺口。 |
+| 4 | 纯派发 `triggerTurn` | 随后再作体验优化；仅调整精确识别的纯派发回执 options，不丢消息、不改持久化或后续可见性，未实施。 |
+| 5 | 主会话空闲系统通知 | 用户明确暂缓；重新授权前不实施，仅在未来核实登记及主会话生命周期覆盖后再议。 |
+
+以上排序只是建议，不自动执行；当前用户仅授权梳理，不授权上述实现或真实流程。新模型列表工具另行交付，不属于这五项，也不纳入已完成现代化历史。
 
 ## 三项遗留任务
 
@@ -9,7 +21,7 @@
   - 新活动使旧通知候选失效，status 查询失败或身份不明不发送；不另加任务成功、workspace 释放、terminal proof 或 completion 消费要求。
   - macOS `osascript` 可发系统通知，常驻样式由系统设置决定，不能保证永久常驻。
   - 依据：`docs/decisions/2026-10-10-idle-system-notification.md`。
-  - 后续必须结合下述 heartbeat 覆盖缺口核实登记及主会话生命周期，不能把“所有 child 都受 heartbeat 保护”当作已证事实。尚未发送通知或申请权限。
+  - 未来实现前仅需核实本通知所需的登记及主会话生命周期覆盖，不能把“所有 child 都受 heartbeat 保护”当作已证事实；heartbeat 覆盖调查不是其它待办的硬依赖。尚未发送通知或申请权限。
 
 - [ ] **纯派发回执选择性关闭 `triggerTurn`**
   - 以相对于本仓 subagent tool 最终返回的有效新增信息为判据。重复 child ID、仍在运行、空 results 与诊断路径通常无需单独唤醒主 agent。
@@ -30,4 +42,4 @@
 - RPC `rpc:v1/session` 协商失败：`docs/bugs/2026-10-10-rpc-session-capability-negotiation.md`，来源待证，按用户要求现代化后处理。
 - supervisor reply/pending/steer 视图差异：`docs/bugs/2026-10-10-supervisor-reply-required-state-views.md`，门禁与消费窗口已解释，存疑样本及产品限制保留待查，未修控制面。
 
-以上条目保持未勾选；现代化结束不自动解释为以上实施已获授权。
+以上条目保持未勾选；现代化收口与成果提交不自动解释为以上实施已获授权。
