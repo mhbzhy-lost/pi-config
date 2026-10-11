@@ -4,7 +4,6 @@ import { homedir, tmpdir } from "node:os";
 
 const COMMIT_TYPES = new Set(["feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert"]);
 const WRAPPERS = new Set(["sudo", "command", "env"]);
-const SOURCE_PATH = /\.(?:[cm]?[jt]sx?|py|rb|go|rs|java|kt|swift|c|cc|cpp|h|hpp|cs)$/i;
 
 function violation(code, reason) {
   return { block: true, code, reason };
@@ -330,14 +329,4 @@ export function checkShellPolicy({ command, cwd, workspaceRoot, env = {} }: { co
     if (commitViolation) return commitViolation;
   }
   return undefined;
-}
-
-export function codingReminderFor({ toolName, input }) {
-  if (!new Set(["write", "edit"]).has(toolName)) return undefined;
-  const path = input?.path ?? input?.filePath ?? input?.file_path ?? input?.filename;
-  if (!path || !SOURCE_PATH.test(path)) return undefined;
-  const normalized = path.replaceAll("\\", "/");
-  const basename = normalized.split("/").at(-1);
-  if (/(?:^|\/)__(?:tests?)__\//.test(normalized) || /(?:^|\/)(?:tests?|test)\//.test(normalized) || /(?:^|[._-])(?:test|spec)(?:[._-]|$)/i.test(basename)) return undefined;
-  return "逻辑变更请先遵循 test-driven-development，并在修复问题前记录 docs/bugs/bug-*.md 根因分析。";
 }

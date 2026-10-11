@@ -38,7 +38,7 @@ test("shell integration makes bare pi use the repository configuration", async (
       sessions: join(repoRoot, "var", "sessions"),
       goals: join(repoRoot, "var", "goals"),
       workspaces: join(repoRoot, "var", "workspaces"),
-      args: ["--no-skills", "--tui-mode", "fullscreen", "--version"],
+      args: ["--tui-mode", "fullscreen", "--version"],
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -156,7 +156,7 @@ test("bare pi forwards without shell ANSI output", async () => {
 
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, "");
-    assert.equal(await readFile(output, "utf8"), "--no-skills\n--tui-mode\nfullscreen\n");
+    assert.equal(await readFile(output, "utf8"), "--tui-mode\nfullscreen\n");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -181,7 +181,7 @@ test("pi-inline requests official regular TUI mode", async () => {
 
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, "");
-    assert.equal(await readFile(output, "utf8"), "--no-skills\n--tui-mode\nregular\n--version\n");
+    assert.equal(await readFile(output, "utf8"), "--tui-mode\nregular\n--version\n");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -207,7 +207,7 @@ test("pi-full requests official fullscreen TUI mode", async () => {
     assert.equal(result.error, undefined, result.error?.message);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, "");
-    assert.equal(await readFile(output, "utf8"), "--no-skills\n--tui-mode\nfullscreen\n--version\n");
+    assert.equal(await readFile(output, "utf8"), "--tui-mode\nfullscreen\n--version\n");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -268,13 +268,14 @@ test("pi-full reuses the pi entry when its launch policy is overridden", async (
       `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; pi() { _pi_config_invoke --tui-mode regular "$@"; }; pi-full --version`,
     ], { encoding: "utf8", env: { ...process.env, ...physicalLauncherFixture(fakePi), OUTPUT: output } });
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(await readFile(output, "utf8"), "--no-skills\n--tui-mode\nregular\n--version\n");
+    assert.equal(await readFile(output, "utf8"), "--tui-mode\nregular\n--version\n");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
 // Catches defaults appended after explicit options, lost quoting/--, or divergent entries.
+// explicit 分支同时断言用户显式 --no-skills 原样转发（helper 不再隐式禁用）。
 for (const entry of ["pi", "pi-full"]) {
   for (const explicit of [false, true]) {
     test(`${entry} forwards ${explicit ? "explicit regular ahead of the prompt" : "fullscreen defaults"} and package environment`, async () => {
@@ -285,13 +286,13 @@ for (const entry of ["pi", "pi-full"]) {
         await writeFile(fakePi, `#!/usr/bin/env bash\nnode -e 'require("fs").writeFileSync(process.env.OUTPUT, JSON.stringify({ args: process.argv.slice(1), packageDir: process.env.PI_PACKAGE_DIR, config: process.env.PI_CODING_AGENT_DIR, owner: process.env.PI_SESSION_OWNER_ID ?? null }))' -- "$@"\n`);
         await chmod(fakePi, 0o755);
         const result = spawnSync("zsh", ["-f", "-c",
-          `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; ${entry} ${explicit ? "--tui-mode regular" : ""} --version -- 'prompt with spaces' '--tui-mode' 'regular'`,
+          `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; ${entry} ${explicit ? "--no-skills --tui-mode regular" : ""} --version -- 'prompt with spaces' '--tui-mode' 'regular'`,
         ], { encoding: "utf8", env: { ...process.env, ...physicalLauncherFixture(fakePi), OUTPUT: output,
           PI_CODING_AGENT_DIR: "/stale-repo/pi", PI_SESSION_OWNER_ID: "stale-owner" } });
         assert.equal(result.status, 0, result.stderr);
         assert.equal(result.stdout, "");
         assert.deepEqual(JSON.parse(await readFile(output, "utf8")), {
-          args: ["--no-skills", "--tui-mode", "fullscreen", ...(explicit ? ["--tui-mode", "regular"] : []),
+          args: ["--tui-mode", "fullscreen", ...(explicit ? ["--no-skills", "--tui-mode", "regular"] : []),
             "--version", "--", "prompt with spaces", "--tui-mode", "regular"],
           packageDir: realpathSync(join(root,"physical/node_modules/@earendil-works/pi-coding-agent")), config: join(repoRoot, "pi"), owner: null,
         });

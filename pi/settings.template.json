@@ -22,7 +22,13 @@
   },
   "defaultTools": [
     "+codemode",
-    "-tool_search"
+    "-tool_search",
+    "+grep",
+    "+find",
+    "+ls"
+  ],
+  "skills": [
+    "!**/plan-runner-dispatch/**"
   ],
   "extensions": [
     "-builtin:tool-search",

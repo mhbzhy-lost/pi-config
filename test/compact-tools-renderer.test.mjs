@@ -157,6 +157,14 @@ test("skill invocations use the compact tool shell in collapsed and expanded mod
       fg: (_color, text) => text,
     },
   });
+  const installed = FakeSkillInvocationMessageComponent.prototype.updateDisplay;
+  rendererModule.installCompactSkillRenderer({
+    SkillInvocationMessageComponent: FakeSkillInvocationMessageComponent,
+    Text: FakeText,
+    Markdown: FakeMarkdown,
+    theme: { bold: () => "不应替换", fg: () => "不应替换" },
+  });
+  assert.equal(FakeSkillInvocationMessageComponent.prototype.updateDisplay, installed);
   const component = new FakeSkillInvocationMessageComponent({
     name: "test-driven-development",
     content: "first line\nsecond line",

@@ -13,8 +13,12 @@ import {
   SkillInvocationMessageComponent,
   ToolExecutionComponent,
   UserMessageComponent,
+  type EntryRenderer,
+  type MessageRenderer,
+  type Theme,
+  type ToolRenderers,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Spacer, type MarkdownTheme } from "@earendil-works/pi-tui";
+import { Container, Spacer, Text, type MarkdownTheme } from "@earendil-works/pi-tui";
 
 const MAX_SESSION_BYTES = 64 * 1024 * 1024;
 
@@ -24,6 +28,7 @@ type RenderOptions = {
   width: number;
   cwd: string;
   markdownTheme: MarkdownTheme;
+  theme?: Theme;
   ui: { requestRender(): void };
   expandedTools: boolean;
   hideThinking: boolean;
@@ -41,7 +46,9 @@ type Dependencies = {
   onSnapshot?: () => void;
   afterOpen?: () => void;
   onToolResult?: (item: any) => void;
-  resolveToolRenderer?: (name: string) => any;
+  resolveToolRenderer?: (name: string) => ToolRenderers | undefined;
+  resolveMessageRenderer?: (customType: string) => MessageRenderer | undefined;
+  resolveEntryRenderer?: (customType: string) => EntryRenderer | undefined;
 };
 
 type CheckedFile = {
@@ -80,17 +87,14 @@ function isInside(root: string, candidate: string): boolean {
   return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== "..");
 }
 
-function customEntryMessage(entry: any) {
-  const content = typeof entry.data === "string" ? entry.data : JSON.stringify(entry.data ?? "");
-  return { role: "custom" as const, customType: entry.customType, content, display: true, timestamp: entry.timestamp };
-}
-
 export class NativeChildConversationRenderer {
   private readonly openSession: typeof SessionManager.open;
   private readonly onSnapshot?: () => void;
   private readonly afterOpen?: () => void;
   private readonly onToolResult?: (item: any) => void;
-  private readonly resolveToolRenderer?: (name: string) => any;
+  private readonly resolveToolRenderer?: Dependencies["resolveToolRenderer"];
+  private readonly resolveMessageRenderer?: Dependencies["resolveMessageRenderer"];
+  private readonly resolveEntryRenderer?: Dependencies["resolveEntryRenderer"];
   private readonly sessions = new Map<string, CachedSession>();
   private readonly rendered = new Map<string, NativeConversationResult>();
   private readonly themeIds = new WeakMap<object, number>();
@@ -103,6 +107,8 @@ export class NativeChildConversationRenderer {
     this.afterOpen = dependencies.afterOpen;
     this.onToolResult = dependencies.onToolResult;
     this.resolveToolRenderer = dependencies.resolveToolRenderer;
+    this.resolveMessageRenderer = dependencies.resolveMessageRenderer;
+    this.resolveEntryRenderer = dependencies.resolveEntryRenderer;
   }
 
   invalidate(): void {
@@ -121,7 +127,8 @@ export class NativeChildConversationRenderer {
 
     try {
       const themeId = this.themeIdentity(options.markdownTheme);
-      const key = [checked.realPath, checked.fingerprint, options.width, options.cwd, options.expandedTools, options.hideThinking, options.outputPad, themeId].join("\0");
+      const entryThemeId = options.theme ? this.themeIdentity(options.theme) : "";
+      const key = [checked.realPath, checked.fingerprint, options.width, options.cwd, options.expandedTools, options.hideThinking, options.outputPad, themeId, entryThemeId].join("\0");
       const cached = this.rendered.get(key);
       if (cached) return cached;
 
@@ -199,7 +206,7 @@ export class NativeChildConversationRenderer {
     }
   }
 
-  private themeIdentity(theme: MarkdownTheme): string {
+  private themeIdentity(theme: MarkdownTheme | Theme): string {
     if (typeof theme === "object" && theme !== null) {
       let id = this.themeIds.get(theme);
       if (!id) { id = this.nextThemeId++; this.themeIds.set(theme, id); }
@@ -213,9 +220,15 @@ export class NativeChildConversationRenderer {
     const pendingTools = new Map<string, InstanceType<typeof ToolExecutionComponent>>();
     for (const item of items as any[]) {
       if (item.type === "custom") {
-        const custom = new CustomMessageComponent(customEntryMessage(item), undefined, options.markdownTheme, options.outputPad);
-        custom.setExpanded(options.expandedTools);
-        container.addChild(custom);
+        const renderer = this.resolveEntryRenderer?.(item.customType);
+        // entry 不转换成 custom message；未知类型保留明确的只读显示 fallback。
+        const component = renderer && options.theme
+          ? renderer(item, { expanded: options.expandedTools }, options.theme)
+          : new Text(`[Custom entry: ${item.customType}]\n${typeof item.data === "string" ? item.data : JSON.stringify(item.data ?? "")}`, options.outputPad, 0);
+        if (component) {
+          container.addChild(new Spacer(1));
+          container.addChild(component);
+        }
         continue;
       }
       switch (item.role) {
@@ -274,7 +287,7 @@ export class NativeChildConversationRenderer {
         }
         case "custom": {
           if (!item.display) break;
-          const custom = new CustomMessageComponent(item, undefined, options.markdownTheme, options.outputPad);
+          const custom = new CustomMessageComponent(item, this.resolveMessageRenderer?.(item.customType), options.markdownTheme, options.outputPad);
           custom.setExpanded(options.expandedTools);
           container.addChild(custom);
           break;

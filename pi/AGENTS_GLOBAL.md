@@ -43,6 +43,19 @@ DAG 用于描述各子任务之间的依赖关系，当某个子任务的前置�
 
 计划执行完成后的成果 review 须用户明确授权后方可派发；用户拒绝或跳过时，直接交付。完整授权与次数规则见「Reviewer 授权与次数」。
 
+### Subagent 组合流程
+
+每次派发到结果处置按固定顺序推进，细节以对应小节为准，不复制工具参数手册：
+
+1. `list` 查看当前可用 agent 与档位；
+2. 角色选择：review 用 `reviewer`，复杂开发用 `delegate`，确定性执行用 `executor`（见「模型分级」）；
+3. 按「派发格式」派发 subagent，任务附完整合同、WritePaths、验收标准与停止条件；
+4. 处理 child 的 reply 与 steer：需要时补充指导或纠偏，不代写 child 结论；
+5. 按任务验收标准核对结果；spawn/completion/status 回执都不等于 terminal proof；
+6. coding 任务按「Workspace 处置」以当次 `status` 返回的 `state` 为权威处置受管 workspace。
+
+角色方法论在各 agent profile 正文，作为 child system 的一部分；单次任务合同通过 dispatch task 进入 child user 输入。主会话治理与组合流程归本文件，共同规范归 `pi/AGENTS_SHARED.md`，SHARED 不收纳多工具流程。首轮计划 reviewer 自动唯一一次、后续每轮用户授权、无固定次数上限，规则见「Reviewer 授权与次数」。
+
 ### 派发格式
 
 coding（修改仓库文件）：`{agent, task, writePaths, acceptance:{criteria}}` 必填，`{title, model, worktree, cwd}` 可选。
@@ -129,6 +142,16 @@ if (status.state === "preserved" || status.state === "cleanup-debt") {
 - `status` 仅限用户要求、干预或诊断。
 - `resume` 必须携带非空新 message；暂停/完成/失败均有恢复路径，stopped 不可恢复。resume 不承诺原 live process 无条件续跑。
 - spawn 回执、completion/status 都不等于 terminal proof。
+
+### 主管恢复规则（偶发失败优先 resume）
+
+收到 subagent runtime-failed 时，先按错误信息与现场证据判断故障性质，再决定处理方式：
+
+- 判定为上游过载、暂时性流中断等偶发 provider/transport 故障，且原 child 持久化 session、身份与执行合同仍有效时，优先 `resume` 原 run：附非空新指导，继续既有 child 会话历史，不另起 fresh 派发。
+- resume 前核对已完成改动、正在执行的工具或命令与剩余验收，不重放已完成步骤。没有工具副作用是最简单情形；已有合法写入不机械禁止 resume，但必须先核实并在新指导中明确从停点继续。
+- `resume` 以新 run 打开旧 child 持久化 session，不是原 live 进程原地继续，也不恢复父会话全部 history。
+- 不可恢复/stopped、权限或身份失败、来源不明的失败不属于偶发 provider 故障，不得按本规则 resume。无法证明安全续跑时报告阻塞：不自动 fresh 重派、不更换模型、不无限重试；同一故障的恢复再次失败时重新决策，不建立 daemon 式常驻重试。
+- 本规则只描述主管对既有 `resume` 能力的决策顺序，不授权绕过写路径、用户审批或 API guard。
 
 ### Reviewer 授权与次数
 

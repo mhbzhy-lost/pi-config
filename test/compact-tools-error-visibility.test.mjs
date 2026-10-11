@@ -1,8 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { loadPiTestRuntime } from "./helpers/pi-runtime.mjs";
 import { createCompactToolRenderers, sampleArgs } from "../src/compact-tools/renderer.ts";
@@ -10,22 +7,12 @@ import { createCompactToolRenderers, sampleArgs } from "../src/compact-tools/ren
 const { codingAgent: sdk, piTui: tui, jiti } = await loadPiTestRuntime(import.meta.url);
 sdk.initTheme("dark", false);
 const compactFactory = (await jiti.import("../pi/extensions/compact-tools.ts")).default;
-const bashFactory = (await jiti.import("../pi/extensions/bash-cwd.ts")).default;
-const definitions = [];
-const api = { registerTool(tool) { definitions.push(tool); }, on() {} };
-// bash入口初始化会读取cwd设置，故只在自有空目录注册，不接触真实项目配置。
-const registrationCwd = await mkdtemp(join(tmpdir(), "compact-errors-"));
-const previousCwd = process.cwd();
-try {
-  process.chdir(registrationCwd);
-  compactFactory(api);
-  bashFactory(api);
-} finally {
-  process.chdir(previousCwd);
-  await rm(registrationCwd, { recursive: true, force: true });
-}
+const resolvers = [];
+const api = { registerToolRenderer(resolver) { resolvers.push(resolver); }, on() {} };
+// 仅绑定显示 resolver，不初始化 bash 执行 owner、设置存储或 Host session。
+compactFactory(api);
 const shared = createCompactToolRenderers(tui);
-const host = Object.fromEntries(definitions.map((definition) => [definition.name, definition]));
+const host = Object.fromEntries(Object.keys(sampleArgs).map((name) => [name, resolvers[0](name, () => undefined)]));
 const theme = { bold: (text) => text, fg: (_color, text) => text };
 const plain = (lines) => stripVTControlCharacters(lines.join("\n"));
 const errorMessage = "Upstream response stream was interrupted";
@@ -118,10 +105,10 @@ for (const { label, name, args } of cases) {
   test(`真实Host ${label}: 展开收起/invalidate和success-error-success保持raw数据`, () => {
     const card = new sdk.ToolExecutionComponent(name, "fixture-call", args,
       { showImages: false }, host[name], { requestRender() {} }, "/tmp");
-    const success = { content: [{ type: "text", text: "first\nsecond" }], details: { nested: [1] }, structuredContent: { ok: true }, isError: false };
+    const success = { content: [{ type: "text", text: "first\nsecond" }, { type: "image", data: "fixture-image", mimeType: "image/png" }], details: { nested: [1] }, structuredContent: { ok: true }, isError: false };
     const failure = { content: [{ type: "text", text: "权限拒绝\nwrite conflict\n第三行\n第四行\n最后错误" }], details: { nested: [2] }, structuredContent: { ok: false }, isError: true };
     const before = structuredClone({ success, failure, args });
-    const references = [success.content, success.details, success.structuredContent, failure.content, failure.details, failure.structuredContent];
+    const references = [success.content, success.details, success.structuredContent, failure.content, failure.details, failure.structuredContent, success.content[1]];
     card.updateResult(success);
     assert.equal(card.render(100).filter((line) => line.trim()).length, 1);
     card.updateResult(failure);
@@ -143,7 +130,7 @@ for (const { label, name, args } of cases) {
     assert.equal(visible.length, 1);
     assert.doesNotMatch(plain(visible), /✗|失败|权限拒绝/);
     assert.deepEqual({ success, failure, args }, before);
-    [success.content, success.details, success.structuredContent, failure.content, failure.details, failure.structuredContent]
+    [success.content, success.details, success.structuredContent, failure.content, failure.details, failure.structuredContent, success.content[1]]
       .forEach((value, index) => assert.equal(value, references[index]));
   });
 }

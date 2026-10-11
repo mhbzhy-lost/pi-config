@@ -85,6 +85,12 @@ test("doctor 校验 r2c pi-adapter 安装与注册的一致性（双向）", asy
     writeSettings([{ source: "../packages/pi-subagents-enhanced" }, "../../.r2c/integrations/pi-adapter"]);
     const healthy = await inspectConfiguration(root, base);
     assert.equal(healthy.some((issue) => String(issue).includes("r2c pi-adapter")), false);
+    // M09 退役 scanner 入口不再是必需 Pi 配置文件，Doctor 不得再报缺失。
+    assert.equal(
+      healthy.some((issue) => String(issue).includes("skill-whitelist")),
+      false,
+      "retired skill-whitelist entry must no longer be required by doctor",
+    );
 
     // 未安装但注册残留：悬空 package 必须报警
     rmSync(adapterDir, { recursive: true, force: true });

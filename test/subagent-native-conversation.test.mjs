@@ -109,14 +109,19 @@ function render(renderer, sessionFile, sessions, cwd, overrides = {}) {
   });
 }
 
-test("uses the parent tool definition renderer without mutating child tool arguments or results", async (t) => {
+test("uses injected ToolRenderers and distinct entry/message renderers without mutating session data", async (t) => {
   const { sessions, cwd } = await createFixture(t);
   const manager = SessionManager.create(cwd, sessions);
   appendConversation(manager);
+  manager.appendCustomEntry("owned-entry", { value: "entry data" });
+  manager.appendCustomEntry("unknown-entry", { value: "unknown entry data" });
+  manager.appendCustomMessageEntry("owned-message", "message data", true);
+  manager.appendCustomMessageEntry("unknown-message", "unknown message data", true);
+  manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "flush renderers" }], api: "test", provider: "test", model: "test", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: 0 }, stopReason: "stop", timestamp: Date.now() });
   const sessionFile = manager.getSessionFile();
   assert.ok(sessionFile);
 
-  const observed = { names: [], args: [], results: [] };
+  const observed = { names: [], args: [], results: [], entries: [], messages: [] };
   const renderer = new native.NativeChildConversationRenderer({
     resolveToolRenderer(name) {
       observed.names.push(name);
@@ -132,15 +137,47 @@ test("uses the parent tool definition renderer without mutating child tool argum
         },
       };
     },
+    resolveEntryRenderer(customType) {
+      if (customType !== "owned-entry") return undefined;
+      return (entry) => {
+        observed.entries.push(entry);
+        return new Text(`owned entry: ${entry.data.value}`, 1, 0);
+      };
+    },
+    resolveMessageRenderer(customType) {
+      if (customType !== "owned-message") return undefined;
+      return (message) => {
+        observed.messages.push(message);
+        return new Text(`owned message: ${message.content}`, 0, 0);
+      };
+    },
   });
-  const collapsed = stripAnsi(render(renderer, sessionFile, sessions, cwd).lines.join("\n"));
+  const sourceBefore = fs.readFileSync(sessionFile, "utf8");
+  const displayTheme = { fg: (_color, value) => value };
+  const collapsed = stripAnsi(render(renderer, sessionFile, sessions, cwd, { theme: displayTheme }).lines.join("\n"));
   assert.match(collapsed, /parent read: fixture\.txt/);
   assert.match(collapsed, /parent collapsed/);
   assert.doesNotMatch(collapsed, /fixture output/);
 
-  const expanded = stripAnsi(render(renderer, sessionFile, sessions, cwd, { expandedTools: true }).lines.join("\n"));
+  const expanded = stripAnsi(render(renderer, sessionFile, sessions, cwd, { expandedTools: true, theme: displayTheme }).lines.join("\n"));
   assert.match(expanded, /parent expanded: fixture output/);
   assert.deepEqual(observed.names, ["read", "read"]);
+  assert.match(collapsed, /owned entry: entry data/);
+  assert.match(collapsed, /\[Custom entry: unknown-entry\]/);
+  assert.match(collapsed, /owned message: message data/);
+  assert.match(collapsed, /\[unknown-message\]/);
+  assert.match(collapsed, /unknown message data/);
+  for (const entry of observed.entries) {
+    assert.equal(entry.type, "custom");
+    assert.equal(entry.role, undefined);
+    assert.deepEqual(entry.data, { value: "entry data" });
+  }
+  for (const message of observed.messages) {
+    assert.equal(message.role, "custom");
+    assert.equal(message.data, undefined);
+    assert.equal(message.content, "message data");
+  }
+  assert.equal(fs.readFileSync(sessionFile, "utf8"), sourceBefore);
   for (const args of observed.args) assert.deepEqual(args, { path: "fixture.txt" });
   for (const result of observed.results) {
     assert.deepEqual(result.content, [{ type: "text", text: "fixture output" }]);

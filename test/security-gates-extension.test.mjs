@@ -75,53 +75,14 @@ test("tool_call fails closed when bash context cwd is unavailable", async () => 
   assert.match(result.reason, /工作目录|安全门禁/);
 });
 
-test("tool_result appends a coding reminder only to successful text content without mutation", async () => {
+test("tool_result is not handled: successful results pass through natively without injected process text", () => {
   const handlers = setup();
-  const event = {
-    toolName: "write",
-    input: { path: "src/app.ts" },
-    content: [{ type: "text", text: "Wrote src/app.ts" }],
-    details: { changed: true },
-    isError: false,
-  };
-
-  const result = await handlers.get("tool_result")(event, { cwd: workspace });
-
-  assert.notEqual(result, event);
-  assert.notEqual(result.content, event.content);
-  assert.match(result.content[0].text, /test-driven-development/);
-  assert.equal(event.content[0].text, "Wrote src/app.ts");
-  assert.equal(result.details, event.details);
-  assert.equal(result.isError, false);
+  assert.equal(handlers.get("tool_result"), undefined);
 });
 
-test("tool_result leaves errors, image content, and non-source writes unchanged", async () => {
+test("extension registers only the tool_call gate and no tool_result handler", () => {
   const handlers = setup();
-  const error = {
-    toolName: "write",
-    input: { path: "src/app.ts" },
-    content: [{ type: "text", text: "write failed" }],
-    details: { error: "disk full" },
-    isError: true,
-  };
-  const image = {
-    toolName: "write",
-    input: { path: "src/app.ts" },
-    content: [{ type: "image", data: "binary" }],
-    details: {},
-    isError: false,
-  };
-  const readme = {
-    toolName: "write",
-    input: { path: "README.md" },
-    content: [{ type: "text", text: "Wrote README.md" }],
-    details: {},
-    isError: false,
-  };
-
-  assert.equal(await handlers.get("tool_result")(error, { cwd: workspace }), undefined);
-  assert.equal(await handlers.get("tool_result")(image, { cwd: workspace }), undefined);
-  assert.equal(await handlers.get("tool_result")(readme, { cwd: workspace }), undefined);
+  assert.deepEqual([...handlers.keys()], ["tool_call"]);
 });
 
 test("tool_call blocks read/write/edit of credential files", async () => {

@@ -6,6 +6,7 @@ import test from "node:test";
 import { ensureSettings } from "../scripts/ensure-pi-settings.ts";
 
 const template = {
+  hideThinkingBlock: true,
   packages: [
     { source: "../packages/pi-subagents-enhanced" },
     { source: "npm:@amaster.ai/pi-task-scheduler@0.1.9", extensions: [], skills: [], prompts: [], themes: [] },
@@ -42,18 +43,29 @@ test("creates settings from the shared template when target is absent", async ()
 test("merges shared fields while preserving local settings", async () => {
   const existing = {
     enabledModels: ["local/model"], defaultProvider: "local", theme: "local",
-    packages: [{ source: "../../.r2c/integrations/pi-adapter" }, { source: "npm:@amaster.ai/pi-task-scheduler@0.1.9", extensions: ["local"] }],
+    hideThinkingBlock: false,
+    packages: ["../../.r2c/integrations/pi-adapter", "npm:@amaster.ai/pi-task-scheduler@0.1.9", { source: "npm:@amaster.ai/pi-task-scheduler@0.1.9", extensions: ["local"] }],
     subagents: { agentOverrides: { delegate: { disabled: true, localOnly: true } }, localField: 7 },
   };
   const paths = await fixtureWithAdapter(existing);
   try {
     await ensureSettings({ target:paths.target, template:paths.templatePath, r2cAdapterDir:paths.adapterDir });
     const result = JSON.parse(await readFile(paths.target, "utf8"));
-    assert.deepEqual(result.packages, [existing.packages[0], existing.packages[1], template.packages[0]]);
+    assert.deepEqual(result.packages, [
+      existing.packages[0],
+      { source: "npm:@amaster.ai/pi-task-scheduler@0.1.9", extensions: [], skills: [], prompts: [], themes: [] },
+      template.packages[0],
+    ]);
     assert.deepEqual(result.subagents, { agentOverrides: { delegate: { disabled: false, localOnly: true } }, localField: 7, disableBuiltins: true });
+    assert.equal(result.hideThinkingBlock, false);
     assert.deepEqual(result.enabledModels, existing.enabledModels);
     assert.equal(result.defaultProvider, "local");
     assert.equal(result.theme, "local");
+    await writeFile(paths.target, JSON.stringify({ hideThinkingBlock: "invalid" }));
+    await assert.rejects(
+      ensureSettings({ target: paths.target, template: paths.templatePath, r2cAdapterDir: paths.adapterDir }),
+      error => error.code === "SETTINGS_INVALID_VALUE" && error.field === "hideThinkingBlock",
+    );
   } finally { await rm(paths.root, { recursive: true, force: true }); }
 });
 
@@ -61,6 +73,7 @@ test("replaying ensure is idempotent", async () => {
   const paths = await fixture({ packages: [], subagents: {} });
   try {
     await ensureSettings({ target:paths.target, template:paths.templatePath });
+    assert.equal(JSON.parse(await readFile(paths.target, "utf8")).hideThinkingBlock, true);
     const first = await readFile(paths.target, "utf8");
     await ensureSettings({ target:paths.target, template:paths.templatePath });
     assert.equal(await readFile(paths.target, "utf8"), first);
@@ -68,13 +81,13 @@ test("replaying ensure is idempotent", async () => {
 });
 
 test('existing settings增量启用codemode并禁tool_search/llama，保留本机enabledModels',async()=>{
- const paths=await fixture({enabledModels:['local/model'],defaultTools:['read','bash'],extensions:['custom.ts']});
- try {await writeFile(paths.templatePath,JSON.stringify({...template,defaultTools:['+codemode','-tool_search'],extensions:['-builtin:tool-search','-builtin:llama.cpp']}));await ensureSettings({target:paths.target,template:paths.templatePath});const value=JSON.parse(await readFile(paths.target,'utf8'));assert.deepEqual(value.defaultTools,['read','bash','+codemode','-tool_search']);assert.deepEqual(value.extensions,['custom.ts','-builtin:tool-search','-builtin:llama.cpp']);assert.deepEqual(value.enabledModels,['local/model']);}
+ const paths=await fixture({enabledModels:['local/model'],defaultTools:['read','bash'],extensions:['custom.ts'],skills:['old-skill']});
+ try {await writeFile(paths.templatePath,JSON.stringify({...template,defaultTools:['+codemode','-tool_search'],extensions:['-builtin:tool-search','-builtin:llama.cpp'],skills:['!**/plan-runner-dispatch/**']}));await ensureSettings({target:paths.target,template:paths.templatePath});const value=JSON.parse(await readFile(paths.target,'utf8'));assert.deepEqual(value.defaultTools,['read','bash','+codemode','-tool_search']);assert.deepEqual(value.extensions,['custom.ts','-builtin:tool-search','-builtin:llama.cpp']);assert.deepEqual(value.skills,['old-skill','!**/plan-runner-dispatch/**']);assert.deepEqual(value.enabledModels,['local/model']);}
  finally{await rm(paths.root,{recursive:true,force:true});}
 });
 
 test('ensure和check在相反精确resource selector存在时拒绝且不写入', async () => {
-  for (const field of ['extensions', 'defaultTools']) for (const selector of ['builtin:mcp', 'builtin:code-mode', 'builtin:tool-search']) {
+  for (const field of ['extensions', 'defaultTools', 'skills']) for (const selector of ['builtin:mcp', 'builtin:code-mode', 'builtin:tool-search']) {
     const paths = await fixture({ enabledModels: ['local/model'], [field]: [`+${selector}`] });
     try {
       await writeFile(paths.templatePath, JSON.stringify({ ...template, [field]: [`-${selector}`] }));
@@ -91,7 +104,7 @@ test('ensure和check在相反精确resource selector存在时拒绝且不写入'
 });
 
 test('已有双方精确token和template自身相反token在写入前拒绝', async () => {
-  for (const field of ['extensions', 'defaultTools']) {
+  for (const field of ['extensions', 'defaultTools', 'skills']) {
     const both = await fixture({ enabledModels: ['local/model'], [field]: ['+builtin:tool-search', '-builtin:tool-search'] });
     try {
       await writeFile(both.templatePath, JSON.stringify({ ...template, [field]: ['-builtin:tool-search'] }));
@@ -101,7 +114,7 @@ test('已有双方精确token和template自身相反token在写入前拒绝', as
       assert.equal(await readFile(both.target, 'utf8'), before);
     } finally { await rm(both.root, { recursive: true, force: true }); }
   }
-  for (const field of ['extensions', 'defaultTools']) {
+  for (const field of ['extensions', 'defaultTools', 'skills']) {
     const paths = await fixture({ enabledModels: ['local/model'] });
     try {
       await writeFile(paths.templatePath, JSON.stringify({ ...template, [field]: ['+builtin:mcp', '-builtin:mcp'] }));
@@ -116,8 +129,6 @@ test('已有双方精确token和template自身相反token在写入前拒绝', as
 test("r2c adapter 已安装时按模板挂载 package 且 check 通过、幂等", async () => {
   const paths = await fixtureWithAdapter();
   try {
-    const withAdapter = { ...template, packages: [...template.packages, R2C_ADAPTER_SOURCE] };
-    await writeFile(paths.templatePath, JSON.stringify(withAdapter));
     await ensureSettings({ target: paths.target, template: paths.templatePath, r2cAdapterDir: paths.adapterDir });
     const mounted = JSON.parse(await readFile(paths.target, "utf8"));
     assert.equal(mounted.packages.at(-1), R2C_ADAPTER_SOURCE);
@@ -130,10 +141,8 @@ test("r2c adapter 已安装时按模板挂载 package 且 check 通过、幂等"
 
 test("r2c adapter 缺失时过滤模板条目并自愈悬空注册，check 不要求该字段", async () => {
   const absentDir = "absent-r2c-adapter";
-  const withAdapter = { ...template, packages: [...template.packages, R2C_ADAPTER_SOURCE] };
   const paths = await fixture();
   try {
-    await writeFile(paths.templatePath, JSON.stringify(withAdapter));
     await ensureSettings({ target: paths.target, template: paths.templatePath, r2cAdapterDir: join(paths.root, absentDir) });
     assert.deepEqual(JSON.parse(await readFile(paths.target, "utf8")).packages, template.packages);
     await ensureSettings({ target: paths.target, template: paths.templatePath, r2cAdapterDir: join(paths.root, absentDir), check: true });

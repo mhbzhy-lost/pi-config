@@ -1578,6 +1578,13 @@ export function createTypedSubagentExtension(
     exposure: "model-only" as const,
     label: "Subagent",
     description: TYPED_SUBAGENT_DESCRIPTION,
+    // M05B：单工具提示只表达委派与控制能力摘要；完整派发→决策→恢复→workspace 流程留在 GLOBAL。
+    promptSnippet: "把完整合同的任务委派给子代理执行，并控制其生命周期（status/steer/interrupt/resume/stop/list）。",
+    promptGuidelines: [
+      "subagent 派发必须一次携带完整任务合同：agent、task，以及按类型必填的 writePaths 与 acceptance；不要靠追问补齐关键上下文。",
+      "启动与完成是两个阶段：spawn 成功只代表子代理已开始执行，完成以子代理完成通知和结果验收为准。",
+      "不得用本会话无权限的工具替代委派去完成本应交给子代理的工作；权限不足时通过带完整合同的派发解决，不绕过权限边界。",
+    ],
     parameters: TYPED_SUBAGENT_PARAMETERS,
     ...(typeof renderSubagentCall === "function" ? { renderCall: renderSubagentCall } : {}),
     ...(typeof renderSubagentResult === "function" ? { renderResult: renderSubagentResult } : {}),

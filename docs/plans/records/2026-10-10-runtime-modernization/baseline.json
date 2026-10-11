@@ -1,0 +1,1314 @@
+{
+  "schema": "pi104-runtime-modernization/m00-baseline/1",
+  "taskId": "dispatch-9b9fadfd",
+  "task": "M00 冻结当前工作区、公开接口和静态覆盖",
+  "plan": {
+    "path": "docs/plans/2026-10-10-pi104-runtime-modernization.md",
+    "sha256AtTaskBefore": "87a2bd97f819d2c079db76aedabe40569323fddfdcdc20977e6dae633b7e1e79",
+    "note": "计划文件本身为未跟踪 dirty，基线按实际工作区冻结而非 HEAD"
+  },
+  "generatedAtIso": "2026-10-10T15:36:41+08:00",
+  "repo": "/Users/leshi.zhy/pi-config",
+  "git": {
+    "head": "05a150de61c7c8665b921a365a92eda177bef864",
+    "statusPorcelainV1": [
+      {
+        "status": " M",
+        "path": ".pi/handoff/context-handoff.md"
+      },
+      {
+        "status": " M",
+        "path": "packages/pi-subagents-enhanced/src/subagent-dispatch/runtime-membrane.ts"
+      },
+      {
+        "status": " M",
+        "path": "packages/pi-subagents-enhanced/src/subagent-dispatch/title-registry.ts"
+      },
+      {
+        "status": " M",
+        "path": "packages/pi-subagents-enhanced/src/tui/compact-rendering.ts"
+      },
+      {
+        "status": " M",
+        "path": "test/subagent-compact-rendering.test.mjs"
+      },
+      {
+        "status": " M",
+        "path": "test/subagent-runtime-membrane.test.mjs"
+      },
+      {
+        "status": "??",
+        "path": "docs/decisions/2026-10-10-idle-system-notification.md"
+      },
+      {
+        "status": "??",
+        "path": "docs/plans/2026-10-10-pi104-runtime-modernization.md"
+      }
+    ],
+    "redactedSensitiveEntries": [],
+    "indexStagedFiles": [],
+    "indexEmpty": true,
+    "gitOperations": "只读 status/ls-files；无 add/commit/push/reset/restore/stash/worktree",
+    "note": "HEAD 与计划声明的已推送基线一致；dirty 8 项全部非敏感、全部保留，不恢复不覆盖"
+  },
+  "node": {
+    "requestedPath": "/opt/homebrew/bin/node",
+    "physicalRealpath": "/opt/homebrew/Cellar/node/26.8.1/bin/node",
+    "version": "v26.8.1",
+    "repoMinimum": ">=22.19.0",
+    "meetsMinimum": true,
+    "note": "记录实际版本；26 不是约束，>=22.19 才是"
+  },
+  "arena": {
+    "path": "/tmp/pi104-modernization-1XMAot",
+    "taskBeforeDir": "/tmp/pi104-modernization-1XMAot/taskbefore",
+    "snapshotPhaseA": "/tmp/pi104-modernization-1XMAot/snapshot-phaseA.json",
+    "snapshotScript": "/tmp/pi104-modernization-1XMAot/snapshot_phaseA.py",
+    "contents": "task-before 副本（WritePaths 既有文件 + dirty 保护副本，仅非敏感代码/文档）、phase-A 快照 JSON、快照脚本",
+    "reuse": "路径在本基线固定，main 与后续子任务可直接引用；arena 不入 Git"
+  },
+  "writePathsByTask": {
+    "M00": [
+      "tsconfig.json",
+      "docs/plans/records/2026-10-10-runtime-modernization/baseline.json"
+    ],
+    "M01": [
+      "src/security-gates/extension.ts",
+      "src/security-gates/shell-policy.ts",
+      "test/security-gates-extension.test.mjs",
+      "test/shell-policy.test.mjs"
+    ],
+    "M02": [
+      "src/pi-settings/index.ts",
+      "scripts/ensure-pi-settings.ts",
+      "pi/settings.template.json",
+      "test/ensure-pi-settings.test.mjs",
+      "scripts/doctor.ts"
+    ],
+    "M03": [
+      "src/compact-tools/index.ts",
+      "src/compact-tools/renderer.ts",
+      "pi/extensions/compact-tools.ts",
+      "pi/extensions/bash-cwd.ts",
+      "test/compact-tools-extension.test.mjs",
+      "test/compact-tools-renderer.test.mjs",
+      "test/compact-tools-error-visibility.test.mjs"
+    ],
+    "M04": [
+      "src/bash-cwd/extension.ts",
+      "pi/extensions/bash-cwd.ts",
+      "test/bash-cwd-extension.test.mjs",
+      "test/bash-cwd-policy.test.mjs"
+    ],
+    "M05A": [
+      "src/basic-memory/extension.ts",
+      "src/apply-patch/result.ts",
+      "src/apply-patch/index.ts",
+      "pi/extensions/apply-patch.ts",
+      "pi/extensions/context-usage.ts",
+      "src/context-usage/snapshot.ts",
+      "test/basic-memory-extension.test.mjs",
+      "test/context-usage-extension.test.mjs",
+      "test/context-usage.test.mjs"
+    ],
+    "M05B": [
+      "packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts",
+      "packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-adapter.ts",
+      "packages/pi-subagents-enhanced/src/workspace/tool.ts",
+      "src/task-scheduler/adapter.ts",
+      "test/subagent-runtime-membrane.test.mjs",
+      "test/task-scheduler-adapter.test.mjs"
+    ],
+    "M06": [
+      "packages/pi-subagents-enhanced/src/tui/tool-renderers.ts",
+      "packages/pi-subagents-enhanced/src/tui/native-conversation.ts",
+      "packages/pi-subagents-enhanced/extensions/subagent-runtime.ts",
+      "packages/pi-subagents-enhanced/extensions/custom-footer.ts",
+      "test/subagent-native-conversation.test.mjs",
+      "test/custom-footer-subagents.test.mjs"
+    ],
+    "M07": [
+      "pi/AGENTS_GLOBAL.md",
+      "pi/agents/delegate.md",
+      "pi/agents/executor.md",
+      "pi/agents/reviewer.md",
+      "test/reviewer-agent.test.mjs"
+    ],
+    "M08": [
+      "src/apply-patch/apply.ts",
+      "pi/extensions/apply-patch.ts",
+      "test/apply-patch-apply.test.mjs"
+    ],
+    "M09": [
+      "pi/extensions/skill-whitelist.ts",
+      "src/skill-whitelist/extension.ts",
+      "scripts/doctor.ts",
+      "test/skill-whitelist-extension.test.mjs",
+      "test/doctor.test.mjs"
+    ],
+    "M10": [
+      "src/async-progress/index.ts",
+      "pi/extensions/async-progress-watcher.ts",
+      "test/async-progress-watcher.test.mjs"
+    ],
+    "M11": [
+      "docs/plans/records/2026-10-10-runtime-modernization/public-boundaries.md"
+    ],
+    "M12": [
+      "docs/plans/records/2026-10-10-runtime-modernization/acceptance.md",
+      "README.md",
+      "packages/pi-subagents-enhanced/README.md"
+    ]
+  },
+  "writePathsUnionCount": 60,
+  "taskBefore": [
+    {
+      "path": "README.md",
+      "ownerTasks": [
+        "M12"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "0e7e008440284c188604828857d77463f064e29d376f99ae4a92b81a2eea88d0",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 6011,
+      "mtimeIso": "2026-10-08T22:34:04+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/README.md"
+    },
+    {
+      "path": "docs/plans/records/2026-10-10-runtime-modernization/acceptance.md",
+      "ownerTasks": [
+        "M12"
+      ],
+      "plannedNew": true,
+      "plannedDelete": false,
+      "exists": false,
+      "sha256": null,
+      "owner": null,
+      "gitTracked": false,
+      "copiedTo": null
+    },
+    {
+      "path": "docs/plans/records/2026-10-10-runtime-modernization/baseline.json",
+      "ownerTasks": [
+        "M00"
+      ],
+      "plannedNew": true,
+      "plannedDelete": false,
+      "exists": false,
+      "sha256": null,
+      "owner": null,
+      "gitTracked": false,
+      "copiedTo": null
+    },
+    {
+      "path": "docs/plans/records/2026-10-10-runtime-modernization/public-boundaries.md",
+      "ownerTasks": [
+        "M11"
+      ],
+      "plannedNew": true,
+      "plannedDelete": false,
+      "exists": false,
+      "sha256": null,
+      "owner": null,
+      "gitTracked": false,
+      "copiedTo": null
+    },
+    {
+      "path": "packages/pi-subagents-enhanced/README.md",
+      "ownerTasks": [
+        "M12"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "e60e451c3c671e45fa65209fa205349530f057314de5839a1606a56344e4f218",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 5068,
+      "mtimeIso": "2026-10-08T22:34:04+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/packages/pi-subagents-enhanced/README.md"
+    },
+    {
+      "path": "packages/pi-subagents-enhanced/extensions/custom-footer.ts",
+      "ownerTasks": [
+        "M06"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "797dcdf04cbc51de1450d116b2e57e44355b00fcfeda0258a05361056ce71b18",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 23091,
+      "mtimeIso": "2026-10-08T22:34:04+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/packages/pi-subagents-enhanced/extensions/custom-footer.ts"
+    },
+    {
+      "path": "packages/pi-subagents-enhanced/extensions/subagent-runtime.ts",
+      "ownerTasks": [
+        "M06"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "0b29de1046fcdeeee064f674704014ed03fa2f6acc68f869e995379c9111d40e",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 33367,
+      "mtimeIso": "2026-10-09T17:56:11+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/packages/pi-subagents-enhanced/extensions/subagent-runtime.ts"
+    },
+    {
+      "path": "packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts",
+      "ownerTasks": [
+        "M05B"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "304aa78a17c58c33a9810bfd708a7b3e70ad32b337de3dce4990b6af142bfff8",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 100071,
+      "mtimeIso": "2026-10-09T17:33:31+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts"
+    },
+    {
+      "path": "packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-adapter.ts",
+      "ownerTasks": [
+        "M05B"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "6730ac300f00e96fd0cfd20fd871a4b8ddfc043b78e656da757ec00a29c30d31",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 2201,
+      "mtimeIso": "2026-10-08T22:34:04+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-adapter.ts"
+    },
+    {
+      "path": "packages/pi-subagents-enhanced/src/tui/native-conversation.ts",
+      "ownerTasks": [
+        "M06"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "7d6aa9828e83b620d6e49dcb550a8bcaeab7300744eda241c75baf20cf6645c0",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 12012,
+      "mtimeIso": "2026-09-09T19:34:05+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/packages/pi-subagents-enhanced/src/tui/native-conversation.ts"
+    },
+    {
+      "path": "packages/pi-subagents-enhanced/src/tui/tool-renderers.ts",
+      "ownerTasks": [
+        "M06"
+      ],
+      "plannedNew": true,
+      "plannedDelete": false,
+      "exists": false,
+      "sha256": null,
+      "owner": null,
+      "gitTracked": false,
+      "copiedTo": null
+    },
+    {
+      "path": "packages/pi-subagents-enhanced/src/workspace/tool.ts",
+      "ownerTasks": [
+        "M05B"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "2810abfe67f023ca47d889efa45bc4d07485c966336bf081f768d5412585911d",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 6769,
+      "mtimeIso": "2026-10-09T17:14:38+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/packages/pi-subagents-enhanced/src/workspace/tool.ts"
+    },
+    {
+      "path": "pi/AGENTS_GLOBAL.md",
+      "ownerTasks": [
+        "M07"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "a74723534901543fd55525d5b35cd0dd20b8e67fdd47b3bc1c651471c35fc326",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 11066,
+      "mtimeIso": "2026-10-09T17:20:26+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/pi/AGENTS_GLOBAL.md"
+    },
+    {
+      "path": "pi/agents/delegate.md",
+      "ownerTasks": [
+        "M07"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "212403a0a4a7cac856c29d415a14bfa39b30df1dd8aeb50b76f42da00b3b79ae",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 930,
+      "mtimeIso": "2026-10-09T14:28:40+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/pi/agents/delegate.md"
+    },
+    {
+      "path": "pi/agents/executor.md",
+      "ownerTasks": [
+        "M07"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "42bf8b2ee8e9c040ecfb404b2eb78cacc5f249a2c85ed39bc30dfd6b109a3616",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 560,
+      "mtimeIso": "2026-10-09T14:28:40+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/pi/agents/executor.md"
+    },
+    {
+      "path": "pi/agents/reviewer.md",
+      "ownerTasks": [
+        "M07"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "87498f63be1cbec353cfa148a0033f471ff045602c7f95dfb29dd5c02464034e",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 933,
+      "mtimeIso": "2026-10-03T13:04:11+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/pi/agents/reviewer.md"
+    },
+    {
+      "path": "pi/extensions/apply-patch.ts",
+      "ownerTasks": [
+        "M05A",
+        "M08"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "781173ccbc3eb20d2252f5dbc2cff2ccc257d822cac5e25d132303df7498ddc7",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 2266,
+      "mtimeIso": "2026-09-04T11:34:58+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/pi/extensions/apply-patch.ts"
+    },
+    {
+      "path": "pi/extensions/async-progress-watcher.ts",
+      "ownerTasks": [
+        "M10"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "5d1bdb5c8a3df5270da4938fd5ab96497c533e8dccd45df56a2b84d33d48c8a4",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 4550,
+      "mtimeIso": "2026-07-22T12:02:57+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/pi/extensions/async-progress-watcher.ts"
+    },
+    {
+      "path": "pi/extensions/bash-cwd.ts",
+      "ownerTasks": [
+        "M03",
+        "M04"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "16aff82be6b533c05c27e33fb74f98eedc4bfe97e931523cbc0a6df9f917f8fe",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 1250,
+      "mtimeIso": "2026-09-04T11:34:58+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/pi/extensions/bash-cwd.ts"
+    },
+    {
+      "path": "pi/extensions/compact-tools.ts",
+      "ownerTasks": [
+        "M03"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "eae19732e52597cd068f69bafab05c33500b30a66b789ca02738e622de0daf38",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 7546,
+      "mtimeIso": "2026-10-08T23:01:10+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/pi/extensions/compact-tools.ts"
+    },
+    {
+      "path": "pi/extensions/context-usage.ts",
+      "ownerTasks": [
+        "M05A"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "8dd43360c7911b31a7d41ec13a6ba96c4a2e245acc12ea5e451cd00d5eb571ec",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 1770,
+      "mtimeIso": "2026-09-30T12:03:21+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/pi/extensions/context-usage.ts"
+    },
+    {
+      "path": "pi/extensions/skill-whitelist.ts",
+      "ownerTasks": [
+        "M09"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "1c0dccffabbe4c46e241c6593d3424c635b6c11e6a08e6b7cc2b84fbe1c7cdbd",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 66,
+      "mtimeIso": "2026-09-04T11:34:58+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/pi/extensions/skill-whitelist.ts"
+    },
+    {
+      "path": "pi/settings.template.json",
+      "ownerTasks": [
+        "M02"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "d87ad2bbac193c4683dfc6503e2b7d473325ef7cc323a977ece6a7a21363f681",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 590,
+      "mtimeIso": "2026-10-09T18:31:41+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/pi/settings.template.json"
+    },
+    {
+      "path": "scripts/doctor.ts",
+      "ownerTasks": [
+        "M02",
+        "M09"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "e6e885cd8d72fb1ab19367dface6371defaaad49db68b781ba7281ea65e03051",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 24622,
+      "mtimeIso": "2026-10-09T12:29:25+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/scripts/doctor.ts"
+    },
+    {
+      "path": "scripts/ensure-pi-settings.ts",
+      "ownerTasks": [
+        "M02"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "e05aaa56f647d3989b5316a634a1dd310229436e129369b33f26b00a3eb23efe",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 6677,
+      "mtimeIso": "2026-10-08T23:39:45+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/scripts/ensure-pi-settings.ts"
+    },
+    {
+      "path": "src/apply-patch/apply.ts",
+      "ownerTasks": [
+        "M08"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "8e9e9cafa7736d43c9af29d9aff6347824662d83bfa087a2db4db6d009b1b68b",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 3626,
+      "mtimeIso": "2026-09-04T11:48:13+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/src/apply-patch/apply.ts"
+    },
+    {
+      "path": "src/apply-patch/index.ts",
+      "ownerTasks": [
+        "M05A"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "8d11f193bf6089ae2adae45a4d267ca39efe073d0a9cd052d4843fb04580783e",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 158,
+      "mtimeIso": "2026-09-04T11:34:58+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/src/apply-patch/index.ts"
+    },
+    {
+      "path": "src/apply-patch/result.ts",
+      "ownerTasks": [
+        "M05A"
+      ],
+      "plannedNew": true,
+      "plannedDelete": false,
+      "exists": false,
+      "sha256": null,
+      "owner": null,
+      "gitTracked": false,
+      "copiedTo": null
+    },
+    {
+      "path": "src/async-progress/index.ts",
+      "ownerTasks": [
+        "M10"
+      ],
+      "plannedNew": true,
+      "plannedDelete": false,
+      "exists": false,
+      "sha256": null,
+      "owner": null,
+      "gitTracked": false,
+      "copiedTo": null
+    },
+    {
+      "path": "src/bash-cwd/extension.ts",
+      "ownerTasks": [
+        "M04"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "5e662721bf135d0070b2768dd0cfde8b65e274b6f9b84dddd4d0529aa65db1d0",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 1565,
+      "mtimeIso": "2026-09-30T12:03:21+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/src/bash-cwd/extension.ts"
+    },
+    {
+      "path": "src/basic-memory/extension.ts",
+      "ownerTasks": [
+        "M05A"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "a9c61bdd3c05c4ec95f701ba31e2ce54cee8896a66b0cff48f127a8fdb483920",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 3814,
+      "mtimeIso": "2026-08-05T16:22:23+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/src/basic-memory/extension.ts"
+    },
+    {
+      "path": "src/compact-tools/index.ts",
+      "ownerTasks": [
+        "M03"
+      ],
+      "plannedNew": true,
+      "plannedDelete": false,
+      "exists": false,
+      "sha256": null,
+      "owner": null,
+      "gitTracked": false,
+      "copiedTo": null
+    },
+    {
+      "path": "src/compact-tools/renderer.ts",
+      "ownerTasks": [
+        "M03"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "9abe3ec1c9ec22a99eec935da4710a075acb5640e02158189a1bb28a57f38975",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 9539,
+      "mtimeIso": "2026-10-08T22:58:11+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/src/compact-tools/renderer.ts"
+    },
+    {
+      "path": "src/context-usage/snapshot.ts",
+      "ownerTasks": [
+        "M05A"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "1887e07251dbcd7be6dfd6ee7467453f7efa4cf2d8b58db5d9cbb2d4315b8a4e",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 3773,
+      "mtimeIso": "2026-09-30T12:03:21+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/src/context-usage/snapshot.ts"
+    },
+    {
+      "path": "src/pi-settings/index.ts",
+      "ownerTasks": [
+        "M02"
+      ],
+      "plannedNew": true,
+      "plannedDelete": false,
+      "exists": false,
+      "sha256": null,
+      "owner": null,
+      "gitTracked": false,
+      "copiedTo": null
+    },
+    {
+      "path": "src/security-gates/extension.ts",
+      "ownerTasks": [
+        "M01"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "6bfaacdb695d1d8bc31a5a5a80ee366328de5b4a7f4ba3a64f112c71641a39dc",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 2189,
+      "mtimeIso": "2026-09-09T19:34:05+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/src/security-gates/extension.ts"
+    },
+    {
+      "path": "src/security-gates/shell-policy.ts",
+      "ownerTasks": [
+        "M01"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "041b6c6304cfb2de306af5bdc4b5fe36fb8d9fff40ed30d7beb58f6affb679f1",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 14791,
+      "mtimeIso": "2026-09-30T12:03:21+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/src/security-gates/shell-policy.ts"
+    },
+    {
+      "path": "src/skill-whitelist/extension.ts",
+      "ownerTasks": [
+        "M09"
+      ],
+      "plannedNew": false,
+      "plannedDelete": true,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "5fe92596a6fefe395132a150d3e4433db7cec5ba9d88e43ffe43c63a91f8eea6",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 1617,
+      "mtimeIso": "2026-08-05T16:22:23+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/src/skill-whitelist/extension.ts"
+    },
+    {
+      "path": "src/task-scheduler/adapter.ts",
+      "ownerTasks": [
+        "M05B"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "ec377c6a84b88c6ee8c9da9ce5444219f87be601a8a77671f8dc86cc089f9667",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 15589,
+      "mtimeIso": "2026-10-08T22:34:04+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/src/task-scheduler/adapter.ts"
+    },
+    {
+      "path": "test/apply-patch-apply.test.mjs",
+      "ownerTasks": [
+        "M08"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "e05542c74ea24abba4773a8ae52eac024a240e4365a66a1e67ff6875d5bf6872",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 6248,
+      "mtimeIso": "2026-09-04T11:34:58+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/test/apply-patch-apply.test.mjs"
+    },
+    {
+      "path": "test/async-progress-watcher.test.mjs",
+      "ownerTasks": [
+        "M10"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "27625abdede87b57b16f5b30248645b9518b6e064b81c91887d9a859d219b6bc",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 3466,
+      "mtimeIso": "2026-07-22T12:03:22+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/test/async-progress-watcher.test.mjs"
+    },
+    {
+      "path": "test/bash-cwd-extension.test.mjs",
+      "ownerTasks": [
+        "M04"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "dd5c47a3ce16dccfa3ee261db1006d1416d3bfa1472c51e488add9c4a881d332",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 7478,
+      "mtimeIso": "2026-09-30T12:03:21+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/test/bash-cwd-extension.test.mjs"
+    },
+    {
+      "path": "test/bash-cwd-policy.test.mjs",
+      "ownerTasks": [
+        "M04"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "6e1524924c9dfbabb7fa2daec1d997c798c70dcc935315fd057d0405798296bd",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 2802,
+      "mtimeIso": "2026-09-30T12:03:21+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/test/bash-cwd-policy.test.mjs"
+    },
+    {
+      "path": "test/basic-memory-extension.test.mjs",
+      "ownerTasks": [
+        "M05A"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "b5b73154f05560dc0ced94f2d7a701963031f16d8829381341429aef2c2d919b",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 5287,
+      "mtimeIso": "2026-09-04T11:34:58+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/test/basic-memory-extension.test.mjs"
+    },
+    {
+      "path": "test/compact-tools-error-visibility.test.mjs",
+      "ownerTasks": [
+        "M03"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "3ac772f5f6fef8ba26839b7e209ce6cb859ec4a992ce95eafcb71013018838fa",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 10811,
+      "mtimeIso": "2026-10-08T22:02:32+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/test/compact-tools-error-visibility.test.mjs"
+    },
+    {
+      "path": "test/compact-tools-extension.test.mjs",
+      "ownerTasks": [
+        "M03"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "753b743627efca0d53c7f08604d73c8dc2c991e65c8e6e4a9f944553da49331f",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 5711,
+      "mtimeIso": "2026-10-08T22:34:04+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/test/compact-tools-extension.test.mjs"
+    },
+    {
+      "path": "test/compact-tools-renderer.test.mjs",
+      "ownerTasks": [
+        "M03"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "1c95eed490c56aae7c141a500a0e60c4ba986a7df32f735122dcf1ec6be39671",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 8527,
+      "mtimeIso": "2026-10-08T22:34:04+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/test/compact-tools-renderer.test.mjs"
+    },
+    {
+      "path": "test/context-usage-extension.test.mjs",
+      "ownerTasks": [
+        "M05A"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "662fbb41f20d1db054383fca124c0e85ad34f629d8fb15dd81e303602f9c03b6",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 3935,
+      "mtimeIso": "2026-09-30T12:03:21+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/test/context-usage-extension.test.mjs"
+    },
+    {
+      "path": "test/context-usage.test.mjs",
+      "ownerTasks": [
+        "M05A"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "38ec0c957f0661a8f24d8302fb206d303d83461b1d9c3d4598aa000b3e171b1c",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 2299,
+      "mtimeIso": "2026-09-30T12:03:21+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/test/context-usage.test.mjs"
+    },
+    {
+      "path": "test/custom-footer-subagents.test.mjs",
+      "ownerTasks": [
+        "M06"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "6bc24cb413b26a3759670fdc4d9098948df798b6d9201bf8c50c07f7b8fd2c4c",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 51199,
+      "mtimeIso": "2026-10-08T22:34:04+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/test/custom-footer-subagents.test.mjs"
+    },
+    {
+      "path": "test/doctor.test.mjs",
+      "ownerTasks": [
+        "M09"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "e7969e40ed0c8ade01e31c6b9b14c699ee8e145a59a45e3cbfd19a87af683a56",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 14791,
+      "mtimeIso": "2026-10-09T12:17:38+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/test/doctor.test.mjs"
+    },
+    {
+      "path": "test/ensure-pi-settings.test.mjs",
+      "ownerTasks": [
+        "M02"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "1d63f155338152eaed126f9be6bed8cbfbc641037efe2459ccdce5dbc005f925",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 8928,
+      "mtimeIso": "2026-10-08T23:18:25+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/test/ensure-pi-settings.test.mjs"
+    },
+    {
+      "path": "test/reviewer-agent.test.mjs",
+      "ownerTasks": [
+        "M07"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "3b73deeeed309bb31013943b6f3b072325325c3aeb8490d838e978bfa6aff889",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 3451,
+      "mtimeIso": "2026-10-09T16:08:44+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/test/reviewer-agent.test.mjs"
+    },
+    {
+      "path": "test/security-gates-extension.test.mjs",
+      "ownerTasks": [
+        "M01"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "74789c37d0a2ee832338f26eca13f780d04a5265db618a0ed6cba7634554813d",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 5809,
+      "mtimeIso": "2026-10-03T13:03:29+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/test/security-gates-extension.test.mjs"
+    },
+    {
+      "path": "test/shell-policy.test.mjs",
+      "ownerTasks": [
+        "M01"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "79b390f637e00b8c261c3047d38932061312e34eb1864e3f8e2d1d9feaa86106",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 15579,
+      "mtimeIso": "2026-10-08T22:34:04+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/test/shell-policy.test.mjs"
+    },
+    {
+      "path": "test/skill-whitelist-extension.test.mjs",
+      "ownerTasks": [
+        "M09"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "d4a4da697ef09dea9f0f4e015b1895f9848e65ff32bc1c59dd06ade103f48315",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 1602,
+      "mtimeIso": "2026-09-30T12:00:29+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/test/skill-whitelist-extension.test.mjs"
+    },
+    {
+      "path": "test/subagent-native-conversation.test.mjs",
+      "ownerTasks": [
+        "M06"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "a3d71e677049a44afa18bbc78602a549716cafef7e7840d72b60951e3efe6fd5",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 19882,
+      "mtimeIso": "2026-09-03T13:03:37+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/test/subagent-native-conversation.test.mjs"
+    },
+    {
+      "path": "test/subagent-runtime-membrane.test.mjs",
+      "ownerTasks": [
+        "M05B"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "ac9df637ca7484e48199fe1411d56882bd295a0a0872a1bfe3e54aeb27d76ee5",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 124963,
+      "mtimeIso": "2026-10-10T12:14:50+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/test/subagent-runtime-membrane.test.mjs"
+    },
+    {
+      "path": "test/task-scheduler-adapter.test.mjs",
+      "ownerTasks": [
+        "M05B"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "f4de2a7289802be7348dac945f3579d28dcb2c168830fa04f10f289eb1d79b5d",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 32308,
+      "mtimeIso": "2026-10-03T13:03:29+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/test/task-scheduler-adapter.test.mjs"
+    },
+    {
+      "path": "tsconfig.json",
+      "ownerTasks": [
+        "M00"
+      ],
+      "plannedNew": false,
+      "plannedDelete": false,
+      "exists": true,
+      "isRegularFile": true,
+      "sha256": "6625be0f2026f519c29ee0d17dbff7028df8f2251278f0f6a9369e69ab2a21db",
+      "owner": "leshi.zhy:staff",
+      "sizeBytes": 1198,
+      "mtimeIso": "2026-10-09T15:58:27+08:00",
+      "gitTracked": true,
+      "copiedTo": "taskbefore/tsconfig.json"
+    }
+  ],
+  "taskBeforeSummary": {
+    "unionPaths": 60,
+    "existingWithCopy": 52,
+    "copyFailures": [],
+    "ownerFieldSemantics": "owner 为 POSIX 属主 uid名:gid名；ownerTasks 为计划中写该路径的任务；plannedNew 路径 exists/sha256/owner 均为 null"
+  },
+  "dirtyProtection": {
+    "dirtyNotInWritePaths": [
+      ".pi/handoff/context-handoff.md",
+      "packages/pi-subagents-enhanced/src/subagent-dispatch/runtime-membrane.ts",
+      "packages/pi-subagents-enhanced/src/subagent-dispatch/title-registry.ts",
+      "packages/pi-subagents-enhanced/src/tui/compact-rendering.ts",
+      "test/subagent-compact-rendering.test.mjs",
+      "docs/decisions/2026-10-10-idle-system-notification.md",
+      "docs/plans/2026-10-10-pi104-runtime-modernization.md"
+    ],
+    "dirtyAlsoInWritePaths": [
+      "test/subagent-runtime-membrane.test.mjs"
+    ],
+    "policy": "不覆盖 dirty、不把 HEAD 当 dirty 内容、不恢复/不 stash/reset/restore；两 subagent 测试 dirty 与 M05B WritePaths 相交，后续任务只能在其上继续",
+    "statusPorcelainV1": [
+      {
+        "status": " M",
+        "path": ".pi/handoff/context-handoff.md"
+      },
+      {
+        "status": " M",
+        "path": "packages/pi-subagents-enhanced/src/subagent-dispatch/runtime-membrane.ts"
+      },
+      {
+        "status": " M",
+        "path": "packages/pi-subagents-enhanced/src/subagent-dispatch/title-registry.ts"
+      },
+      {
+        "status": " M",
+        "path": "packages/pi-subagents-enhanced/src/tui/compact-rendering.ts"
+      },
+      {
+        "status": " M",
+        "path": "test/subagent-compact-rendering.test.mjs"
+      },
+      {
+        "status": " M",
+        "path": "test/subagent-runtime-membrane.test.mjs"
+      },
+      {
+        "status": "??",
+        "path": "docs/decisions/2026-10-10-idle-system-notification.md"
+      },
+      {
+        "status": "??",
+        "path": "docs/plans/2026-10-10-pi104-runtime-modernization.md"
+      }
+    ],
+    "indexStagedFiles": []
+  },
+  "versions": {
+    "rootPackageJsonDeclaredDependencies": {
+      "@earendil-works/pi-agent-core": "1.0.4",
+      "@earendil-works/pi-ai": "1.0.4",
+      "@earendil-works/pi-coding-agent": "1.0.4",
+      "@earendil-works/pi-tui": "1.0.4"
+    },
+    "installedRootNodeModules": {
+      "@earendil-works/pi-agent-core": "1.0.4",
+      "@earendil-works/pi-ai": "1.0.4",
+      "@earendil-works/pi-coding-agent": "1.0.4",
+      "@earendil-works/pi-tui": "1.0.4",
+      "@earendil-works/chord": "1.1.0",
+      "@earendil-works/pi-codemode": "1.1.0",
+      "@earendil-works/pi-mcp": "1.1.0",
+      "@earendil-works/pi-telemetry": "1.1.0"
+    },
+    "enhancedPackageNestedNodeModules": {
+      "@earendil-works/chord": "1.1.0",
+      "@earendil-works/pi-agent-core": "1.0.4",
+      "@earendil-works/pi-ai": "1.0.4",
+      "@earendil-works/pi-codemode": "1.1.0",
+      "@earendil-works/pi-coding-agent": "1.0.4",
+      "@earendil-works/pi-mcp": "1.1.0",
+      "@earendil-works/pi-telemetry": "1.1.0",
+      "@earendil-works/pi-tui": "1.0.4",
+      "pi-subagents": "0.75.0"
+    },
+    "fourCoreExpected": "1.0.4",
+    "piSubagentsExpected": "0.75.0",
+    "siblingRecord": "chord/pi-codemode/pi-mcp/pi-telemetry 现场为 1.1.0，仅记录，不改任何依赖",
+    "dependencyChanges": "none"
+  },
+  "publicApiEvidence": {
+    "installRoot": "node_modules/@earendil-works/pi-coding-agent@1.0.4（只读 declarations，未运行 Host）",
+    "registerToolRenderer": {
+      "evidence": "dist/core/extensions/types.d.ts:1221 `registerToolRenderer(resolver: ToolRendererResolver): void;`（ExtensionAPI 成员）",
+      "types": "types.d.ts:501 `ToolRenderers = Pick<AnyToolDefinition, \"renderShell\" | \"renderCall\" | \"renderResult\">`；types.d.ts:506 `ToolRendererResolver = (toolName: string, next: () => ToolRenderers | undefined) => ToolRenderers | undefined`"
+    },
+    "createToolDefinitionFactories": {
+      "evidence": "dist/index.d.ts:26 根导出 createBashToolDefinition/createEditToolDefinition/createFindToolDefinition/createGrepToolDefinition/createLsToolDefinition/createPowerShellToolDefinition/createReadToolDefinition/createWriteToolDefinition（来自 ./core/tools/index.ts）"
+    },
+    "withFileMutationQueue": {
+      "evidence": "dist/index.d.ts:26 根导出 withFileMutationQueue；dist/core/tools/file-mutation-queue.d.ts:6 `export declare function withFileMutationQueue<T>(filePath: string, fn: () => Promise<T>): Promise<T>`，注释：同文件串行、不同文件并行"
+    },
+    "settingsManager": {
+      "evidence": "dist/index.d.ts:22 根导出 SettingsManager（来自 ./core/settings-manager.ts）",
+      "members": "settings-manager.d.ts:194 `static create(cwd, agentDir?, options?)`；:196 `static fromStorage(storage, options?)`；:227 `flush()`；:228 `drainErrors()`；:290 `setHideThinkingBlock(hide)`；:317 `setPackages(packages)`；:320 `setExtensionPaths(paths)`",
+      "absence": "dist/core/settings-manager.d.ts 无 setDefaultTools 或任意 extension 字段 setter（与计划判定一致）"
+    },
+    "supporting": {
+      "bashSpawnHook": "dist/core/tools/bash.d.ts:80 `spawnHook?: BashSpawnHook;`（BashToolOptions）",
+      "toolDefinitionSnippetGuidelines": "types.d.ts:449 `promptSnippet?: string`；:451 `promptGuidelines?: string[]`",
+      "toolInfoNoRenderer": "types.d.ts:1542 ToolInfo 为 ToolDefinition 的 Pick(name/description/parameters/promptGuidelines...)，不含 renderer"
+    },
+    "docsReadFully": [
+      "node_modules/@earendil-works/pi-coding-agent/README.md（4080B 完整）",
+      "node_modules/@earendil-works/pi-coding-agent/docs/extensions.md（20085B 完整；含 registerToolRenderer 与 withFileMutationQueue 用法合同）"
+    ],
+    "siblingRecord": "chord/pi-codemode/pi-mcp/pi-telemetry 现场均为 1.1.0（根与 enhanced 嵌套各一份），仅记录，未变更任何依赖或 lockfile"
+  },
+  "notifyTestsSyncUnitLog": {
+    "path": "/tmp/notify-tests-sync-unit.log",
+    "exists": true,
+    "mtimeIso": "2026-10-10T12:15:55+08:00",
+    "tailSummary": {
+      "tests": 110,
+      "pass": 110,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0
+    },
+    "tail": "✔ broker 存储类错误一律 fail-closed，不得当作非受管放行 (0.114333ms)\n✔ 替换代偿失败携原异常诊断，ready 仍阻断并允许恢复重试 (0.869917ms)\nℹ tests 110\nℹ suites 0\nℹ pass 110\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 1761.758584",
+    "sourceMtimes": {
+      "test/subagent-compact-rendering.test.mjs": "2026-10-10T11:47:37+08:00",
+      "test/subagent-runtime-membrane.test.mjs": "2026-10-10T12:14:50+08:00",
+      "packages/pi-subagents-enhanced/src/subagent-dispatch/runtime-membrane.ts": "2026-10-10T11:21:14+08:00",
+      "packages/pi-subagents-enhanced/src/subagent-dispatch/title-registry.ts": "2026-10-10T11:21:14+08:00",
+      "packages/pi-subagents-enhanced/src/tui/compact-rendering.ts": "2026-10-10T12:12:56+08:00"
+    },
+    "sourcesNewerThanLog": [],
+    "sourceConsistentWithLog": true,
+    "exitFile": {
+      "path": "/tmp/notify-tests-sync-unit.log.exit",
+      "exists": false,
+      "note": "任务说明称 exit 0，但 .exit 文件现场缺失，exit code 无法独立复核；按计划不重跑全矩阵，此日志仅作恢复参考证据"
+    }
+  },
+  "tsconfigChange": {
+    "beforeSha256": "6625be0f2026f519c29ee0d17dbff7028df8f2251278f0f6a9369e69ab2a21db",
+    "afterSha256": "43a03c2335f4e3710cdb81930afc81f4b1e17384a78130b0efd79f297d3fee25",
+    "addedEntries": [
+      "src/pi-settings/**/*.ts",
+      "src/async-progress/**/*.ts",
+      "src/context-usage/**/*.ts",
+      "pi/extensions/bash-cwd.ts",
+      "pi/extensions/apply-patch.ts",
+      "pi/extensions/basic-memory.ts",
+      "pi/extensions/context-usage.ts",
+      "pi/extensions/task-scheduler.ts",
+      "pi/extensions/async-progress-watcher.ts"
+    ],
+    "addedEntriesAllPresent": true,
+    "missingAfter": [],
+    "existingEntriesPreserved": "include 原有 23 条逐字保留，compilerOptions 未改动",
+    "bracedAbbreviationNotUsed": "计划中 pi/extensions/{...} 为缩写；JSON 写为 7 个精确路径",
+    "plannedNewDirs": "src/pi-settings、src/async-progress 目录尚不存在（M02/M10 新建），include glob 先行覆盖；tsc 未运行，静态含盖以 M12 listFilesOnly 复核"
+  },
+  "staticChecks": {
+    "indexEmpty": true,
+    "indexStagedFiles": [],
+    "tsconfigIncludesNoLocalMachineFiles": true,
+    "tsconfigSuspiciousPatterns": [],
+    "piExtensionsSevenEntriesExist": {
+      "pi/extensions/compact-tools.ts": true,
+      "pi/extensions/bash-cwd.ts": true,
+      "pi/extensions/apply-patch.ts": true,
+      "pi/extensions/basic-memory.ts": true,
+      "pi/extensions/context-usage.ts": true,
+      "pi/extensions/task-scheduler.ts": true,
+      "pi/extensions/async-progress-watcher.ts": true
+    },
+    "tsDomainDirsExist": {
+      "src/pi-settings": false,
+      "src/async-progress": false,
+      "src/basic-memory": true,
+      "src/context-usage": true,
+      "src/compact-tools": true,
+      "src/apply-patch": true,
+      "src/bash-cwd": true
+    },
+    "enhancedPackageTsconfig": {
+      "read": "packages/pi-subagents-enhanced/tsconfig.json",
+      "conclusion": "include 已含 src/**/*.ts（将覆盖 M06 新建 src/tui/tool-renderers.ts），仅只读核对，未修改"
+    }
+  },
+  "auditsRead": [
+    "/tmp/pi104-runtime-modernization-tools.md（工具/配置审计，完整）",
+    "/tmp/pi104-runtime-modernization-tui.md（TUI 审计，完整）",
+    "/tmp/pi104-runtime-modernization-lifecycle.md（生命周期审计，完整；其 root node_modules 缺失陈述已被计划证据纠正，现场确实存在）"
+  ],
+  "notDone": {
+    "tscTypecheck": "未获正式 typecheck 预算，未运行 tsc（M12 才做 listFilesOnly/noEmit）",
+    "tests": "未重跑任何旧测试；/tmp/notify-tests-sync-unit.log 仅读尾部记录（110/110 pass），.exit 文件现场缺失，exit 0 无法独立复核，按计划不重跑",
+    "host": "未运行真实 Host/CLI/RPC/PTY/provider/model/MCP/init/integration",
+    "secrets": "未读取/未 hash pi/settings.json、pi/models.json、auth、会话、authority；仅记录非敏感路径",
+    "gitWrite": "无 add/commit/push/reset/restore/stash/worktree 写操作",
+    "dependencyChanges": "未安装/升级/降级任何依赖"
+  },
+  "resources": {
+    "tsconfigWrite": "本任务持有并已使用（tsconfig.json 一次补齐完成）",
+    "unitRunner": "本任务独占且未消耗（无测试/tsc），M00 完成即释放"
+  }
+}

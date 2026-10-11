@@ -1,11 +1,11 @@
 import { createBashToolDefinition, SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Container, Text, sliceByColumn, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { createBashCwdExtension } from "../../src/bash-cwd/extension.ts";
-import { createCompactToolRenderers } from "../../src/compact-tools/renderer.ts";
 
-function getBashOptions(ctx: { cwd?: string; isProjectTrusted?: () => boolean } = {}) {
-  const settings = SettingsManager.create(ctx.cwd || process.cwd(), undefined, {
-    projectTrusted: ctx.isProjectTrusted?.() ?? true,
+function getBashOptions(ctx?: { cwd: string; isProjectTrusted?: () => boolean }) {
+  if (!ctx) return {};
+  const projectTrusted = ctx.isProjectTrusted?.() === true;
+  const settings = SettingsManager.create(ctx.cwd, undefined, {
+    projectTrusted,
   });
   return {
     commandPrefix: settings.getShellCommandPrefix(),
@@ -14,24 +14,7 @@ function getBashOptions(ctx: { cwd?: string; isProjectTrusted?: () => boolean } 
 }
 
 export default function bashCwd(pi: ExtensionAPI) {
-  const renderer = createCompactToolRenderers({
-    Text,
-    Container,
-    visibleWidth,
-    sliceByColumn,
-    truncateToWidth,
-  }).bash;
-
-  createBashCwdExtension({
-    registerTool(definition: any) {
-      pi.registerTool({
-        ...definition,
-        renderShell: "self",
-        renderCall: renderer.renderCall,
-        renderResult: renderer.renderResult,
-      });
-    },
-  }, {
+  createBashCwdExtension(pi, {
     workspaceRoot: process.cwd(),
     createBashToolDefinition,
     getBashOptions,

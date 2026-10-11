@@ -25,6 +25,20 @@ test("registers exactly five memory tools", () => {
   createBasicMemoryExtension(pi);
   const names = pi.tools.map((t) => t.name).sort();
   assert.deepEqual(names, ["memory_context", "memory_read", "memory_recent", "memory_search", "memory_write"]);
+  for (const tool of pi.tools) {
+    assert.equal(typeof tool.label, "string");
+    assert.ok(tool.label.length > 0);
+    assert.ok(tool.promptSnippet.length > 0);
+    assert.ok(tool.promptGuidelines.length > 0);
+    assert.equal(tool.outputSchema, undefined);
+    assert.equal(tool.exposure, undefined);
+  }
+  const required = { memory_search: ["query"], memory_read: ["identifier"], memory_context: ["query"], memory_recent: [], memory_write: ["title", "folder", "content"] };
+  for (const tool of pi.tools) {
+    assert.equal(tool.parameters.type, "object");
+    assert.deepEqual(tool.parameters.required, required[tool.name]);
+    assert.equal(tool.parameters.properties.project.type, "string");
+  }
 });
 
 test("registered memory tools satisfy the current Pi execute contract", async () => {

@@ -433,7 +433,7 @@ function setup(reason) {
   const pi = { on: (name, handler) => register(handlers, name, handler), events: { on: (name, handler) => register(events, name, handler) }, getThinkingLevel: () => "high", getAllTools: () => [], registerShortcut(_key, definition) { shortcut = definition; } };
   customFooterModule.default(pi);
   const ctx = {
-    hasUI: true, cwd: `${process.env.HOME}/workspace`, model: { provider: "codex-pool", id: "gpt-5.6-sol", contextWindow: 272_000 },
+    mode: "tui", hasUI: true, cwd: `${process.env.HOME}/workspace`, model: { provider: "codex-pool", id: "gpt-5.6-sol", contextWindow: 272_000 },
     getContextUsage: () => ({ tokens: 207_000, contextWindow: 272_000, percent: 76.1 }), sessionManager: { getSessionFile: () => null },
     ui: {
       onTerminalInput() { throw new Error("browser must not install a global terminal input listener"); },
@@ -557,10 +557,10 @@ function runtimeFixture(fixtureOptions = {}) {
   const originalSetInterval = globalThis.setInterval; const originalClearInterval = globalThis.clearInterval;
   globalThis.setInterval = (callback) => { const timer = { callback, unrefCalls: 0, unref() { this.unrefCalls += 1; } }; timers.push(timer); return timer; };
   globalThis.clearInterval = (timer) => { cleared.push(timer); };
-  const pi = { on: (name, handler) => register(handlers, name, handler), events: { on: (name, handler) => register(events, name, handler) }, getThinkingLevel: () => "high", getAllTools: () => fixtureOptions.tools ?? [], registerShortcut(_key, definition) { shortcut = definition; } };
+  const pi = { on: (name, handler) => register(handlers, name, handler), events: { on: (name, handler) => register(events, name, handler) }, getThinkingLevel: () => "high", getAllTools() { throw new Error("ToolInfo must not be consumed as renderer"); }, registerShortcut(_key, definition) { shortcut = definition; } };
   customFooterModule.default(pi);
   const ctx = {
-    hasUI: true, cwd: "/repo", model: { id: "model" }, getContextUsage: () => ({ percent: 1, contextWindow: 100 }), sessionManager: { getSessionFile: () => null },
+    mode: "tui", hasUI: true, cwd: "/repo", model: { id: "model" }, getContextUsage: () => ({ percent: 1, contextWindow: 100 }), sessionManager: { getSessionFile: () => null },
     ui: {
       onTerminalInput() { throw new Error("browser must not install a global terminal input listener"); }, setFooter(factory) { footerFactory = factory; },
       getEditorComponent: () => { if (fixtureOptions.throwAt === "getEditorComponent") throw new Error("get editor failed"); return editor; }, getEditorText: () => { if (fixtureOptions.throwAt === "getEditorText") throw new Error("get text failed"); return draft; }, setEditorComponent(factory) { if (fixtureOptions.throwAt === "setEditorComponent") throw new Error("set editor failed"); editor = factory; editorFactories.push(factory); }, setEditorText(text) { draft = text; },
@@ -701,14 +701,14 @@ test("a repeated session start exits the browser and replaces timer and input li
   assert.doesNotMatch(subject.component().render(58)[1], /main/);
 });
 
-test("a no-UI session start tears down the prior browser session and clears its roster", (t) => {
+test("an RPC session with UI support tears down the prior terminal browser and clears its roster", (t) => {
   const subject = runtimeFixture(); t.after(() => { subject.shutdown(); subject.restore(); });
   subject.asyncStart({ id: "no-ui-run", asyncDir: "/tmp/no-ui-run", cwd: "/repo", agent: "executor" });
   const original = subject.ctx.ui.getEditorComponent();
   subject.input()("\x1bo");
   const stalePoll = subject.timers[0].callback;
 
-  subject.start({ hasUI: false }, "startup");
+  subject.start({ mode: "rpc", hasUI: true }, "startup");
 
   assert.equal(subject.custom[0].done, 1);
   assert.equal(subject.ctx.ui.getEditorComponent(), original);
@@ -832,7 +832,7 @@ test("native session parse warning falls back once to valid Fleet output", (t) =
   assert.equal((rendered.match(/\[Warning:/g) ?? []).length, 0);
 });
 
-test("x toggles native tool result visibility while consuming browser input", (t) => {
+test("x toggles native tool result visibility while consuming browser input", async (t) => {
   const sessions = fs.mkdtempSync(path.join(os.tmpdir(), "footer-native-tools-sessions-"));
   const asyncDir = fs.mkdtempSync(path.join(sessions, "footer-native-tools-async-"));
   const parent = SessionManager.create("/repo", sessions);
@@ -844,16 +844,13 @@ test("x toggles native tool result visibility while consuming browser input", (t
   child.appendMessage({ role: "toolResult", toolCallId: "footer-tool", toolName: "read", content: [{ type: "text", text: "expanded native tool result" }], isError: false, timestamp: Date.now() });
   const sessionFile = child.getSessionFile();
   assert.ok(sessionFile);
-  const subject = runtimeFixture({
-    tools: [{
-      name: "read",
-      renderCall(args) { return new Text(`parent footer read: ${args.path}`, 0, 0); },
-      renderResult(result, options) {
-        const text = result.content?.find((item) => item.type === "text")?.text ?? "";
-        return new Text(options.expanded ? `parent footer expanded: ${text}` : "parent footer collapsed", 0, 0);
-      },
-    }],
-  });
+  const { createChildConversationRenderers } = await jiti.import("../packages/pi-subagents-enhanced/src/tui/tool-renderers.ts");
+  const preview = createChildConversationRenderers("/repo");
+  assert.equal(preview.resolveToolRenderer("third-party"), undefined);
+  assert.deepEqual(Object.keys(preview.resolveToolRenderer("read")).sort(), ["renderCall", "renderResult", "renderShell"]);
+  assert.equal(typeof preview.resolveToolRenderer("subagent").renderCall, "function");
+  assert.equal(typeof preview.resolveToolRenderer("subagent_supervisor").renderResult, "function");
+  const subject = runtimeFixture();
   subject.ctx.sessionManager.getSessionFile = () => parent.getSessionFile();
   t.after(() => { subject.shutdown(); subject.restore(); fs.rmSync(sessions, { recursive: true, force: true }); });
 
@@ -868,9 +865,8 @@ test("x toggles native tool result visibility while consuming browser input", (t
   const collapsedAgain = subject.custom[0].component.render(80).join("\n");
 
   assert.notEqual(expanded, collapsed);
-  assert.match(collapsed, /parent footer read: fixture\.txt/);
-  assert.match(collapsed, /parent footer collapsed/);
-  assert.match(expanded, /parent footer expanded: expanded native tool result/);
+  assert.match(collapsed, /fixture\.txt/);
+  assert.match(expanded, /expanded native tool result/);
   assert.equal(collapsedAgain, collapsed);
 });
 
@@ -880,7 +876,7 @@ test("no-UI reload tears down browser resources while preserving the roster for 
   const original = subject.ctx.ui.getEditorComponent();
   subject.input()("\x1bo");
 
-  subject.start({ hasUI: false }, "reload");
+  subject.start({ mode: "print", hasUI: false }, "reload");
 
   assert.equal(subject.custom[0].done, 1);
   assert.equal(subject.ctx.ui.getEditorComponent(), original);

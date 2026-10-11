@@ -51,6 +51,8 @@ test("compact spawn summary supports generic failures and rejects missing struct
 });
 
 test("compact notification shows only one title and completion state without mutating the message", () => {
+  const registry = getTitleRegistry();
+  registry.remember("1ae07ab7-0000-4000-8000-000000000001", "Cobalt title verification");
   const message = {
     customType: "subagent-notify",
     content: [
@@ -58,9 +60,11 @@ test("compact notification shows only one title and completion state without mut
       "",
       "COBALT_RUN_OK",
       "",
+      "Retention-managed async directory: /tmp/retained/1ae07ab7-0000-4000-8000-000000000001/",
+      "",
       "Session file: /tmp/session.jsonl",
     ].join("\n"),
-    details: { titles: ["Cobalt title verification"] },
+    details: { titles: ["Wrong historical title"] },
   };
   const before = clone(message);
 

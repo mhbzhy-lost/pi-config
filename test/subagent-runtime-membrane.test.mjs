@@ -413,7 +413,7 @@ async function execute(tool, params, context = ctx) {
   return tool.execute("tool-call-1", params, signal, undefined, context);
 }
 
-test("the headless membrane decorates lifecycle and grouped completion messages by run title", () => {
+test("the headless membrane decorates lifecycle events while completion messages pass through raw", () => {
   const emitted = [];
   const messages = [];
   const registry = {
@@ -429,12 +429,14 @@ test("the headless membrane decorates lifecycle and grouped completion messages 
   const api = createHeadlessSubagentApi(pi, { titleRegistry: registry });
   api.events.emit("subagent:async-started", { id: "run-1", agent: "delegate" });
   api.events.emit("subagent:async-complete", { runId: "run-1", agent: "delegate" });
-  api.sendMessage({ customType: "subagent-notify", content: "Background task completed: **delegate**\n\nDone" });
+  const notify = { customType: "subagent-notify", content: "Background task completed: **delegate**\n\nDone" };
+  api.sendMessage(notify);
 
   assert.equal(emitted[0].payload.title, "First task");
   assert.equal(emitted[1].payload.title, "First task");
-  assert.match(messages[0].content, /\*\*delegate\*\* \[First task\]/);
-  assert.deepEqual(messages[0].details, { titles: ["First task"] });
+  // raw boundary：即使 registry 提供 takeCompleted 也不得被 send 路径消费，
+  // message 原样传递（无 title suffix、无 details 注入）。
+  assert.equal(messages[0], notify);
 });
 
 test("the production notification order suppresses the pre-event upstream message and renders after runId observation", () => {
@@ -486,7 +488,8 @@ test("the production notification order suppresses the pre-event upstream messag
 
   upstreamApi.events.emit("subagent:async-complete", { runId: "run-1", agent: "delegate" });
   assert.equal(visible.length, 1);
-  assert.match(visible[0].content, /\*\*delegate\*\* \[First task\]/);
+  // raw boundary：事件后发送的消息原样传递，title 解析留给显示层。
+  assert.deepEqual(visible[0], { customType: "subagent-notify", content: "Background task completed: **delegate**\n\nDone" });
 });
 
 test("project completion notifier makes only completed subagent messages visible", () => {
@@ -546,7 +549,7 @@ test("ExtensionRunner shutdown disposes an owner-scoped trace sink exactly once"
   assert.equal(disposals, 1);
 });
 
-test("grouped same-agent completions render each title in the header and matching numbered block", () => {
+test("grouped same-agent completions pass through without consuming the completed queue", () => {
   const messages = [];
   const queued = ["First task", "Second task"];
   const registry = {
@@ -558,22 +561,20 @@ test("grouped same-agent completions render each title in the header and matchin
     sendMessage(message) { messages.push(message); },
   }, { titleRegistry: registry });
 
-  api.sendMessage({
-    customType: "subagent-notify",
-    content: [
-      "Background tasks completed (2): **delegate**, **delegate**",
-      "",
-      "1. delegate",
-      "first result",
-      "",
-      "2. delegate",
-      "second result",
-    ].join("\n"),
-  });
+  const content = [
+    "Background tasks completed (2): **delegate**, **delegate**",
+    "",
+    "1. delegate",
+    "first result",
+    "",
+    "2. delegate",
+    "second result",
+  ].join("\n");
+  api.sendMessage({ customType: "subagent-notify", content });
 
-  assert.match(messages[0].content, /\*\*delegate\*\* \[First task\], \*\*delegate\*\* \[Second task\]/);
-  assert.match(messages[0].content, /1\. delegate \[First task\]/);
-  assert.match(messages[0].content, /2\. delegate \[Second task\]/);
+  // raw boundary：grouped 通知也不得按 agent 消费 completed 队列或改写内容。
+  assert.deepEqual(messages[0], { customType: "subagent-notify", content });
+  assert.deepEqual(queued, ["First task", "Second task"], "the completed queue must stay untouched by the send path");
 });
 
 test("the headless membrane denies registration APIs by default and preserves runtime APIs", () => {
@@ -703,10 +704,10 @@ test("spawn rendering keeps the complete execute result while showing one statef
   assert.deepEqual(statusState, { subagentSpawnSummary: "unchanged" });
   const statusCall = renderers.renderSubagentCall({ action: "status" }, theme, { state: statusState });
   assert.ok(statusCall, "defined renderCall slots must return a Component");
-  assert.deepEqual(statusCall.render(120), []);
+  assert.deepEqual(statusCall.render(120).map((line) => line.trimEnd()), ["subagent status"]);
 });
 
-test("subagent renderer hides validation Received arguments without changing result or args", () => {
+test("subagent renderer preserves validation Received arguments without changing result or args", () => {
   const renderers = createSubagentToolRenderers();
   const result = {
     isError: true,
@@ -727,7 +728,10 @@ test("subagent renderer hides validation Received arguments without changing res
   assert.match(rendered, /Validation failed for tool "subagent":/);
   assert.match(rendered, /execution\.timeoutMs/);
   assert.match(rendered, /acceptance\.criteria/);
-  assert.doesNotMatch(rendered, /Received arguments|very-long|invalid|x{64}/);
+  assert.match(rendered, /Received arguments/);
+  assert.match(rendered, /very-long/);
+  assert.match(rendered, /invalid/);
+  assert.match(rendered, /x{64}/);
   assert.deepEqual(result, beforeResult);
   assert.deepEqual(args, beforeArgs);
 });
@@ -950,14 +954,27 @@ test("headless runtime installation exposes only project-owned subagent tools", 
   assert.equal(pi.commands.length, 0);
   assert.equal(pi.tools[0].description, TYPED_SUBAGENT_DESCRIPTION);
   assert.match(TYPED_SUBAGENT_DESCRIPTION, /writePaths/);
-  assert.match(TYPED_SUBAGENT_DESCRIPTION, /Worktrees use top-level worktree/);
-  assert.match(TYPED_SUBAGENT_DESCRIPTION, /worktree.*true.*integrate or discard/);
-  assert.match(TYPED_SUBAGENT_DESCRIPTION, /integrate or discard to finish, or preserve temporarily and later release/);
+  assert.match(TYPED_SUBAGENT_DESCRIPTION, /worktree 隔离通过顶层 worktree 与 cwd 字段声明/);
+  assert.match(TYPED_SUBAGENT_DESCRIPTION, /worktree=true 时响应携带 workspace_id/);
+  assert.match(TYPED_SUBAGENT_DESCRIPTION, /CHILD_OWNS_INTEGRATION/);
+  assert.match(TYPED_SUBAGENT_DESCRIPTION, /已 released 的工作区无需额外处置/);
+  // M05B：单工具提示可见性正确且不扩大权限；model-only 保持。
+  assert.equal(pi.tools[0].exposure, "model-only");
+  assert.match(pi.tools[0].promptSnippet, /委派/);
+  assert.match(pi.tools[0].promptGuidelines.join("\n"), /完整任务合同/);
+  assert.equal(pi.tools[0].promptGuidelines.length, 3);
+  assert.equal(pi.tools[1].exposure, "model-only");
+  assert.match(pi.tools[1].promptSnippet, /status/);
+  assert.match(pi.tools[1].promptGuidelines.join("\n"), /CHILD_OWNS_INTEGRATION/);
+  assert.equal(pi.tools[2].exposure, "model-only");
+  assert.match(pi.tools[2].promptSnippet, /pending/);
+  assert.match(pi.tools[2].promptGuidelines.join("\n"), /writeReply/);
+  assert.equal(pi.tools[2].promptGuidelines.length, 2);
   assert.doesNotMatch(pi.tools[0].description, /proactive skill methodology/i);
   assert.doesNotMatch(pi.tools[1].description, /pi-subagents|upstream/i);
 });
 
-test("headless installation wires the title-aware completion notifier to session lifecycle", async () => {
+test("headless installation wires the completion notifier to session lifecycle", async () => {
   const pi = createPi();
   const rpc = createRpc();
   let upstreamApi;
@@ -1007,7 +1024,9 @@ test("headless installation wires the title-aware completion notifier to session
   assert.deepEqual(pi.messages, []);
   upstreamApi.events.emit("subagent:async-complete", { runId: "run-1", agent: "delegate", sessionId: "session-1" });
   assert.equal(pi.messages.length, 1);
-  assert.match(pi.messages[0].content, /\*\*delegate\*\* \[Observed task\]/);
+  // raw boundary：message 原样传递（仅 designated notifier 的既有 display gating
+  // 翻转 display 字段），title 由显示层按 runId 解析。
+  assert.deepEqual(pi.messages[0], { customType: "subagent-notify", content: "Background task completed: **delegate**\n\nDone", display: true });
 
   for (const handler of pi.handlers.get("session_shutdown") ?? []) await handler({ reason: "reload" });
   assert.equal(notifierDisposals, 1);
@@ -1075,9 +1094,13 @@ test("production upstream completion emits decorate each same-agent leaf once", 
   upstreamApi.events.emit("subagent:async-complete", { runId: "leaf-2", agent: "delegate", success: true });
 
   assert.deepEqual(delivered, ["First task", "Second task"]);
-  assert.match(pi.messages[0].content, /\*\*delegate\*\* \[First task\]/);
-  assert.match(pi.messages[1].content, /\*\*delegate\*\* \[Second task\]/);
-  assert.equal(registry.takeCompleted("delegate"), undefined, "each completion must enqueue one title only");
+  // raw boundary：message 不再注入 title；lifecycle event 仍按 runId 各 enqueue
+  // 恰一个条目且 FIFO 有序（leaf-1 → leaf-2），队列残留由显示层之外无消费者。
+  assert.equal(pi.messages[0].content, "Background task completed: **delegate**");
+  assert.equal(pi.messages[1].content, "Background task completed: **delegate**");
+  assert.equal(registry.takeCompleted("delegate"), "First task", "each completion must enqueue one title only, in run order");
+  assert.equal(registry.takeCompleted("delegate"), "Second task");
+  assert.equal(registry.takeCompleted("delegate"), undefined);
 });
 
 test("confirmed facade workflow success is filtered before the completion notifier while its leaf remains visible", async () => {
@@ -1136,8 +1159,8 @@ test("confirmed facade workflow success is filtered before the completion notifi
   });
   assert.deepEqual(delivered, ["leaf-run-1"]);
   assert.equal(pi.messages.length, 1);
-  assert.match(pi.messages[0].content, /\*\*delegate\*\* \[真实业务\]/);
-  assert.match(pi.messages[0].content, /业务摘要/);
+  // raw boundary：leaf 通知原样传递（title 由显示层解析），保留摘要正文。
+  assert.equal(pi.messages[0].content, "Background task completed: **delegate**\n\n业务摘要");
 
   upstreamApi.events.emit("subagent:async-complete", { runId: "user-workflow", agent: "workflow", success: true, sessionId: "session-1", summary: "用户 workflow" });
   for (const state of ["failed", "paused", "stopped"]) {

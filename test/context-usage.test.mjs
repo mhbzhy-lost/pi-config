@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   DEFAULT_HANDOFF_POLICY,
+  ContextUsageOutputSchema,
   createContextUsageSnapshot,
   createContextUsageToolResult,
   validateHandoffPolicy,
@@ -56,6 +57,19 @@ test("工具结果保留完整结构化快照并标记估计值", () => {
   assert.equal(payload.remainingTokens, 64000);
   assert.match(result.content[0].text, /估计/);
   assert.equal("totalTokens" in payload, false);
+  assert.deepEqual(result.structuredContent, payload);
+  assert.equal("note" in result.details, false);
+  assert.deepEqual([...ContextUsageOutputSchema.required].sort(), Object.keys(payload).sort());
+  for (const field of ["tokens", "percent", "remainingTokens", "remainingRatio", "tokensBeforeHandoff", "tokensBeforeUrgentHandoff"]) {
+    assert.deepEqual(ContextUsageOutputSchema.properties[field].anyOf.map((schema) => schema.type), ["number", "null"]);
+  }
+  assert.equal(ContextUsageOutputSchema.properties.contextWindow.type, "number");
+  assert.equal(ContextUsageOutputSchema.properties.estimated.const, true);
+  assert.deepEqual(ContextUsageOutputSchema.properties.status.anyOf.map((schema) => schema.const), ["unknown", "normal", "prepare-handoff", "urgent-handoff"]);
+  assert.equal(ContextUsageOutputSchema.properties.shouldPrepareHandoff.type, "boolean");
+  assert.equal(ContextUsageOutputSchema.properties.shouldUrgentlyPrepareHandoff.type, "boolean");
+  assert.equal(ContextUsageOutputSchema.properties.handoffPath.type, "string");
+  assert.equal(ContextUsageOutputSchema.properties.note.type, "string");
 });
 
 test("拒绝无效 handoff 阈值配置", () => {

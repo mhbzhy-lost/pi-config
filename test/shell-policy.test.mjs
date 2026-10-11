@@ -7,7 +7,6 @@ import { realpathSync } from "node:fs";
 import test from "node:test";
 import {
   checkShellPolicy,
-  codingReminderFor,
 } from "../src/security-gates/shell-policy.ts";
 
 const workspaceRoot = process.cwd();
@@ -203,16 +202,6 @@ test("git push with global options is no longer gated on plan TODOs", async () =
     assert.equal(policy("git --no-pager push", { cwd: repo, workspaceRoot: repo }), undefined);
   } finally {
     await rm(repo, { recursive: true, force: true });
-  }
-});
-
-test("returns coding reminders only for source edits", () => {
-  assert.match(codingReminderFor({ toolName: "write", input: { path: "src/app.mjs" } }) ?? "", /test-driven-development/);
-  assert.equal(codingReminderFor({ toolName: "write", input: { path: "README.md" } }), undefined);
-  assert.equal(codingReminderFor({ toolName: "bash", input: { command: "npm test" } }), undefined);
-  assert.equal(codingReminderFor({ toolName: "write", input: { file_path: "src/app.ts" } })?.includes("test-driven-development"), true);
-  for (const path of ["src/app.test.ts", "src/app.spec.ts", "src/app_test.py", "src/test.ts", "tests/app.ts", "test/app.ts", "__tests__/app.ts"]) {
-    assert.equal(codingReminderFor({ toolName: "write", input: { path } }), undefined, path);
   }
 });
 

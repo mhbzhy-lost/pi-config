@@ -1,8 +1,4 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { after, test } from "node:test";
 import { loadPiTestRuntime } from "./helpers/pi-runtime.mjs";
 
@@ -17,35 +13,62 @@ const { codingAgent, jiti } = await loadPiTestRuntime(import.meta.url);
 const compactToolsModule = await jiti.import("../pi/extensions/compact-tools.ts");
 const compactTools = compactToolsModule.default;
 const names = ["read", "bash", "edit", "write", "find", "grep", "ls"];
-const compactToolNames = names.filter((name) => name !== "bash");
 const factories = Object.fromEntries(names.map((name) => [
   name,
-  codingAgent[`create${name[0].toUpperCase()}${name.slice(1)}Tool`],
+  codingAgent[`create${name[0].toUpperCase()}${name.slice(1)}ToolDefinition`],
 ]));
 
-function registerCompactTools(factory) {
+function registerCompactTools(factory, tools = new Map()) {
+  const resolvers = [];
   const registered = [];
-  factory({ registerTool: (tool) => registered.push(tool), on() {} });
-  return registered;
+  const activated = [];
+  factory({
+    registerToolRenderer: (resolver) => resolvers.push(resolver),
+    registerTool: (tool) => { registered.push(tool); tools.set(tool.name, tool); },
+    setActiveTools: (names) => activated.push(names),
+    on() {},
+  });
+  return { resolvers, registered, activated };
 }
 
-test("compact overrides retain every non-bash native non-renderer field", () => {
-  const registered = registerCompactTools(compactTools);
+test("compact resolver拥有七工具显示并保留next其余字段及未知fallback", () => {
+  const { resolvers, registered, activated } = registerCompactTools(compactTools);
 
-  assert.deepEqual(registered.map((tool) => tool.name), compactToolNames);
-  for (const name of compactToolNames) {
+  assert.equal(resolvers.length, 1);
+  assert.deepEqual(registered, []);
+  assert.deepEqual(activated, []);
+  const [resolve] = resolvers;
+  for (const name of names) {
+    let nextCalls = 0;
+    const mine = resolve(name, () => { nextCalls++; return undefined; });
+    assert.equal(nextCalls, 1);
+    assert.equal(mine.renderShell, "self");
+    assert.equal(typeof mine.renderCall, "function");
+    assert.equal(typeof mine.renderResult, "function");
     const native = factories[name](process.cwd());
-    const actual = registered.find((tool) => tool.name === name);
-    for (const field of ["parameters", "promptSnippet", "promptGuidelines", "prepareArguments", "constrainedSampling"]) {
-      assert.deepEqual(actual[field], native[field], `${name}.${field}`);
+    const sentinel = {};
+    const base = { renderShell: "default", renderCall() {}, renderResult() {}, sentinel };
+    const merged = resolve(name, () => base);
+    assert.equal(merged.renderCall, mine.renderCall);
+    assert.equal(merged.renderResult, mine.renderResult);
+    assert.equal(merged.sentinel, sentinel);
+    assert.equal(base.renderShell, "default");
+    const nativeRendering = resolve(name, () => native);
+    for (const field of ["parameters", "promptSnippet", "promptGuidelines", "prepareArguments", "constrainedSampling", "execute"]) {
+      assert.equal(nativeRendering[field], native[field], `${name}.${field} identity`);
     }
-    assert.equal(actual.parameters, native.parameters, `${name}.parameters preserves identity`);
-    assert.equal(actual.prepareArguments, native.prepareArguments, `${name}.prepareArguments preserves identity`);
+  }
+  for (const name of ["unknown", "__proto__", "constructor"]) {
+    let nextCalls = 0;
+    const fallback = { renderCall() {} };
+    assert.equal(resolve(name, () => { nextCalls++; return fallback; }), fallback);
+    assert.equal(nextCalls, 1);
+    assert.equal(resolve(name, () => undefined), undefined);
   }
 });
 
 test("Host折叠入口在展开错误后恢复成功摘要且不重复添加状态", () => {
-  const tool = registerCompactTools(compactTools).find((tool) => tool.name === "edit");
+  const tool = registerCompactTools(compactTools).resolvers[0]("edit", () => undefined);
   const theme = { bold: (text) => text, fg: (_color, text) => text };
   const args = { path: "/tmp/fixture.txt", edits: [{ oldText: "a", newText: "b" }] };
   const context = { args, state: {}, isError: true, expanded: true };
@@ -62,51 +85,17 @@ test("Host折叠入口在展开错误后恢复成功摘要且不重复添加状�
   assert.deepEqual(lines, ["∗ edit /tmp/fixture.txt (1 edit) · done"]);
 });
 
-test("registered execute selects the live cwd native tool and forwards five arguments", async () => {
-  const temporaryDirectory = await mkdtemp(join(tmpdir(), "compact-tools-execute-"));
-  try {
-    const extensionSource = await readFile(new URL("../pi/extensions/compact-tools.ts", import.meta.url), "utf8");
-    const mockPath = join(temporaryDirectory, "pi-mock.mjs");
-    const tuiPath = join(temporaryDirectory, "tui-mock.mjs");
-    const extensionPath = join(temporaryDirectory, "compact-tools.ts");
-    const rendererUrl = pathToFileURL(new URL("../src/compact-tools/renderer.ts", import.meta.url).pathname).href;
-
-    await writeFile(mockPath, `
-export const calls = [];
-const names = ${JSON.stringify(names)};
-const tool = (name, cwd) => ({
-  name, label: name, description: name, parameters: { name }, promptSnippet: name,
-  promptGuidelines: [name], prepareArguments: (params) => params,
-  constrainedSampling: { type: "json_schema", strict: "prefer" },
-  execute(...args) { calls.push({ name, cwd, args }); return { cwd }; },
-});
-${names.map((name) => `export const create${name[0].toUpperCase()}${name.slice(1)}Tool = (cwd) => tool("${name}", cwd);`).join("\n")}
-export class SkillInvocationMessageComponent {}
-`);
-    await writeFile(tuiPath, "export class Container {} export class Markdown {} export class Text {} export const sliceByColumn = () => ''; export const truncateToWidth = () => ''; export const visibleWidth = () => 0;");
-    const source = extensionSource
-      .replace("@earendil-works/pi-coding-agent", pathToFileURL(mockPath).href)
-      .replace("@earendil-works/pi-tui", pathToFileURL(tuiPath).href)
-      .replace("../../src/compact-tools/renderer.ts", rendererUrl);
-    await writeFile(extensionPath, source);
-
-    const mock = await import(pathToFileURL(mockPath).href);
-    const module = await jiti.import(extensionPath);
-    const registered = registerCompactTools(module.default);
-    const toolCallId = "call-1";
-    const params = { path: "safe.txt" };
-    const signal = new AbortController().signal;
-    const onUpdate = () => {};
-    const ctx = { cwd: "/live-cwd" };
-
-    await registered.find((tool) => tool.name === "read").execute(toolCallId, params, signal, onUpdate, ctx);
-
-    assert.deepEqual(mock.calls.at(-1), {
-      name: "read",
-      cwd: "/live-cwd",
-      args: [toolCallId, params, signal, onUpdate, ctx],
-    });
-  } finally {
-    await rm(temporaryDirectory, { recursive: true, force: true });
+test("compact不注册或激活工具，原生definition/metadata/execute身份保持", () => {
+  // 只创建原生 definition 对照，不执行工具或启动 Host。
+  const tools = new Map(names.map((name) => [name, Object.freeze(factories[name](process.cwd()))]));
+  const before = new Map([...tools].map(([name, tool]) => [name, { tool, fields: { ...tool } }]));
+  const { resolvers, registered, activated } = registerCompactTools(compactTools, tools);
+  for (const name of names) {
+    const tool = tools.get(name);
+    resolvers[0](name, () => ({ renderShell: tool.renderShell, renderCall: tool.renderCall, renderResult: tool.renderResult }));
+    assert.equal(tool, before.get(name).tool, `${name} definition identity`);
+    for (const field of Object.keys(tool)) assert.equal(tool[field], before.get(name).fields[field], `${name}.${field} identity`);
   }
+  assert.deepEqual(registered, []);
+  assert.deepEqual(activated, []);
 });

@@ -23,9 +23,10 @@ type HeadlessApiOptions = {
   getHostIdentity?: () => { hostSessionId?: string | null; completionOwnerId?: string } | undefined;
 };
 
-function titleSuffix(title) {
-  return title ? ` [${title}]` : "";
-}
+// 完成通知的 title 解析职责已移到 TUI 显示层（compact-rendering.ts）：membrane
+// 不再按 agent 消费 completed 队列（先于 async-complete 事件消费会取到上一任务
+// 的 title），也不再改写 sendMessage 的原始 message/content/details（TUI raw 边
+// 界）。显示层按通知 correlation 行中的稳定 run 标识只读查询 titleRegistry。
 
 function decorateLifecycle(type, payload, titleRegistry) {
   if (!payload || typeof payload !== "object") return payload;
@@ -39,58 +40,6 @@ function decorateLifecycle(type, payload, titleRegistry) {
     return { ...payload, presentation, ...(title ? { title } : {}) };
   }
   return payload;
-}
-
-function decorateCompletionContent(content, titleRegistry) {
-  const lines = content.split("\n");
-  const firstLine = lines[0] ?? "";
-  const grouped = /^Background tasks completed \(\d+\): /.test(firstLine);
-  const titles = [];
-  lines[0] = firstLine.replace(/\*\*([^*]+)\*\*/g, (match, agent) => {
-    const detail = typeof titleRegistry.takeCompletedDetail === "function"
-      ? titleRegistry.takeCompletedDetail(agent)
-      : undefined;
-    const title = detail?.title ?? titleRegistry.takeCompleted(agent);
-    if (!title) return match;
-    titles.push({ agent, title, presentation: detail?.presentation });
-    return `**${agent}**${titleSuffix(title)}`;
-  });
-  if (grouped) {
-    for (let index = 0; index < titles.length; index += 1) {
-      const blockPrefix = `${index + 1}. ${titles[index].agent}`;
-      const lineIndex = lines.findIndex((line, candidate) => candidate > 0 && line.startsWith(blockPrefix));
-      if (lineIndex >= 0) {
-        lines[lineIndex] = `${blockPrefix}${titleSuffix(titles[index].title)}${lines[lineIndex].slice(blockPrefix.length)}`;
-      }
-    }
-  }
-  return {
-    content: lines.join("\n"),
-    titles: titles.map((entry) => entry.title),
-    presentations: titles.map((entry) => entry.presentation),
-  };
-}
-
-function decorateVisibleMessage(message, titleRegistry) {
-  if (!message || typeof message !== "object" || !titleRegistry) return message;
-  const details = message.details;
-  const runId = details?.runId ?? details?.event?.runId;
-  const title = typeof runId === "string" ? titleRegistry.titleFor(runId) : undefined;
-  if (typeof message.content !== "string") return message;
-  if (title) {
-    return {
-      ...message,
-      content: `${message.content}${titleSuffix(title)}`,
-      details: { ...(details ?? {}), title },
-    };
-  }
-  if (message.customType === "subagent-notify") {
-    const decorated = decorateCompletionContent(message.content, titleRegistry);
-    return decorated.titles.length
-      ? { ...message, content: decorated.content, details: { ...(details ?? {}), titles: decorated.titles, ...(decorated.presentations.some(Boolean) ? { presentations: decorated.presentations } : {}) } }
-      : message;
-  }
-  return message;
 }
 
 function traceMonotonicMs() {
@@ -207,10 +156,12 @@ export function createHeadlessSubagentApi(pi, {
       if (property === "sendMessage") {
         return (message, options) => {
           if (suppressCompletionNotifications && message?.customType === "subagent-notify") return undefined;
-          const decorated = decorateVisibleMessage(message, titleRegistry);
-          const visible = forceCompletionDisplay && decorated?.customType === "subagent-notify"
-            ? { ...decorated, display: true }
-            : decorated;
+          // 原样传递 message（TUI raw 边界）：仅保留 display gating 既有语义
+          //（forceCompletionDisplay 只浅拷贝翻转 display 字段），不加 title、
+          // 不改 content/details。
+          const visible = forceCompletionDisplay && message?.customType === "subagent-notify"
+            ? { ...message, display: true }
+            : message;
           const fields = {
             ...(typeof visible?.customType === "string" ? { customType: visible.customType } : {}),
             ...(typeof options?.triggerTurn === "boolean" ? { triggerTurn: options.triggerTurn } : {}),

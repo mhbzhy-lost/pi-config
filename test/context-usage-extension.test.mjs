@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import contextUsageExtension from "../pi/extensions/context-usage.ts";
+import { ContextUsageOutputSchema } from "../src/context-usage/snapshot.ts";
 import {
   createHandoffReminderState,
   getHandoffReminder,
@@ -74,6 +75,13 @@ test("extension 注册无参数 context_usage 工具并返回完整快照", asyn
   contextUsageExtension(pi);
   assert.equal(pi.registered.length, 1);
   assert.equal(pi.registered[0].name, "context_usage");
+  assert.equal(pi.registered[0].label, "context_usage");
+  assert.ok(pi.registered[0].promptSnippet.length > 0);
+  assert.ok(pi.registered[0].promptGuidelines.length > 0);
+  assert.equal(pi.registered[0].outputSchema, ContextUsageOutputSchema);
+  assert.equal(pi.registered[0].exposure, undefined);
+  assert.deepEqual(pi.registered[0].parameters.properties, {});
+  assert.equal(pi.registered[0].parameters.additionalProperties, false);
 
   const result = await pi.registered[0].execute("call-1", {}, undefined, undefined, {
     getContextUsage() {
@@ -84,17 +92,22 @@ test("extension 注册无参数 context_usage 工具并返回完整快照", asyn
   assert.equal(payload.tokens, 64000);
   assert.equal(payload.remainingTokens, 64000);
   assert.equal(result.details.status, "normal");
+  assert.deepEqual(result.structuredContent, payload);
+  assert.equal("note" in result.details, false);
 });
 
 test("extension 对未知上下文不发送误报提醒", async () => {
   const pi = fakePi();
   contextUsageExtension(pi);
-  await pi.registered[0].execute("call-1", {}, undefined, undefined, {
+  const result = await pi.registered[0].execute("call-1", {}, undefined, undefined, {
     getContextUsage() {
       return { tokens: null, contextWindow: 128000, percent: null };
     },
   });
   assert.equal(pi.sent.length, 0);
+  assert.equal(result.structuredContent.status, "unknown");
+  assert.equal(result.structuredContent.remainingTokens, null);
+  assert.deepEqual(result.structuredContent, JSON.parse(result.content[0].text));
 });
 
 test("agent_end 达到阈值时发送一次非展示性 handoff 提醒", () => {

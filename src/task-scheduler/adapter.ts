@@ -46,6 +46,16 @@ const TOOL_USAGE = Object.freeze({
   scheduler_get: "Use when retrieving the details, history, or schedule of a known scheduled task ID.",
   scheduler_delete: "Use when removing or canceling a scheduled prompt or task by ID.",
 });
+// M05B：单工具摘要补齐缺失者；上游已携带的 promptSnippet 经 spread 原样保留，不在此覆盖。
+const TOOL_SNIPPETS = Object.freeze({
+  scheduler_get: "Get one scheduled task's details, history, and schedule by ID.",
+  scheduler_delete: "Remove or cancel one scheduled task by ID.",
+});
+// M05B：create/delete 的 UI 确认边界提示；不用 annotations 替代确认。
+const TOOL_GUIDELINES = Object.freeze({
+  scheduler_create: ["Requires explicit user UI confirmation before a task is created; without UI or on denial, do not create and do not bypass. The persistent prompt is safety-scanned before storage."],
+  scheduler_delete: ["Requires explicit user UI confirmation before the task is removed; without UI or on denial, do not delete and do not bypass."],
+});
 
 function diagnostic(message) { diagnostics.push(message); if (diagnostics.length > 25) diagnostics.shift(); }
 function outside(repo, candidate) { const r = relative(repo, candidate); return isAbsolute(r) || (r !== "" && r.startsWith("..")); }
@@ -183,8 +193,15 @@ function schedulerFooterStatus(result) {
 function wrapTool(definition, hooks: { refresh?: (ctx: any) => Promise<void> } = {}) {
   if (!ALLOWED_TOOLS.has(definition?.name)) { diagnostic(`dropped tool: ${definition?.name || "unknown"}`); return undefined; }
   const description = [TOOL_USAGE[definition.name], definition.description].filter(Boolean).join(" ");
-  if (definition.name === "scheduler_list" || definition.name === "scheduler_get") return { ...definition, exposure: "model-only", description, execute: async (...args) => boundedResult(await definition.execute(...args)) };
-  return { ...definition, exposure: "model-only", description, execute: async (...args) => {
+  const snippet = definition.promptSnippet ?? TOOL_SNIPPETS[definition.name];
+  // M05B：上游已携带的 promptGuidelines 按原顺序保留，本仓确认 guideline 只追加在其后，不覆盖。
+  const guidelines = [...(definition.promptGuidelines ?? []), ...(TOOL_GUIDELINES[definition.name] ?? [])];
+  const metadata = {
+    ...(snippet ? { promptSnippet: snippet } : {}),
+    ...(guidelines.length ? { promptGuidelines: guidelines } : {}),
+  };
+  if (definition.name === "scheduler_list" || definition.name === "scheduler_get") return { ...definition, ...metadata, exposure: "model-only", description, execute: async (...args) => boundedResult(await definition.execute(...args)) };
+  return { ...definition, ...metadata, exposure: "model-only", description, execute: async (...args) => {
     const params = args[1], ctx = args[4];
     if (definition.name === "scheduler_create") {
       scanPersistent(params?.prompt);

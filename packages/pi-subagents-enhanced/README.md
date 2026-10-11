@@ -4,6 +4,8 @@
 
 该 package 固定封装 `pi-subagents@0.75.0`，提供项目自有的 typed `subagent` runtime、Root broker、统一 managed workspace service、child extensions，以及 footer、browser 和 transcript renderer。所有 upstream 内部 API 必须经 `src/compat/pi-subagents-0.75.ts` 导入。
 
+工具与消息的显示层统一由 `src/tui/tool-renderers.ts` 的纯 renderer 工厂提供，主入口与 child preview 共同消费；原生工具只从公开 `create*ToolDefinition` 消费渲染字段，未知工具返回 `undefined` 回退原生显示。所有精简、折叠、摘要只发生在 TUI renderer 层，不改写 agent 实际收到的消息、tool result、session 内容或结构化 `details`；结构化数据契约（如 `apply_patch` 与 `context_usage` 的 `structuredContent`/`outputSchema`）是显式程序数据通道，不是展示改写；model-only 的 subagent/supervisor 工具未因此新增 `outputSchema`。
+
 普通 subagent、Goal task 和 Goal validation 都通过同一 workspace service 分配、绑定、检查与处置 worktree。package 对外只发布三项代码 API：`./dispatch-ir`、`./workspace` 和 `./workspace/admin`；Git mutation、owner token 与 durable ledger 的实现均只归 `src/workspace/` 所有。
 
 ## Standalone subagent workspace management
@@ -36,7 +38,7 @@ npm:pi-subagents-enhanced@0.1.0
 
 ## Repository merge-queue acceptance probe
 
-T9 的聚焦验收入口是 `node scripts/probes/repository-merge-queue-acceptance.ts`。它只接受 `PI_REAL_BIN` 指向的真实 Pi 1.0.2 physical Host；合同测试使用 `node --test test/repository-merge-queue-acceptance-probe.test.mjs`，不会运行五 child 验收或全量 `npm test`。
+T9 的聚焦验收入口是 `node scripts/probes/repository-merge-queue-acceptance.ts`。它只接受 `PI_REAL_BIN` 指向的真实 Pi 1.0.4 physical Host；合同测试使用 `node --test test/repository-merge-queue-acceptance-probe.test.mjs`，不会运行五 child 验收或全量 `npm test`。
 
 Probe 使用独立 temporary repo、session、state 和 socket roots。失败时保留现场并在 receipt 中记录路径；不要手动删除失败现场，需先检查两个 Host、queue、worktree 和 terminal proof。barrier fixture 位于 `test/fixtures/repository-merge-queue-acceptance/`，仅可通过 `subagentOnlyExtensions` 注入测试 Host。
 

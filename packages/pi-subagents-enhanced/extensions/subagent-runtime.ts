@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
-import { Box, Text } from "@earendil-works/pi-tui";
+import { Text } from "@earendil-works/pi-tui";
 import {
   readSessionIdentity,
   registerBuiltinAgentsViaEvents,
@@ -9,15 +9,10 @@ import {
   upstreamSubagentRuntime,
 } from "../src/compat/pi-subagents-0.75.ts";
 import { registerCompletionNotices } from "../src/tui/completion-notices.ts";
-import {
-  formatCompactSubagentNotification,
-  formatCompactSubagentWorkspaceReminder,
-  formatCompactSubagentSpawnSummary,
-  formatCompactSubagentToolResult,
-  formatCompactSupervisorRequest,
-  formatCompactSupervisorReply,
-  formatCompactSupervisorToolResult,
-} from "../src/tui/compact-rendering.ts";
+import { formatCompactSubagentWorkspaceReminder } from "../src/tui/compact-rendering.ts";
+import { createSubagentToolRenderers } from "../src/tui/tool-renderers.ts";
+// 保留既有入口导出供调用方使用；renderer 实现由 package TUI 层拥有。
+export { createSubagentToolRenderers } from "../src/tui/tool-renderers.ts";
 import { createSubagentDispatchTraceFileSink, installHeadlessTypedSubagentRuntime } from "../src/subagent-dispatch/extension.ts";
 import { captureSupervisorCorrelation, reconcileSupervisorConsumption } from "../src/subagent-dispatch/supervisor-consumption.ts";
 import { registerConfiguredChildToolCeiling } from "../src/subagent-dispatch/child-tool-policy.ts";
@@ -207,85 +202,6 @@ export function projectManagedWorkspaceTerminalProof(
   const error = new Error("observed facade terminal proof is invalid") as Error & { code: string };
   error.code = "MANAGED_WORKSPACE_TERMINAL_PROOF_ADAPTER";
   throw error;
-}
-
-const SUBAGENT_SPAWN_SUMMARY_KEY = "subagentSpawnSummary";
-
-function spawnStartingSummary(args: any): string | undefined {
-  if (!args || typeof args !== "object" || Object.hasOwn(args, "action")) return undefined;
-  const agent = typeof args.agent === "string" ? args.agent.trim() : "";
-  const title = typeof args.title === "string" ? args.title.trim() : "";
-  return agent && title ? `subagent starting ${agent}: ${title}` : undefined;
-}
-
-export function createSubagentToolRenderers() {
-  const messageBox = (text: string, background: string, theme: any, splitHeader = false) => {
-    const box = new Box(1, 1, (line) => theme.bg(background, line));
-    if (splitHeader) {
-      const [header, ...body] = text.split("\n");
-      box.addChild(new Text(header ?? "", 0, 0));
-      box.addChild(new Text(body.join("\n"), 0, 0));
-    } else box.addChild(new Text(text, 0, 0));
-    return box;
-  };
-  const renderSubagentCall = (args: any, theme: any, context: any) => {
-    const starting = spawnStartingSummary(args);
-    if (!starting) {
-      const action = typeof args?.action === "string" ? args.action.trim() : "";
-      const target = args?.id ?? args?.runId ?? args?.index ?? args?.dir;
-      return new Text(theme.fg("dim", `subagent${action ? ` ${action}` : ""}${target !== undefined ? ` · ${String(target)}` : ""}`), 0, 0);
-    }
-    const summary = context?.state?.[SUBAGENT_SPAWN_SUMMARY_KEY] ?? starting;
-    return new Text(typeof summary === "string" ? theme.fg("dim", summary) : "", 0, 0);
-  };
-  const renderSubagentResult = (result: any, _options: any, theme: any, context: any) => {
-    const args = context?.args;
-    const isError = context?.isError === true || result?.isError === true;
-    const summary = args && !Object.hasOwn(args, "action")
-      ? formatCompactSubagentSpawnSummary(result, { isError })
-      : undefined;
-    if (summary) {
-      if (context?.state) context.state[SUBAGENT_SPAWN_SUMMARY_KEY] = summary;
-      if (!isError) return new Text(context?.state ? "" : theme.fg("dim", summary), 0, 0);
-    }
-    // context.args 是 Host 权威原入参；isError 同样用现有 context 正确传（Host 只
-    // 透传 {content, details}），不向执行返回注入任何 TUI 字段。
-    const text = formatCompactSubagentToolResult(result, args ?? {}, { isError });
-    return new Text(theme.fg(isError ? "error" : "dim", text), 0, 0);
-  };
-  const renderSupervisorRequest = (message: any, options: any, theme: any) => {
-    const text = formatCompactSupervisorRequest(message);
-    void options;
-    return messageBox(text, "toolPendingBg", theme, true);
-  };
-  const renderControlNotice = () => new Text("", 0, 0);
-  const renderSupervisorCall = (args: any, theme: any) => {
-    const action = typeof args?.action === "string" ? args.action.trim() : "";
-    // call 标题只保简短动作 + 完整 replyTo；回复正文仅在 result 卡完整展示，
-    // 避免同一绿色工具卡内 call 与 result 重复正文。
-    const replyTo = typeof args?.replyTo === "string" ? args.replyTo.trim() : "";
-    return new Text(theme.fg("dim", `subagent_supervisor${action ? ` ${action}` : ""}${replyTo ? ` · request: ${replyTo}` : ""}`), 0, 0);
-  };
-  const renderSupervisorResult = (result: any, _options: any, theme: any, context: any) => {
-    // Host 只透传 {content, details} 给 renderResult；isError 的权威信号在
-    // context.isError（tool-execution.js），错误保 error 色且原文可见不折叠。
-    const isError = result?.isError === true || context?.isError === true;
-    const text = formatCompactSupervisorToolResult(result, context?.args ?? {}, { isError });
-    return new Text(theme.fg(isError ? "error" : "dim", text), 0, 0);
-  };
-  // runtime 主动回执只用 dim 无框投影；工具卡的状态背景由 Host 原生外壳负责。
-  // 水平 padding 取 1 与原生 status 行一致（Host showStatus 以 ThemedText(…,1,0) 渲染），
-  // 使「回复已提交」与其他 dim 回执左缘对齐；仅组件 padding，不改 entry 数据与文案。
-  const renderSupervisorReplyEntry = (entry: any, options: any, theme: any) => {
-    void options;
-    return new Text(theme.fg("dim", formatCompactSupervisorReply(entry)), 1, 0);
-  };
-  // 可见 completion 回执（如「派发完成…」）同样对齐原生 status 行水平 padding，
-  // 仅展示层统一左缘，不改消息数据与文案。
-  const renderCompletionNotification = (message: any, theme: any) => {
-    return new Text(theme.fg("dim", formatCompactSubagentNotification(message)), 1, 0);
-  };
-  return { renderSubagentCall, renderSubagentResult, renderSupervisorRequest, renderControlNotice, renderSupervisorCall, renderSupervisorResult, renderSupervisorReplyEntry, renderCompletionNotification };
 }
 
 export default function subagentRuntime(pi: ExtensionAPI): void {

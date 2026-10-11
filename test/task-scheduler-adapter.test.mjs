@@ -229,10 +229,10 @@ test("injected clock polls without overlap, refreshes mutations, and isolates st
 test("scheduler tool descriptions explicitly say when each tool is used", () => {
   const pi = makeHost();
   registerTaskSchedulerAdapter(pi, { upstreamExtension(api) {
-    api.registerTool({ name: "scheduler_create", description: "Create a scheduled task. Use when the user requests a future, repeated, or timer task.", execute() {} });
-    api.registerTool({ name: "scheduler_list", description: "List scheduled tasks.", execute() {} });
+    api.registerTool({ name: "scheduler_create", description: "Create a scheduled task. Use when the user requests a future, repeated, or timer task.", promptSnippet: "Schedule prompts to run automatically.", promptGuidelines: ["Upstream create guideline."], execute() {} });
+    api.registerTool({ name: "scheduler_list", description: "List scheduled tasks.", promptSnippet: "List all scheduled prompts.", promptGuidelines: ["Upstream list guideline."], execute() {} });
     api.registerTool({ name: "scheduler_get", description: "Get a scheduled task.", execute() {} });
-    api.registerTool({ name: "scheduler_delete", description: "Delete a scheduled task.", execute() {} });
+    api.registerTool({ name: "scheduler_delete", description: "Delete a scheduled task.", promptGuidelines: ["Upstream delete guideline."], execute() {} });
   } });
   for (const [name, usage, upstreamDescription] of [
     ["scheduler_create", "Use when the user requests a future, repeated, or timer scheduled prompt or task.", "Create a scheduled task. Use when the user requests a future, repeated, or timer task."],
@@ -244,6 +244,23 @@ test("scheduler tool descriptions explicitly say when each tool is used", () => 
     assert.ok(description.startsWith(usage), `${name} guidance must come first`);
     assert.ok(description.includes(upstreamDescription), `${name} must preserve its upstream description`);
   }
+  // M05B：上游已携带的 S/G 原样保留，缺失的 get/delete 摘要由 adapter 补齐；
+  // 上游 promptGuidelines 按原顺序保留，本仓确认 guideline 只追加在其后不覆盖。
+  assert.equal(pi.tools.get("scheduler_create").promptSnippet, "Schedule prompts to run automatically.");
+  assert.equal(pi.tools.get("scheduler_list").promptSnippet, "List all scheduled prompts.");
+  assert.match(pi.tools.get("scheduler_get").promptSnippet, /by ID/);
+  assert.match(pi.tools.get("scheduler_delete").promptSnippet, /by ID/);
+  const createGuidelines = pi.tools.get("scheduler_create").promptGuidelines;
+  assert.equal(createGuidelines[0], "Upstream create guideline.", "upstream guideline must be preserved first in order");
+  assert.match(createGuidelines[1], /UI confirmation/, "local confirmation guideline must be appended after upstream");
+  assert.equal(createGuidelines.length, 2);
+  const deleteGuidelines = pi.tools.get("scheduler_delete").promptGuidelines;
+  assert.equal(deleteGuidelines[0], "Upstream delete guideline.");
+  assert.match(deleteGuidelines[1], /UI confirmation/);
+  assert.equal(deleteGuidelines.length, 2);
+  assert.deepEqual(pi.tools.get("scheduler_list").promptGuidelines, ["Upstream list guideline."], "upstream guideline preserved without forced local append");
+  assert.equal(pi.tools.get("scheduler_get").promptGuidelines, undefined);
+  for (const name of ["scheduler_create", "scheduler_list", "scheduler_get", "scheduler_delete"]) assert.equal(pi.tools.get(name).exposure, "model-only");
 });
 
 test("explicit frozen facade has no reflection or unknown-event bypass", async () => {

@@ -17,8 +17,50 @@ function textContent(value: unknown) {
     .join("\n");
 }
 
-function notificationTitles(message: unknown, firstLine: string) {
+// membrane 修复后不再装饰 completion message（raw boundary）：新通知的 title
+// 只能在显示层按原始 correlation 行中的稳定 run 标识只读解析（titleForRun）。
+// asyncDir 是 upstream single completion 的权威关联字段；只取其末段合法 run UUID，
+// 不扫描目录、不读取文件，也不从正文任意短 UUID 猜测。grouped 通知不把一个 root
+// 映射给多个 agent；Child 行仅按对应通知形态消费。
+const SINGLE_TASK_HEADER = /^(?:Background task|Detached foreground task) (?:completed|failed|paused|stopped): \*\*/;
+const CHILD_COMPLETION_HEADER = /^Workflow child /;
+const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function validRunId(value: unknown): string | undefined {
+  return typeof value === "string" && RUN_ID.test(value) ? value : undefined;
+}
+
+function runIdFromAsyncDir(content: string): string | undefined {
+  const raw = content.match(/^Retention-managed async directory:\s*(\S+)\s*$/m)?.[1];
+  if (!raw || /[\\\0-\x1f\x7f-\x9f]/.test(raw)) return undefined;
+  const path = raw.replace(/\/+$/, "");
+  if (!path.startsWith("/") || path.includes("//")) return undefined;
+  return validRunId(path.split("/").pop());
+}
+
+function notificationRunId(message: unknown, firstLine: string, content: string): string | undefined {
   const details = record(record(message)?.details);
+  const single = SINGLE_TASK_HEADER.test(firstLine) && !/^Background tasks completed \(\d+\):/.test(firstLine);
+  if (CHILD_COMPLETION_HEADER.test(firstLine)) {
+    return validRunId(content.match(/^Child run:\s*(\S+)\s*$/m)?.[1])
+      ?? validRunId(content.match(/^Workflow run:\s*(\S+)\s*$/m)?.[1]);
+  }
+  if (!single) return undefined;
+  return runIdFromAsyncDir(content)
+    ?? validRunId(details?.runId)
+    ?? validRunId(details?.eventRunId)
+    ?? validRunId(record(details?.event)?.runId);
+}
+
+function notificationTitles(message: unknown, firstLine: string, content: string) {
+  const details = record(record(message)?.details);
+  const runId = notificationRunId(message, firstLine, content);
+  if (runId) {
+    const title = getTitleRegistry().titleForRun(runId);
+    if (title) return [title];
+    const agent = firstLine.match(/:\s*\*\*([^*\r\n]+)\*\*/)?.[1]?.trim();
+    return [agent ? `${agent} · ${runId.slice(0, 8)}` : `run: ${runId.slice(0, 8)}`];
+  }
   const structured = Array.isArray(details?.titles)
     ? details.titles.filter((title): title is string => typeof title === "string" && Boolean(title.trim())).map((title) => title.trim())
     : [];
@@ -47,7 +89,7 @@ export function formatCompactSubagentNotification(message: unknown) {
   const receipt = workflowDispatchReceipt(firstLine);
   if (receipt) return receipt;
   const rawStatus = firstLine.match(NOTIFICATION_STATUS)?.[1] ?? "unknown";
-  const titles = notificationTitles(message, firstLine);
+  const titles = notificationTitles(message, firstLine, content);
   const labels = titles.length > 0 ? titles : ["subagent"];
   const states = presentations(message);
   return labels.map((title, index) => {
@@ -182,6 +224,43 @@ export function formatCompactSupervisorToolResult(result: unknown, args: unknown
   return message ? `回复状态未确认\n\n${message}` : "回复状态未确认";
 }
 
+/**
+ * action=list 成功回执的 TUI 投影。roster JSON 是模型选择入口的原始数据，完整
+ * frontmatter 由主 agent/模型消费；工具卡只展示 agent name + description 供一眼
+ * 识别，不截断 description（换行由 UI 组件负责），不展示 model/tools/thinking/
+ * systemPrompt 等原 JSON 字段。展示层优先消费结构化 details.agents；缺 details
+ * 时只读 parse 原 content JSON 的 name/frontmatter.description 映射，不改
+ * result/content/details。名单为空或不可解析时给中性占位，不伪造数据。
+ */
+function compactAgentRoster(result: unknown, text: string): string {
+  const details = record(record(result)?.details);
+  const structured = Array.isArray(details?.agents) ? details.agents : undefined;
+  const rows: Array<{ name: string; description: string }> = [];
+  if (structured) {
+    for (const agent of structured) {
+      const entry = record(agent);
+      const name = typeof entry?.name === "string" ? entry.name.trim() : "";
+      if (!name) continue;
+      rows.push({ name, description: typeof entry?.description === "string" ? entry.description : "" });
+    }
+  } else if (text.trim()) {
+    try {
+      const parsed: unknown = JSON.parse(text);
+      for (const agent of Array.isArray(parsed) ? parsed : []) {
+        const entry = record(agent);
+        const name = typeof entry?.name === "string" ? entry.name.trim() : "";
+        if (!name) continue;
+        const frontmatter = record(entry?.frontmatter);
+        rows.push({ name, description: typeof frontmatter?.description === "string" ? frontmatter.description : "" });
+      }
+    } catch {
+      // 非 JSON 文本：不伪造名单，保持中性占位。
+    }
+  }
+  if (rows.length === 0) return "Available agents: (no roster)";
+  return ["Available agents", ...rows.map(({ name, description }) => `• ${name}${description ? `：${description}` : ""}`)].join("\n");
+}
+
 export function formatCompactSubagentToolResult(result: unknown, args: unknown, context?: { isError?: boolean }) {
   const text = textContent(result);
   const input = record(args);
@@ -189,6 +268,9 @@ export function formatCompactSubagentToolResult(result: unknown, args: unknown, 
   const action = input?.action;
   if (action === "steer") return formatCompactSubagentSteerResult(result, args, { isError });
   if (isError) return text;
+  // list 成功回执只投影 name+description 简名册（见 compactAgentRoster）；错误在
+  // 上方原样返回，不误标成功。
+  if (action === "list") return compactAgentRoster(result, text);
   if (action === "interrupt") {
     const target = input?.id ?? input?.runId ?? input?.index ?? input?.dir;
     return `已中断${target !== undefined ? ` · ${String(target)}` : ""}`;

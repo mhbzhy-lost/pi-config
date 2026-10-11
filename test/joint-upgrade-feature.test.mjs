@@ -10,7 +10,6 @@ import { createSecurityGatesExtension } from "../src/security-gates/extension.ts
 import { createBashCwdExtension } from "../src/bash-cwd/extension.ts";
 import { applyPatch } from "../src/apply-patch/index.ts";
 // 现有公开入口回归；不以这些旧测试单独证明目标 pipeline。
-import createSkillWhitelistExtension from "../src/skill-whitelist/extension.ts";
 import { createBasicMemoryExtension } from "../src/basic-memory/extension.ts";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -43,30 +42,28 @@ test("1.0.4 官方 bash 合法结构来自实际执行，cwd 扩展保留 metada
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test("真实 write reminder 不改 raw；带结构 fixture 的 content-only 删除仅为 characterization", async () => {
+test("真实 write 无 tool_result 注入；原始 content/details 保持原生合同不变", async () => {
   const directory = await mkdtemp(join(tmpdir(), "a7-write-"));
   try {
     const handlers = new Map();
     createSecurityGatesExtension({ on: (name, handler) => handlers.set(name, handler) });
+    // M01 已删除 tool_result reminder handler；只剩 tool_call 门禁。
+    assert.equal(handlers.get("tool_result"), undefined);
+    assert.equal(typeof handlers.get("tool_call"), "function");
     const tool = codingAgent.createWriteToolDefinition(directory);
     assert.equal(tool.outputSchema, undefined);
     let raw, copy;
-    const afterToolCall = async ({ args, result, isError }) => {
+    const afterToolCall = async ({ result }) => {
       raw = result; copy = structuredClone(result);
-      return handlers.get("tool_result")({ toolName: "write", input: args, ...result, isError }, { cwd: directory });
+      return result;
     };
     const actual = await invoke(tool, { path: "src/demo.ts", content: "export const value = 1;\n" }, afterToolCall);
     assert.equal(actual.isError, false);
-    assert.match(actual.result.content[0].text, /test-driven-development/);
-    assert.equal(await readFile(join(directory, "src/demo.ts"), "utf8"), "export const value = 1;\n");
+    assert.equal(actual.result, raw);
     assert.deepEqual(raw, copy);
     assert.equal(raw.structuredContent, undefined);
-    // 此结构非官方 write 可达数据；不据此修改安全策略或宣称 production bug。
-    const fixture = { ...tool, execute: async () => ({ content: [{ type: "text", text: "Wrote src/demo.ts" }], details: { changed: true }, structuredContent: { changed: true } }) };
-    const synthetic = await invoke(fixture, { path: "src/demo.ts", content: "unused" }, afterToolCall);
-    assert.equal(synthetic.result.structuredContent, undefined);
-    assert.deepEqual(synthetic.result.details, { changed: true });
-    assert.deepEqual(raw, copy);
+    assert.doesNotMatch(raw.content[0].text, /test-driven-development/);
+    assert.equal(await readFile(join(directory, "src/demo.ts"), "utf8"), "export const value = 1;\n");
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -78,20 +75,40 @@ test("apply_patch 公开入口生成真实文件，未借助直接 projection fi
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-// 捕捉 whitelist 退役技能回流或发现合法项目技能丢失。
-test("Skill whitelist 真实 resources_discover 仅发现合成项目合法技能", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "a7-skills-"));
+// 捕捉退役技能经原生 discovery 回流或合法技能丢失；selector 只作用于其声明 scope。
+test("原生 resource discovery 合成 fixture：合法技能被发现，scoped selector 排除退役技能", async () => {
+  const home = await mkdtemp(join(tmpdir(), "a7-skills-home-"));
+  const previousHome = process.env.HOME;
   try {
+    const agentDir = join(home, "agent");
+    const project = join(home, "project");
+    await mkdir(join(agentDir, "skills"), { recursive: true });
+    // 项目内放置 .git，使原生祖先 .agents/skills 遍历停止在合成仓库根。
+    await mkdir(join(project, ".git"), { recursive: true });
     for (const name of ["a7-demo", "plan-runner-dispatch"]) {
-      await mkdir(join(directory, ".agents/skills", name), { recursive: true });
-      await writeFile(join(directory, ".agents/skills", name, "SKILL.md"), "---\nname: demo\ndescription: 合成技能\n---\n合成内容\n");
+      await mkdir(join(agentDir, "skills", name), { recursive: true });
+      await writeFile(join(agentDir, "skills", name, "SKILL.md"), `---\nname: ${name}\ndescription: 合成技能\n---\n合成内容\n`);
     }
-    let handler;
-    createSkillWhitelistExtension({ on: (_name, value) => { handler = value; } });
-    const discovered = await handler({ cwd: directory });
-    assert.ok(discovered.skillPaths.includes(join(directory, ".agents/skills/a7-demo")));
-    assert.ok(!discovered.skillPaths.includes(join(directory, ".agents/skills/plan-runner-dispatch")));
-  } finally { await rm(directory, { recursive: true, force: true }); }
+    // 隔离 HOME：用户级自动发现根只指向合成目录，不读真实 ~/.agents/skills。
+    process.env.HOME = home;
+    const { DefaultPackageManager, SettingsManager } = codingAgent;
+    const settingsManager = SettingsManager.inMemory({ skills: ["!**/plan-runner-dispatch/**"] });
+    const packageManager = new DefaultPackageManager({ cwd: project, agentDir, settingsManager });
+    const resolved = await packageManager.resolve();
+    const enabled = resolved.skills.filter((entry) => entry.enabled).map((entry) => entry.path);
+    const retired = resolved.skills.filter((entry) => entry.path.includes("plan-runner-dispatch"));
+    assert.ok(enabled.includes(join(agentDir, "skills", "a7-demo", "SKILL.md")));
+    assert.ok(retired.length >= 1, "退役技能应由原生发现后按声明 selector 关闭");
+    for (const entry of retired) {
+      assert.equal(entry.enabled, false, `声明 selector 必须排除退役技能: ${entry.path}`);
+      assert.equal(entry.metadata?.source, "auto");
+    }
+    assert.equal(enabled.some((path) => path.includes("plan-runner-dispatch")), false);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 // 仅 CLI 边界为替身，生产 commandBuilder/execute 和目标 schema pipeline 保持真实。

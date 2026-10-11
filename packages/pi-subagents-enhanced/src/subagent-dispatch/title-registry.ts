@@ -70,6 +70,16 @@ export function createTitleRegistry({ maxEntries = 256 } = {}) {
       return event?.success === true && typeof runId === "string" && Boolean(workflowRoots.get(runId));
     },
     titleFor(runId) { return titles.get(runId); },
+    // 只读展示解析：leaf runId 直接命中；workflow 完成通知携带的是 root runId，
+    // 经 bindWorkflowRoot/bindWorkflowLeaf 既有映射解析到 leaf 的 title。不写
+    // 任何记录，不改变公共记录语义；映射缺失时返回 undefined 由显示层 fallback。
+    titleForRun(runId) {
+      if (typeof runId !== "string" || !runId) return undefined;
+      const direct = titles.get(runId);
+      if (direct !== undefined) return direct;
+      const leaf = workflowRoots.get(runId);
+      return typeof leaf === "string" ? titles.get(leaf) : undefined;
+    },
     agentFor(runId) { return agents.get(runId); },
     completed(event) {
       const title = titles.get(event?.runId ?? event?.id);
@@ -93,6 +103,8 @@ export function createTitleRegistry({ maxEntries = 256 } = {}) {
 
 export function getTitleRegistry(store = globalThis) {
   const key = "__typedSubagentTitleRegistry";
-  if (store[key]?.version !== 3 || typeof store[key].prepare !== "function") store[key] = createTitleRegistry();
+  // titleForRun 为只读新增能力：旧实例（同进程热重载前创建）缺该方法时重建，
+  // 避免消费侧拿到无此方法的 registry。
+  if (store[key]?.version !== 3 || typeof store[key].prepare !== "function" || typeof store[key].titleForRun !== "function") store[key] = createTitleRegistry();
   return store[key];
 }

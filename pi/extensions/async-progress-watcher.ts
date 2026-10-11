@@ -1,151 +1,40 @@
+// Pi 自动发现入口：只绑定 Host 公开 UI/lifecycle，实现在 src/async-progress。
+// 工厂不启动任何 watch/timer；普通进度唯一出口是 ctx.ui.setStatus 的
+// "async-progress" 聚合 key，不 sendMessage、不 appendEntry、不添加模型消息。
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { watch } from "node:fs";
-import { open } from "node:fs/promises";
-import { join } from "node:path";
-
-const POLL_INTERVAL_MS = 5000;
-
-export interface ProgressState {
-  turnCount: number;
-  lastTool?: string;
-  lastToolDurationMs?: number;
-  totalTokens?: number;
-}
-
-export function parseProgressEvents(
-  lines: string[],
-  state: ProgressState,
-): { summary: string; state: ProgressState } | null {
-  const next = { ...state };
-  let hasActivity = false;
-  const tools: string[] = [];
-
-  for (const line of lines) {
-    let event: Record<string, unknown>;
-    try {
-      event = JSON.parse(line);
-    } catch {
-      continue;
-    }
-
-    if (event.type === "turn_start") {
-      next.turnCount++;
-      hasActivity = true;
-    } else if (event.type === "tool_execution_start" && typeof event.tool === "string") {
-      next.lastTool = event.tool;
-    } else if (event.type === "tool_execution_end" && typeof event.tool === "string") {
-      const durationMs = typeof event.durationMs === "number" ? event.durationMs : undefined;
-      next.lastToolDurationMs = durationMs;
-      tools.push(
-        durationMs === undefined ? event.tool : `${event.tool} (${(durationMs / 1000).toFixed(1)}s)`,
-      );
-      hasActivity = true;
-    } else if (
-      event.type === "message_end"
-      && event.usage !== null
-      && typeof event.usage === "object"
-      && typeof (event.usage as Record<string, unknown>).totalTokens === "number"
-    ) {
-      next.totalTokens = (event.usage as Record<string, number>).totalTokens;
-      hasActivity = true;
-    }
-  }
-
-  if (!hasActivity) return null;
-
-  const parts = [`turn ${next.turnCount}`];
-  if (tools.length > 0) parts.push(tools.join(", "));
-  if (next.totalTokens !== undefined) parts.push(`${Math.round(next.totalTokens / 1000)}k tok`);
-
-  return { summary: parts.join(" | "), state: next };
-}
-
-export async function tailEventsFile(
-  filePath: string,
-  fromOffset: number,
-): Promise<{ lines: string[]; offset: number }> {
-  let fh;
-  try {
-    fh = await open(filePath, "r");
-    const stat = await fh.stat();
-    if (stat.size <= fromOffset) return { lines: [], offset: fromOffset };
-    const buf = Buffer.alloc(stat.size - fromOffset);
-    await fh.read(buf, 0, buf.length, fromOffset);
-    const text = buf.toString("utf8");
-    const lines = text.split("\n").filter((line) => line.trim().length > 0);
-    return { lines, offset: stat.size };
-  } catch {
-    return { lines: [], offset: fromOffset };
-  } finally {
-    await fh?.close();
-  }
-}
-
-export function startWatching(
-  eventsPath: string,
-  onProgress: (summary: string) => void,
-): { stop: () => void } {
-  let offset = 0;
-  let state: ProgressState = { turnCount: 0 };
-  let stopped = false;
-
-  const tick = async () => {
-    if (stopped) return;
-    const { lines, offset: newOffset } = await tailEventsFile(eventsPath, offset);
-    if (lines.length === 0) return;
-    offset = newOffset;
-    const result = parseProgressEvents(lines, state);
-    if (result) {
-      state = result.state;
-      onProgress(result.summary);
-    }
-  };
-
-  // fs.watch for immediate notification, poll as fallback
-  let watcher: ReturnType<typeof watch> | undefined;
-  try {
-    watcher = watch(eventsPath, () => { void tick(); });
-  } catch { /* file may not exist yet */ }
-  const interval = setInterval(() => { void tick(); }, POLL_INTERVAL_MS);
-
-  return {
-    stop() {
-      stopped = true;
-      watcher?.close();
-      clearInterval(interval);
-    },
-  };
-}
+import {
+  ASYNC_PROGRESS_STATUS_KEY,
+  createAsyncProgressController,
+} from "../../src/async-progress/index.ts";
 
 export default function asyncProgressWatcher(pi: ExtensionAPI) {
-  const watchers = new Map<string, { stop: () => void }>();
+  const controller = createAsyncProgressController();
 
-  pi.events.on("subagent:async-started", (event: any) => {
-    const runId = event?.runId;
-    const asyncDir = event?.asyncDir;
-    if (!runId || !asyncDir || watchers.has(runId)) return;
-    const eventsPath = join(asyncDir, "events.jsonl");
-    const watcher = startWatching(eventsPath, (summary) => {
-      pi.sendMessage(
-        { customType: "async-progress", content: `[${runId.slice(0, 8)}] ${summary}`, display: true },
-        { triggerTurn: false },
-      );
-    });
-    watchers.set(runId, watcher);
-  });
-
-  pi.events.on("subagent:async-complete", (event: any) => {
-    const runId = event?.runId;
-    if (!runId) return;
-    const watcher = watchers.get(runId);
-    if (watcher) {
-      watcher.stop();
-      watchers.delete(runId);
+  // 每次 session_start（含 reload/new/resume/fork）先幂等清理前一代资源再绑定。
+  // 进度是 TUI-only status 投影：非 TUI 模式（RPC 的 setStatus 会发出
+  // extension_ui_request，非 no-op）不绑定 watch/timer/bus，仅幂等清掉前一代
+  // （含 TUI 切 RPC 的会话切换），不新增 fallback。
+  pi.on("session_start", (_event, ctx) => {
+    if (ctx.mode !== "tui") {
+      controller.cleanup();
+      return;
     }
+    controller.bind({
+      ui: {
+        setStatus: (text) => {
+          ctx.ui.setStatus(ASYNC_PROGRESS_STATUS_KEY, text);
+        },
+      },
+      subscribe: (handlers) => [
+        // pi.events.on 返回 unsubscribe，由 controller 在 cleanup 中调用
+        pi.events.on("subagent:async-started", (event) => handlers.onAsyncStarted(event)),
+        pi.events.on("subagent:async-complete", (event) => handlers.onAsyncComplete(event)),
+      ],
+    });
   });
 
+  // shutdown 幂等调用同一 cleanup；不删除其他领域既有 shutdown 债务
   pi.on("session_shutdown", () => {
-    for (const [, watcher] of watchers) watcher.stop();
-    watchers.clear();
+    controller.cleanup();
   });
 }

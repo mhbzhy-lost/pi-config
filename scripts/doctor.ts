@@ -14,6 +14,7 @@ import { compileDispatchIR } from "../packages/pi-subagents-enhanced/src/contrac
 import { assertRunAuthorization, createRunAuthorization } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/run-authorization.ts";
 import { RootBrokerServer } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-server.ts";
 import { createManagedWorkspaceService } from "../packages/pi-subagents-enhanced/src/workspace/service.ts";
+import { checkSettings, resolveR2cAdapterDirectory } from "../src/pi-settings/index.ts";
 
 import { probePhysicalHost } from "../packages/pi-subagents-enhanced/src/host-runtime/index.ts";
 
@@ -32,7 +33,6 @@ const TASK_SCHEDULER_PACKAGES = {
 const BASIC_MEMORY_VERSION = "0.22.1";
 // r2c 采集适配器（~/.r2c/integrations/pi-adapter）：安装了就必须挂载到 pi/settings.json，
 // 否则 ai-coding-trace 扩展不加载、采集不到 Pi 会话数据（ensure-pi-settings.ts 条件挂载）。
-const R2C_ADAPTER_SOURCE = "../../.r2c/integrations/pi-adapter";
 const LEGACY_RUNTIME_FILES = [
   "scripts/lib/runtime/spawn.mjs",
   "scripts/lib/runtime/monitor.mjs",
@@ -93,21 +93,6 @@ function unreadableIssue(label, error) {
 
 function packageSource(entry) {
   return typeof entry === "string" ? entry : entry?.source;
-}
-
-function hasDisabledPackageResources(settings, source) {
-  const entry = settings?.packages?.find((candidate) => packageSource(candidate) === source);
-  return Boolean(
-    entry
-    && typeof entry === "object"
-    && ["extensions", "skills", "prompts", "themes"].every(
-      (resource) => Array.isArray(entry[resource]) && entry[resource].length === 0,
-    ),
-  );
-}
-
-function hasDisabledTaskSchedulerResources(settings) {
-  return hasDisabledPackageResources(settings, "npm:@amaster.ai/pi-task-scheduler@0.1.9");
 }
 
 export async function inspectSubagentRuntime({ requests = [], discovery, cwd = process.cwd() }: { requests?: any[]; discovery?: any; cwd?: string } = {}) {
@@ -245,7 +230,6 @@ export async function inspectConfiguration(repoRoot, options = {}) {
 
   for (const required of [
     join(repoRoot, "pi", "settings.json"),
-    join(repoRoot, "pi", "extensions", "skill-whitelist.ts"),
     join(repoRoot, "scripts", "pi-shell.zsh"),
   ]) {
     try {
@@ -266,23 +250,18 @@ export async function inspectConfiguration(repoRoot, options = {}) {
     const sources = (settings?.packages ?? []).map(packageSource);
     if (sources.filter((source) => source === ENHANCED_SUBAGENTS_SOURCE).length !== 1) issues.push("pi-subagents-enhanced local package source must be uniquely configured");
     if (sources.some((source) => /^npm:pi-subagents(?:@|$)/.test(source ?? ""))) issues.push("standalone pi-subagents package source is forbidden");
-    if (!hasDisabledTaskSchedulerResources(settings)) {
-      issues.push("task scheduler package resources must all be disabled");
-    }
     // 与 Pi 一致：package source 相对 settings.json 所在目录解析（repoRoot/pi → repoRoot/../.r2c）。
-    const r2cAdapterDir = options.r2cAdapterDir ?? resolve(repoRoot, "pi", R2C_ADAPTER_SOURCE);
-    const r2cAdapterRegistered = sources.includes(R2C_ADAPTER_SOURCE);
+    const settingsPath = join(repoRoot, "pi", "settings.json");
+    const r2cAdapterDir = resolveR2cAdapterDirectory(settingsPath, options.r2cAdapterDir);
     try {
-      await access(r2cAdapterDir, constants.R_OK);
-      if (!r2cAdapterRegistered) {
-        issues.push(`r2c pi-adapter is installed but not registered in pi/settings.json (run: node scripts/ensure-pi-settings.ts): ${R2C_ADAPTER_SOURCE}`);
-      }
+      issues.push(...await checkSettings({
+        settings,
+        target: settingsPath,
+        r2cAdapterDir,
+      }));
     } catch (error) {
-      if (error?.code === "ENOENT" || error?.code === "ENOTDIR") {
-        if (r2cAdapterRegistered) issues.push(`pi/settings.json references missing local r2c adapter package: ${R2C_ADAPTER_SOURCE}`);
-      } else {
-        issues.push(unreadableIssue("r2c pi-adapter", error));
-      }
+      if (error?.code === "SETTINGS_R2C_UNREADABLE") issues.push(unreadableIssue("r2c pi-adapter", error.cause ?? error));
+      else issues.push(error.message);
     }
   } catch {
     issues.push("pi-subagents-enhanced local package source must be uniquely configured");

@@ -5,14 +5,14 @@ const cwdDescription = "可选；命令在此目录执行";
 export function createBashCwdExtension(pi, {
   workspaceRoot = process.cwd(),
   createBashToolDefinition,
-  getBashOptions = () => undefined,
+  getBashOptions = () => ({}),
 }: { workspaceRoot?: string; createBashToolDefinition?: (...args: any[]) => any; getBashOptions?: (...args: any[]) => any } = {}) {
   if (typeof createBashToolDefinition !== "function") {
     throw new Error("bash cwd extension requires createBashToolDefinition");
   }
 
-  const baseOptions = getBashOptions({ cwd: workspaceRoot });
-  const baseDefinition = createBashToolDefinition(workspaceRoot, baseOptions);
+  // 初始化只读取 definition 的 schema/metadata；shell 配置必须在真实 execute context 中解析。
+  const baseDefinition = createBashToolDefinition(workspaceRoot, {});
   const baseGuidelines = baseDefinition.promptGuidelines ?? [];
   const baseParameters = baseDefinition.parameters;
 
@@ -28,11 +28,20 @@ export function createBashCwdExtension(pi, {
     },
     promptGuidelines: [...baseGuidelines, cwdDescription],
     async execute(id, { cwd, ...rest }, signal, onUpdate, ctx) {
-      if (cwd === undefined) return baseDefinition.execute(id, rest, signal, onUpdate, ctx);
-
-      const validatedCwd = await validateDeclaredBashCwd({ cwd, workspaceRoot });
+      const validatedCwd = cwd === undefined
+        ? undefined
+        : await validateDeclaredBashCwd({ cwd, workspaceRoot });
       const options = getBashOptions(ctx);
-      const definition = createBashToolDefinition(validatedCwd, options);
+      const executionOptions = validatedCwd === undefined
+        ? options
+        : {
+            ...options,
+            spawnHook: (spawnContext) => {
+              const next = options.spawnHook?.(spawnContext) ?? spawnContext;
+              return { ...next, cwd: validatedCwd };
+            },
+          };
+      const definition = createBashToolDefinition(workspaceRoot, executionOptions);
       return definition.execute(id, rest, signal, onUpdate, ctx);
     },
   });

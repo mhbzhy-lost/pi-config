@@ -1,8 +1,10 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "@earendil-works/pi-ai";
+import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   createContextUsageSnapshot,
   createContextUsageToolResult,
   DEFAULT_HANDOFF_POLICY,
+  ContextUsageOutputSchema,
 } from "../../src/context-usage/snapshot.ts";
 import {
   createHandoffReminderState,
@@ -27,22 +29,25 @@ export default function contextUsageExtension(pi: ExtensionAPI) {
     return snapshot;
   };
 
-  pi.registerTool({
+  pi.registerTool(defineTool({
     name: "context_usage",
     label: "context_usage",
     description:
       "读取当前上下文窗口使用量估计。",
-    parameters: { type: "object", properties: {}, additionalProperties: false },
+    promptSnippet: "读取当前上下文窗口估计量及 handoff 阈值状态。",
+    promptGuidelines: ["需要判断当前上下文余量时使用 context_usage；结果是估计值，unknown 不代表余量充足。"],
+    parameters: Type.Object({}, { additionalProperties: false }),
+    outputSchema: ContextUsageOutputSchema,
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       return createContextUsageToolResult(ctx.getContextUsage?.(), DEFAULT_HANDOFF_POLICY);
     },
-  } as any);
+  }));
 
-  if (typeof (pi as any).on === "function") {
-    (pi as any).on("session_compact", () => {
+  if (typeof pi.on === "function") {
+    pi.on("session_compact", () => {
       reminderState = createHandoffReminderState();
     });
-    (pi as any).on("agent_end", (_event: unknown, ctx: { getContextUsage?: () => Parameters<typeof createContextUsageSnapshot>[0] }) => {
+    pi.on("agent_end", (_event, ctx) => {
       inspect(ctx);
     });
   }

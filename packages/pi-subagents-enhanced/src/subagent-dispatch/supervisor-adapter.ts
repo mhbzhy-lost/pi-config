@@ -58,6 +58,12 @@ export function createSupervisorTool(adapter, { name = "subagent_supervisor", la
     exposure: "model-only" as const,
     label,
     description: SUPERVISOR_DESCRIPTION,
+    // M05B：单工具提示；reply 针对实际 request，writeReply 本侧提交不证明投递或 child 消费。
+    promptSnippet: "查看子代理待决请求（pending）、检查状态（status），并针对具体请求回复决策（reply）。",
+    promptGuidelines: [
+      "reply 要针对实际 request 的原始问题作答，replyTo 对应具体待决请求，不泛泛回复。",
+      "writeReply 本侧已提交只代表提交已记录，不代表 child 已收到、已消费或理解；以独立 delivery/consumption 事实与 child 实际产出为准。",
+    ],
     parameters: SUPERVISOR_PARAMETERS,
     ...(typeof renderCall === "function" ? { renderCall } : {}),
     ...(typeof renderResult === "function" ? { renderResult } : {}),

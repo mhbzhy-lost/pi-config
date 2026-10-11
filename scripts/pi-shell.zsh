@@ -8,8 +8,10 @@ export PI_CODING_AGENT_SESSION_DIR="${PI_CODING_AGENT_SESSION_DIR:-$_PI_CONFIG_R
 export PI_CODING_GOAL_DIR="${PI_CODING_AGENT_GOAL_DIR:-${PI_CODING_GOAL_DIR:-$_PI_CONFIG_ROOT/var/goals}}"
 export PI_CODING_WORKSPACE_DIR="${PI_CODING_AGENT_WORKSPACE_DIR:-${PI_CODING_WORKSPACE_DIR:-$_PI_CONFIG_ROOT/var/workspaces}}"
 
+# 普通入口使用 Pi 原生 Skill 发现，不隐式传 --no-skills；
+# 用户显式 --no-skills 经 "$@" 原样转发，pi-lite 在自身分支显式禁用。
 _pi_config_invoke() {
-  "$_PI_CONFIG_ROOT/scripts/pi-launcher.zsh" --no-skills "$@"
+  "$_PI_CONFIG_ROOT/scripts/pi-launcher.zsh" "$@"
 }
 
 pi() {
@@ -31,6 +33,7 @@ pi-full() {
 # launcher 显式追加的 session-owner extension 在 --no-extensions 下仍会加载。
 pi-lite() {
   _pi_config_invoke \
+    --no-skills \
     -nc \
     -na \
     --no-extensions \

@@ -1,3 +1,5 @@
+import { Type } from "@earendil-works/pi-ai";
+
 export type ContextUsageInput = {
   tokens: number | null;
   contextWindow: number;
@@ -28,6 +30,23 @@ export type ContextUsageSnapshot = {
 };
 
 export type ContextUsageToolDetails = ContextUsageSnapshot;
+export type ContextUsageOutput = ContextUsageSnapshot & { note: string };
+
+export const ContextUsageOutputSchema = Type.Object({
+  tokens: Type.Union([Type.Number(), Type.Null()]),
+  contextWindow: Type.Number(),
+  percent: Type.Union([Type.Number(), Type.Null()]),
+  remainingTokens: Type.Union([Type.Number(), Type.Null()]),
+  remainingRatio: Type.Union([Type.Number(), Type.Null()]),
+  tokensBeforeHandoff: Type.Union([Type.Number(), Type.Null()]),
+  tokensBeforeUrgentHandoff: Type.Union([Type.Number(), Type.Null()]),
+  estimated: Type.Literal(true),
+  status: Type.Union([Type.Literal("unknown"), Type.Literal("normal"), Type.Literal("prepare-handoff"), Type.Literal("urgent-handoff")]),
+  shouldPrepareHandoff: Type.Boolean(),
+  shouldUrgentlyPrepareHandoff: Type.Boolean(),
+  handoffPath: Type.String(),
+  note: Type.String(),
+});
 
 export const DEFAULT_HANDOFF_POLICY: HandoffPolicy = {
   handoffRatio: 0.8,
@@ -104,14 +123,15 @@ export function createContextUsageSnapshot(
 export function createContextUsageToolResult(
   usage: ContextUsageInput | undefined,
   policy: HandoffPolicy = DEFAULT_HANDOFF_POLICY,
-): { content: Array<{ type: "text"; text: string }>; details: ContextUsageToolDetails } {
+): { content: Array<{ type: "text"; text: string }>; details: ContextUsageToolDetails; structuredContent: ContextUsageOutput } {
   const details = createContextUsageSnapshot(usage, policy);
-  const payload = {
+  const payload: ContextUsageOutput = {
     ...details,
     note: "这是 Pi 的当前上下文估计值，不是 provider 保证的精确 tokenizer 计数。",
   };
   return {
     content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
     details,
+    structuredContent: payload,
   };
 }

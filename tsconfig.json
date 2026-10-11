@@ -37,6 +37,15 @@
     "pi/extensions/mcp-policy.ts",
     "scripts/resolve-physical-pi.ts",
     "scripts/assert-session-tool-policy.ts",
-    "scripts/probes/physical-host.ts"
+    "scripts/probes/physical-host.ts",
+    "src/pi-settings/**/*.ts",
+    "src/async-progress/**/*.ts",
+    "src/context-usage/**/*.ts",
+    "pi/extensions/bash-cwd.ts",
+    "pi/extensions/apply-patch.ts",
+    "pi/extensions/basic-memory.ts",
+    "pi/extensions/context-usage.ts",
+    "pi/extensions/task-scheduler.ts",
+    "pi/extensions/async-progress-watcher.ts"
   ]
 }

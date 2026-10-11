@@ -4,6 +4,7 @@ import { getMarkdownTheme, type ExtensionAPI } from "@earendil-works/pi-coding-a
 import { Key, isKeyRelease, isKeyRepeat, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { browserTrustedRoots, readBrowserRunStatus, renderBrowserTranscript } from "../src/tui/browser-adapter.ts";
 import { NativeChildConversationRenderer } from "../src/tui/native-conversation.ts";
+import { createChildConversationRenderers } from "../src/tui/tool-renderers.ts";
 import { projectSessionStatus, SubagentSessionBrowserState } from "../src/tui/session-browser.ts";
 import { parseSgrWheelDirection, ReadOnlyBrowserEditor, SubagentTranscriptViewport } from "../src/tui/session-viewport.ts";
 import { layoutFooter } from "../src/tui/footer-layout.ts";
@@ -300,6 +301,7 @@ export default function customFooter(pi: ExtensionAPI) {
         width,
         cwd: child.cwd,
         markdownTheme: cachedMarkdownTheme ?? getMarkdownTheme(),
+        theme,
         ui: overlayTui ?? { requestRender() {} },
         expandedTools: toolsExpanded,
         hideThinking: false,
@@ -353,7 +355,7 @@ export default function customFooter(pi: ExtensionAPI) {
     ctx = undefined;
   };
   const enterBrowser = () => {
-    if (!ctx || !browser.enter()) return;
+    if (!ctx || ctx.mode !== "tui" || !browser.enter()) return;
     const owner = ctx;
     const epoch = sessionEpoch;
     const rollback = (error: unknown) => {
@@ -416,17 +418,13 @@ export default function customFooter(pi: ExtensionAPI) {
   pi.on("session_start", (event: any, nextCtx) => {
     // A reload may issue another start without a preceding shutdown.
     teardown(event?.reason === "reload");
-    if (!nextCtx.hasUI) return;
+    if (nextCtx.mode !== "tui") return;
     ctx = nextCtx;
     // 0.71 config has no public read surface (contract §2.2, §4); keep the
     // display projection on the package-owned project root by default.
     cachedArtifactDir = "project";
     try { cachedMarkdownTheme = getMarkdownTheme(); } catch { cachedMarkdownTheme = undefined; }
-    nativeRenderer = new NativeChildConversationRenderer({
-      resolveToolRenderer(name) {
-        return pi.getAllTools().find((tool) => tool.name === name);
-      },
-    });
+    nativeRenderer = new NativeChildConversationRenderer(createChildConversationRenderers(ctx.cwd));
     const owner = ctx;
     const epoch = sessionEpoch;
     eventUnsubscribes = [

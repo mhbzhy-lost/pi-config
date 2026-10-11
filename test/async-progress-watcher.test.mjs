@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { writeFile, appendFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseProgressEvents, tailEventsFile } from "../pi/extensions/async-progress-watcher.ts";
+import { parseProgressEvents, tailEventsFile } from "../src/async-progress/index.ts";
 
 test("parseProgressEvents summarizes turn and tool activity", () => {
   const lines = [
@@ -61,7 +61,7 @@ test("startWatching delivers progress summary on events.jsonl update", async () 
   const tmpFile = join(tmpdir(), `test-watcher-${Date.now()}.jsonl`);
   await writeFile(tmpFile, "");
   const summaries = [];
-  const { startWatching } = await import("../pi/extensions/async-progress-watcher.ts");
+  const { startWatching } = await import("../src/async-progress/index.ts");
   const watcher = startWatching(tmpFile, (summary) => {
     summaries.push(summary);
   });

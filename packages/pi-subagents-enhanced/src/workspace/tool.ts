@@ -61,6 +61,12 @@ export function createSubagentWorkspaceTool({ service, resolveRootSessionId, ren
     exposure: "model-only" as const,
     label: "Subagent Workspace",
     description: SUBAGENT_WORKSPACE_DESCRIPTION,
+    // M05B：单工具提示按状态与 token 操作、coding 集成 child-owned；不复制整状态机。
+    promptSnippet: "查询与处置 worktree=true 派发返回的托管工作区（list/status/dispose/release）。",
+    promptGuidelines: [
+      "处置按状态操作：先用 status 取得 state、allowed_dispositions 与 action_token，只执行当前状态允许的动作，不预判动作可用性。",
+      "publication=allowed 的 coding 托管工作区集成由子代理自主拥有（父层 integrate 返回 CHILD_OWNS_INTEGRATION），父层只处理状态权威允许的其余处置。",
+    ],
     parameters: SUBAGENT_WORKSPACE_PARAMETERS,
     ...(typeof renderCall === "function" ? { renderCall } : {}),
     ...(typeof renderResult === "function" ? { renderResult } : {}),

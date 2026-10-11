@@ -1,15 +1,5 @@
-import { checkShellPolicy, checkSensitivePath, codingReminderFor } from "./shell-policy.ts";
+import { checkShellPolicy, checkSensitivePath } from "./shell-policy.ts";
 import { validateDeclaredBashCwd } from "../bash-cwd/policy.ts";
-
-function appendReminder(content, reminder) {
-  let appended = false;
-  const nextContent = content.map((part) => {
-    if (appended || part?.type !== "text" || typeof part.text !== "string") return part;
-    appended = true;
-    return { ...part, text: `${part.text}\n\n${reminder}` };
-  });
-  return appended ? nextContent : undefined;
-}
 
 export function createSecurityGatesExtension(pi, {
   shellPolicy = checkShellPolicy,
@@ -35,15 +25,6 @@ export function createSecurityGatesExtension(pi, {
     if (violation) return { block: true, reason: violation.reason };
 
     return undefined;
-  });
-
-  pi.on("tool_result", (event) => {
-    if (event.isError) return undefined;
-    const reminder = codingReminderFor({ toolName: event.toolName, input: event.input });
-    if (!reminder || !Array.isArray(event.content)) return undefined;
-    const content = appendReminder(event.content, reminder);
-    if (!content) return undefined;
-    return { content, details: event.details, isError: event.isError };
   });
 }
 
