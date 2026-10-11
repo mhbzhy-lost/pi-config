@@ -29,7 +29,7 @@ pi-full() {
 
 # 精简版只读探索模式：不加载上下文文件/extensions/skills 发现与 prompt 模板，
 # 仅显式挂载 exa-search 与 playwright 两个 skill，且只保留 read/bash 工具。
-# 依赖：两个 skill 均为纯 bash 驱动的 python3 脚本，不依赖任何 extension；
+# 依赖：exa-search 使用 Python CLI，playwright 使用 Node TypeScript SDK 入口，均不依赖 extension；
 # launcher 显式追加的 session-owner extension 在 --no-extensions 下仍会加载。
 pi-lite() {
   _pi_config_invoke \
@@ -43,4 +43,3 @@ pi-lite() {
     --tools read,bash \
     "$@"
 }
-

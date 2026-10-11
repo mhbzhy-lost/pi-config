@@ -1,0 +1,21 @@
+{
+  "name": "playwright-skill",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "test:playwright:browser": "node --test test/playwright-runtime-browser.smoke.mjs",
+    "verify": "node scripts/acceptance.ts"
+  },
+  "dependencies": {
+    "playwright": "1.64.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.4.1",
+    "typescript": "7.0.2"
+  }
+}

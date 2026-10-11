@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="zh"><head><meta charset="utf-8"><title>SDK 验收页面</title></head>
+<body>
+<script>
+  // 完全合成的凭据fixture，不包含真实账户/认证材料。
+  document.cookie = 'fixture_token=synthetic-secret-never-export; SameSite=Strict';
+  localStorage.setItem('fixture_token', 'synthetic-secret-never-export');
+</script>
+<main data-testid="app-shell">
+  <label>查询<input data-testid="query" type="text"></label>
+  <button type="button" onclick="document.querySelector('[data-testid=result]').hidden=false">Submit</button>
+  <p data-testid="result" hidden>提交成功</p>
+</main>
+</body></html>
