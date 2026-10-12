@@ -1,0 +1,32 @@
+{
+  "schema": "pi-runtime-followups/supervisor-provenance/1",
+  "sourceClass": "unconfirmed",
+  "evidenceMode": "static",
+  "firstDivergence": "steer gate observes durable pending request after reply submission",
+  "authority": {
+    "upstreamPending": "not authoritative for本仓 durable gate",
+    "localDurablePlane": "supervisor-control-plane",
+    "consumptionProof": "trusted child session correlation and terminal reconciliation"
+  },
+  "ownerComponent": "packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-control-plane.ts",
+  "ownerPath": "packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-control-plane.ts",
+  "ownerScope": "repo-contract-static-no-production-sample",
+  "requestOrder": ["native request", "local register", "reply/steer resolve", "commitDelivery", "child consumption observation", "terminal reconciliation"],
+  "stateMapping": {
+    "submitted": "本侧调用接受，不是持久 receipt 状态",
+    "queued": "本仓 receipt.status，consumed=false",
+    "delivered": "本仓 receipt.status，通常由可信 consumption observation 推进",
+    "consumed": "本仓 receipt.consumed=true，须有可信 child session 证据",
+    "gateOpen": "resolveSupervisorControl 对 durable pending 的派生结果，不是新增持久字段"
+  },
+  "consumptionEvidence": "未取得真实样本；静态代码要求 correlation、session identity、toolCallId、reply payload digest 和 terminal proof 对齐",
+  "contractDecision": "保持 SUPERVISOR_REPLY_REQUIRED fail-closed；不以 upstream pending 为空、reply 提交成功、attention 延迟或 queued 回执解除 gate。",
+  "sensitiveDataRead": false,
+  "productionDefectProven": false,
+  "validation": {
+    "realSupervisor": false,
+    "realRpc": false,
+    "fullSession": false,
+    "authority": false
+  }
+}

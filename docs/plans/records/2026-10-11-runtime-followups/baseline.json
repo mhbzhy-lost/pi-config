@@ -1,0 +1,32 @@
+{
+  "schema": "pi-runtime-followups/inline-baseline/2",
+  "generatedAt": "2026-10-11T17:30:47.252776+00:00",
+  "observation": "rerun after user-confirmed cleanup; all dirty paths are plan-related documentation",
+  "head": "3a710c6107c905caf6e6719f20f791d3d69b027a",
+  "indexEmpty": true,
+  "statusPaths": [
+    "docs/bugs/2026-10-10-rpc-session-capability-negotiation.md",
+    "docs/bugs/2026-10-10-supervisor-reply-required-state-views.md",
+    "docs/bugs/2026-10-11-heartbeat-orphan-cleanup-provenance.md",
+    "docs/decisions/2026-10-10-idle-system-notification.md",
+    "docs/decisions/2026-10-11-dispatch-receipt-trigger-turn.md",
+    "docs/plans/2026-10-11-runtime-followups.md",
+    "docs/plans/records/2026-10-11-runtime-followups/acceptance.md",
+    "docs/plans/records/2026-10-11-runtime-followups/baseline.json",
+    "docs/plans/records/2026-10-11-runtime-followups/rpc-provenance.json",
+    "docs/plans/records/2026-10-11-runtime-followups/supervisor-provenance.json",
+    "docs/todos/2026-10-10-runtime-followups.md"
+  ],
+  "sensitivePathPresent": false,
+  "nodeVersion": "v26.8.1",
+  "piVersion": "1.0.4",
+  "subagentsVersion": "0.75.0",
+  "rootDependencies": {
+    "@earendil-works/pi-agent-core": "1.0.4",
+    "@earendil-works/pi-ai": "1.0.4",
+    "@earendil-works/pi-coding-agent": "1.0.4",
+    "@earendil-works/pi-tui": "1.0.4"
+  },
+  "sensitivePathsRead": false,
+  "hostOrProviderStarted": false
+}

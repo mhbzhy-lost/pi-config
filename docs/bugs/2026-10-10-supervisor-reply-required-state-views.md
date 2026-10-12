@@ -2,9 +2,9 @@
 
 ## 当前结论与处理范围
 
-用户要求独立调查大量 `SUPERVISOR_REPLY_REQUIRED: Supervisor control request blocked.` 是否为 bug。只读报告：`/tmp/pi104-supervisor-reply-required-provenance.md`，run `227b62d5-a946-413a-9566-a15f2f92e445`。
+用户要求独立调查大量 `SUPERVISOR_REPLY_REQUIRED: Supervisor control request blocked.` 是否为 bug。只读报告：`/tmp/pi104-supervisor-reply-required-provenance.md`，run `227b62d5-a946-413a-9566-a15f2f92e445`；本轮结构化记录：`docs/plans/records/2026-10-11-runtime-followups/supervisor-provenance.json`。
 
-**窄结论：该错误码本身是正常安全门禁；本会话“reply 成功、pending 空、steer 仍拒绝”的现象可由当前两套状态视图解释，未发现本轮现代化改变门禁的证据。不能据此保证所有同类报错都不是 bug，也不能用已有测试预期证明产品语义无缺陷。**
+**窄结论：静态状态链已记录，真实消费 provenance 未补齐；该错误码本身仍是正常 fail-closed 安全门禁。**本会话“reply 成功、pending 空、steer 仍拒绝”的现象可由当前两套状态视图解释，未取得真实消费样本证明 gate bug，也未发现本轮现代化改变门禁的证据。不能据此保证所有同类报错都不是 bug，也不能用已有测试预期证明产品语义无缺陷。
 
 本记录只沉淀诊断和后续问题，不在现代化计划中修复，不改控制面或放宽门禁。
 
@@ -44,5 +44,11 @@
 - [ ] 核对存疑 NOT_PENDING 样本的精确 replyTo 与登记/调用时间（只请求必要非敏感元数据，不读取凭据或整个会话）。
 - [ ] 如发现回复已被权威证实消费但 gate 仍不解除，记录真实 public 入口、身份、事件和资源顺序，再按来源门禁决定最小修复。
 - [ ] 可评估错误文案明确“已提交但消费未证实”这一分支；不因文案改进放宽权限、增加第二 authority 或在当前计划内插入修复。
+
+## 本轮 provenance 结论
+
+- `sourceClass=unconfirmed`、`evidenceMode=static`；未取得真实 NOT_PENDING/reply/consumption 字段级样本，不能分类为 production gate defect。
+- 状态映射固定为：`submitted` 是本侧调用接受；`queued/delivered` 是本仓 receipt；`consumed` 必须有可信 child session 对账；`gate-open` 是 durable pending 的派生结果，不是持久字段。
+- owner 在本仓 supervisor control plane，但本轮没有生产样本证明首个偏离；保持 gate、identity、消费对账和 fail-closed 边界不变。
 
 未运行测试、真实 reply/steer/Host、模型或 MCP；未修改 production。既有测试只是实现合同的支持证据，不是整个运行流程无 bug 的证明。

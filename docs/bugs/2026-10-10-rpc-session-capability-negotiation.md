@@ -8,9 +8,9 @@
 CAPABILITY_NEGOTIATION_FAILED: pi-subagents RPC capability negotiation failed; missing: rpc:v1/session
 ```
 
-**状态：待补 provenance，尚未确认具体生产根因，不实施修复。**按用户要求，现代化计划继续，完成后再调查与处理此项；本记录不扩展当前现代化 DAG。不以“正在改代码”认定这是可忽略的中间态，也不新增预防性兼容或放宽身份门禁。
+**状态：静态 provenance 已记录；生产 provenance 未补齐，保持 fail-closed，不实施修复。**本次执行计划只完成非敏感静态 provenance；未取得报错会话的字段级启动 metadata，因此不把静态链升级为 production 结论，也不新增预防性兼容或放宽身份门禁。
 
-只读诊断报告：`/tmp/pi104-rpc-session-capability-failure-provenance.md`，run `331934ba-0bd2-4963-9053-70f6bff971df`。报告为静态源码分析，未读取报错会话、真实 settings/session/authority，未运行 Host/RPC/模型/测试。
+只读诊断报告：`/tmp/pi104-rpc-session-capability-failure-provenance.md`，run `331934ba-0bd2-4963-9053-70f6bff971df`；本轮结构化记录：`docs/plans/records/2026-10-11-runtime-followups/rpc-provenance.json`。两者均为静态/字段缺失分析，未读取报错会话、真实 settings/session/authority，未运行 Host/RPC/模型/测试。
 
 ## 已知数据来源与首偏离
 
@@ -45,6 +45,12 @@ M00 task-before 与当前相关代码对照：
 - [ ] 按 public 入口、权威身份与事件顺序定位首个偏离，区分初始化失败、cwd 合同缺陷或其它来源；完成三类来源分类后才决定最小修复。
 - [ ] 若当前单标签诊断不足，另行定义非敏感诊断字段与验证范围；不得预先替换或放宽 session/cwd/安全能力校验。
 
+## 本轮 provenance 结论
+
+- `sourceClass=unconfirmed`、`evidenceMode=static`；首个可观察偏离仍是 `assertSpawnCapabilities`，但 `rpc:v1/session` 是复合标签，不能确定单一失败条件。
+- `ownerComponent` 为本仓断言函数，但 `ownerScope` 仍是“代码包含断言、production 根因未证实”；不能据此进入 production 修复。
+- 下一步只有在取得非敏感 `stage/missingCapabilities/cwd/worktree/version/session identity` 投影后，才能区分 context 未就绪、cwd 合同或资源世代；完整 session、authority、凭据仍不需要也不得读取。
+
 ## 未执行事项
 
-未修 production、未加 fallback、未触发模型/真实 RPC、未重启其它会话、未提交 Git 或上游工单。该报错不作为 M12 的真实流程验收载体；M12 按已授权的隔离纯测试和静态检查范围继续。
+本轮未修 production、未加 fallback、未触发模型/真实 RPC、未重启其它会话或提交上游工单。现代化 M12 已在其授权范围内收口，本报错未作为真实流程验收载体。当前用户只授权文档化并提交/推送，未授权实际代码修复。

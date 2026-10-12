@@ -1,0 +1,32 @@
+{
+  "schema": "pi-runtime-followups/rpc-provenance/1",
+  "sourceClass": "unconfirmed",
+  "evidenceMode": "static",
+  "firstDivergence": "assertSpawnCapabilities after rpc.ping",
+  "entryPoint": "typed execute -> admission -> rpc.ping -> assertSpawnCapabilities",
+  "identityFacts": {
+    "observedError": "CAPABILITY_NEGOTIATION_FAILED",
+    "missingLabelIsComposite": true,
+    "sessionAssertions": ["version", "spawn", "sessionId", "lifecycleSessionIdentity", "session.cwd", "cwd equality"],
+    "actualSessionProjectionAvailable": false
+  },
+  "eventOrder": ["typed execute", "admission", "rpc.ping", "session capability assertion", "failure result"],
+  "versionFacts": {
+    "plannedPi": "1.0.4",
+    "plannedPiSubagents": "0.75.0",
+    "failingSessionVersionsObserved": false
+  },
+  "ownerComponent": "packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts:assertSpawnCapabilities",
+  "ownerPath": "packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts",
+  "ownerScope": "repo-code-contains-assertion-root-cause-unconfirmed",
+  "candidateDecision": "保持 fail-closed；不加 fallback、不放宽 session/cwd/identity 门禁。只有取得字段级启动 metadata 后，才可判断 context 未就绪、cwd/originRoot 不一致或旧 Host 世代。",
+  "sensitiveDataRead": false,
+  "productionReachabilityProven": false,
+  "validation": {
+    "realHost": false,
+    "realRpc": false,
+    "fullSession": false,
+    "authority": false,
+    "settingsModelsAuth": false
+  }
+}

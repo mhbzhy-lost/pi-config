@@ -1,18 +1,18 @@
 # Runtime 后续待办（不纳入当前现代化计划）
 
-本文是待办账本，不是实施计划，也不构成自动执行、真实流程验证、系统权限申请或提交授权。`docs/plans/2026-10-10-pi104-runtime-modernization.md` 已在授权范围内收口，成果已由 commit `7aa0e18e102effa24f146773eb0999f35e3a7aff` 提交；但仍未完成真实 Host 验证，不能将计划收口表述为真实流程验收。以下三项均未实施。
+本文是待办账本，不是实施计划，也不构成自动执行、真实流程验证、系统权限申请或提交授权。`docs/plans/2026-10-10-pi104-runtime-modernization.md` 已在授权范围内收口，成果已由 commit `7aa0e18e102effa24f146773eb0999f35e3a7aff` 提交；后续计划 `docs/plans/2026-10-11-runtime-followups.md` 已按用户选择 Inline 执行静态调查。用户清理并行现场后，T0 已重建文档路径基线；当前成果限于静态记录与暂缓实施决策，生产 provenance、通知生命周期设计及行为验证仍未完成。实际范围与限制记录于 `docs/plans/records/2026-10-11-runtime-followups/acceptance.md`。真实 Host、RPC、模型和危险进程仍未运行。以下三项仍未实施。
 
 ## 建议顺序 / 状态总览
 
 | 建议顺序 | 条目 | 当前状态与边界 |
 | --- | --- | --- |
-| 1 | RPC `rpc:v1/session` 协商调查 | 优先定位生产阻断；来源与首个偏离仍待补 provenance，未修复。 |
-| 2 | supervisor reply/pending/steer 视图调查 | 用于定位问题与澄清产品合同；现有身份、消费与权限门禁保持 fail-closed，未修控制面。 |
-| 3 | heartbeat / 孤儿清理覆盖 | 先核实合法 production 入口、权威身份、事件/进程顺序与首个偏离，完成来源分类；不将 heartbeat 结论写成其它条目的硬依赖，也未修复覆盖缺口。 |
-| 4 | 纯派发 `triggerTurn` | 随后再作体验优化；仅调整精确识别的纯派发回执 options，不丢消息、不改持久化或后续可见性，未实施。 |
-| 5 | 主会话空闲系统通知 | 用户明确暂缓；重新授权前不实施，仅在未来核实登记及主会话生命周期覆盖后再议。 |
+| 1 | RPC `rpc:v1/session` 协商调查 | 静态 provenance 已记录，`sourceClass=unconfirmed`；首个生产偏离待字段级 metadata，保持 fail-closed，未修复。 |
+| 2 | supervisor reply/pending/steer 视图调查 | 静态状态映射已记录，真实消费样本未证实；gate 保持 fail-closed，未修控制面。 |
+| 3 | heartbeat / 孤儿清理覆盖 | 静态覆盖矩阵已补；generic、绑定失败、detached descendant 边界仍未做生产实验，未修复。 |
+| 4 | 纯派发 `triggerTurn` | 所查 sender 为上游 notify.js，本仓可用 selector 字段及接入方式尚未证明；本轮暂缓实现，不代表所有接入方案不可行。 |
+| 5 | 主会话空闲系统通知 | 产品语义保留；run registry/epoch 是待设计能力，缺少现成实现不代表不可实现；用户暂缓，未实施。 |
 
-以上排序只是建议，不自动执行；当前用户仅授权梳理，不授权上述实现或真实流程。新模型列表工具另行交付，不属于这五项，也不纳入已完成现代化历史。
+以上排序只是建议，不自动执行；本轮 Inline 仅授权调查、记录和资格/关闭决策，不授权上述 production 实现或真实流程。文档与 JSON 结构检查已通过，但 T0–T11 不作生产问题解决或完整行为验收；任何后续 production 修复、真实 Host/RPC、危险进程实验或 macOS 通知调用都需重新授权。新模型列表工具另行交付，不属于这五项，也不纳入已完成现代化历史。
 
 ## 三项遗留任务
 
@@ -42,4 +42,16 @@
 - RPC `rpc:v1/session` 协商失败：`docs/bugs/2026-10-10-rpc-session-capability-negotiation.md`，来源待证，按用户要求现代化后处理。
 - supervisor reply/pending/steer 视图差异：`docs/bugs/2026-10-10-supervisor-reply-required-state-views.md`，门禁与消费窗口已解释，存疑样本及产品限制保留待查，未修控制面。
 
-以上条目保持未勾选；现代化收口与成果提交不自动解释为以上实施已获授权。
+以上三项遗留任务保持未勾选；RPC/supervisor 是生产 provenance 待补的独立调查，triggerTurn/idle 是接入或生命周期设计待完成的暂缓项。用户已明确要求当前仅文档化并推送，不作实际代码改动；文档提交不构成上述 production 实施授权。
+
+## 恢复工作所需输入与决策
+
+| 条目 | 必要输入或决策 | 边界 |
+| --- | --- | --- |
+| RPC | 失败样本已有的 `code/stage/missingCapabilities`、主会话 cwd/Git root/worktree 标志、实际 Host/Pi 版本、session identity 是否存在；未知项显式标未知 | 仅非敏感字段投影，不提供完整 session、prompt、凭据或 authority |
+| Supervisor | 精确 `runId/requestId/replyTo/index`、登记/reply/steer 时间、receipt 的 `status/consumed`，以及权威消费事实是否存在 | 不把 reply 成功、pending 空或 attention 当消费证明；若无事实继续保持 fail-closed |
+| Heartbeat | 决定接受当前静态覆盖边界，或另行授权清理能力设计与隔离验证范围 | 不自动启动 SIGKILL/真实 child 实验；不假定实验是唯一 provenance 来源 |
+| triggerTurn | 决定继续核实稳定 receipt 字段及本仓合法 options 接入点，或暂时保留现状 | 不改 node_modules、不建第二 sender；尚未证明上游新增字段是唯一解法 |
+| 空闲通知 | 明确是否解除暂缓；先决定登记/epoch 方案，再单独决定真实 macOS 通知调用授权 | 不把缺少现成 registry 当作不可实现；未授权不调用 osascript |
+
+在取得对应输入或新的实施授权前，所有 production 行为保持现状。
