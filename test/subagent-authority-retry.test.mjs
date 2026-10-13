@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { AuthorityStore, AuthorityStoreError } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/authority-store.ts";
-import { DurableStorageError } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/durable-storage.ts";
+import { DurableStorage, DurableStorageError } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/durable-storage.ts";
 import { RootBrokerServer } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-server.ts";
 import { createRunAuthorization } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/run-authorization.ts";
 import { createOwnerReceipt } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/authority-contract.ts";
@@ -41,12 +41,12 @@ function contendedAuthorityStore(realStore, root, contendAttempts) {
     async createWithLease(receipt, input) {
       attempts += 1;
       if (attempts <= contendAttempts) {
-        const lock = join(root, "authority-index.lock");
-        await writeFile(lock, JSON.stringify({ owner: `parallel-${attempts}`, processBirth: `parallel-birth-${attempts}` }), { mode: 0o600 });
+        // 用合法public入口取得真实活owner锁，不能用无法解析的手工birth冒充生产竞争。
+        const release = await new DurableStorage({ root }).acquireLock('authority-index');
         try {
           return await realStore.createWithLease(receipt, input);
         } finally {
-          await rm(lock, { force: true });
+          await release();
         }
       }
       return realStore.createWithLease(receipt, input);
@@ -58,10 +58,10 @@ function contendedAuthorityStore(realStore, root, contendAttempts) {
 
 test("AuthorityStore maps a fresh index lock to authority_lock_contention and preserves the storage cause", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "authority-contention-code-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
   const store = new AuthorityStore({ root, rootSessionId: "root-contention" });
-  // A parallel registrant holds a fresh authority-index lock.
-  await writeFile(join(root, "authority-index.lock"), JSON.stringify({ owner: "parallel", processBirth: "parallel-birth" }), { mode: 0o600 });
+  // 平行registrant通过公开storage入口持有真实authority-index锁。
+  const release = await new DurableStorage({ root }).acquireLock('authority-index');
+  t.after(async () => { await release(); await rm(root, { recursive: true, force: true }); });
   await assert.rejects(
     () => store.createWithLease(ownerReceipt("root-contention", "run-contention", "birth-contention"), { leaseId: "lease-contention", now: 1_000, windowMs: 60_000 }),
     (error) => {
