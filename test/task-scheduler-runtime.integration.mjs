@@ -42,18 +42,25 @@ test("exact upstream default extension is registered through the restricted Pi m
   try {
     const pi = fakePi(); registerTaskSchedulerAdapter(pi);
     const sessionId = randomUUID();
-    const ctx = { cwd: repo, hasUI: true, sessionManager: { getSessionId: () => sessionId }, ui: { setStatus() {}, confirm: async () => true } };
+    // UI 确认已按用户授权取消：ctx 不提供 confirm，create/delete 仍可直接执行。
+    const ctx = { cwd: repo, hasUI: true, sessionManager: { getSessionId: () => sessionId }, ui: { setStatus() {} } };
     await pi.handlers.get("session_start")({}, ctx);
     try {
-      assert.deepEqual([...pi.tools.keys()].sort(), ["scheduler_create", "scheduler_delete", "scheduler_get", "scheduler_list"]);
+      assert.deepEqual([...pi.tools.keys()].sort(), ["scheduler_create", "scheduler_delete", "scheduler_get", "scheduler_list"], "update/run-now remain intercepted beyond the four-tool boundary");
       assert.deepEqual(pi.commands, [], "the upstream /cron registration is intercepted");
       const invoke = (tool, params) => pi.tools.get(tool).execute("id", params, new AbortController().signal, () => {}, ctx);
       const created = await invoke("scheduler_create", { type: "interval", schedule: "1h", prompt: "safe", enabled: false });
       const createdText = created.content.map((item) => item.text).join("").replace(/^\[scheduled-task upstream\][^\n]*\n/, "");
       assert.doesNotMatch(createdText, /^Failed/, createdText);
-      const taskId = JSON.parse(createdText).id;
+      const createdTask = JSON.parse(createdText);
+      assert.equal(createdTask.enabled, false, "fixture tasks stay disabled so no trigger can fire in the temp-isolated store");
+      const taskId = createdTask.id;
       const deleted = await invoke("scheduler_delete", { taskId });
       assert.match(deleted.content.map((item) => item.text).join(""), /Deleted task/);
+      const missing = await invoke("scheduler_delete", { taskId: randomUUID() });
+      const missingText = missing.content.map((item) => item.text).join("");
+      assert.match(missingText, /Task not found/, "a failed delete is observable and not faked as success");
+      assert.doesNotMatch(missingText, /Deleted task/);
       const result = await invoke("scheduler_list", {});
       assert.ok(Buffer.byteLength(result.content[0].text) <= 50 * 1024);
       const dataRoot = join(state, "pi-task-scheduler");
