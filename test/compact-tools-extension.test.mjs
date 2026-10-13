@@ -67,6 +67,75 @@ test("compact resolver拥有七工具显示并保留next其余字段及未知fal
   }
 });
 
+test("compact resolver绑定apply_patch显示，不进入折叠且不注册/激活/执行", () => {
+  const { resolvers, registered, activated } = registerCompactTools(compactTools);
+  const [resolve] = resolvers;
+  const mine = resolve("apply_patch", () => undefined);
+  assert.equal(mine.renderShell, "self");
+  assert.equal(typeof mine.renderCall, "function");
+  assert.equal(typeof mine.renderResult, "function");
+  // 调用只显示工具名，不显示 patch 参数。
+  const theme = { bold: (text) => text, fg: (_color, text) => text };
+  const context = { isError: false, state: {}, expanded: false, args: { patch: "*** Begin Patch\n*** Add File: docs/a.md\n*** End Patch" } };
+  assert.deepEqual(mine.renderCall(context.args, theme, context).render(100), ["∗ apply_patch"]);
+  // 显示字段覆盖，next 其余 metadata（含 execute）原样保留；未知名称仍 fallback。
+  const sentinel = {};
+  const nativeExecute = async () => ({ content: [] });
+  const base = { renderShell: "default", renderCall() {}, renderResult() {}, execute: nativeExecute, sentinel };
+  const merged = resolve("apply_patch", () => base);
+  assert.equal(merged.renderCall, mine.renderCall);
+  assert.equal(merged.renderResult, mine.renderResult);
+  assert.equal(merged.execute, nativeExecute);
+  assert.equal(merged.sentinel, sentinel);
+  assert.equal(base.renderShell, "default");
+  assert.deepEqual(resolve("unknown", () => undefined), undefined);
+  assert.deepEqual(registered, []);
+  assert.deepEqual(activated, []);
+  // 不进入单行折叠：折叠成功状态显示 A/M/D 列表而非空组件/一行摘要。
+  const output = mine.renderResult(
+    { content: [{ type: "text", text: "A docs/a.md" }], details: { added: ["docs/a.md"], modified: [], deleted: [] } },
+    { expanded: false, isPartial: false },
+    theme,
+    context,
+  );
+  const visible = output.render(100).map((line) => line.trim()).filter((line) => line);
+  assert.deepEqual(visible, ["A docs/a.md"]);
+});
+
+test("compact resolver绑定bash_async显示，launch摘要已接受待完成且不注册/激活/执行", () => {
+  const { resolvers, registered, activated } = registerCompactTools(compactTools);
+  const [resolve] = resolvers;
+  const mine = resolve("bash_async", () => undefined);
+  assert.equal(mine.renderShell, "self");
+  assert.equal(typeof mine.renderCall, "function");
+  assert.equal(typeof mine.renderResult, "function");
+  // 调用显示真实工具名 bash_async 与命令，不伪装同步 bash。
+  const theme = { bold: (text) => text, fg: (_color, text) => text };
+  const args = { command: "sleep 5", cwd: "/tmp", timeout: 15 };
+  assert.match(mine.renderCall(args, theme, { expanded: false, state: {} }).render(100).join(""), /∗ bash_async "sleep 5"/);
+  // 显示字段覆盖，next 其余 metadata（含 execute）原样保留。
+  const nativeExecute = async () => ({ content: [] });
+  const sentinel = {};
+  const base = { renderShell: "default", renderCall() {}, renderResult() {}, execute: nativeExecute, sentinel };
+  const merged = resolve("bash_async", () => base);
+  assert.equal(merged.renderCall, mine.renderCall);
+  assert.equal(merged.renderResult, mine.renderResult);
+  assert.equal(merged.execute, nativeExecute);
+  assert.equal(merged.sentinel, sentinel);
+  assert.equal(base.renderShell, "default");
+  assert.deepEqual(registered, []);
+  assert.deepEqual(activated, []);
+  // 合法 launch 回执折叠只表达接受/待完成语义，不误报命令成功。
+  const receipt = { kind: "bash-async-launch", jobId: "aabbccdd-1234", toolCallId: "call-x", command: "sleep 5", cwd: "/tmp", acceptedAt: "t" };
+  const result = { content: [{ type: "text", text: JSON.stringify(receipt) }], details: receipt };
+  const ctx = { args, state: {}, isError: false, expanded: false, isPartial: false };
+  const output = mine.renderResult(result, { expanded: false, isPartial: false }, theme, ctx);
+  const lines = [...mine.renderCall(args, theme, ctx).render(100), ...output.render(100)].filter((line) => line.trim());
+  assert.equal(lines.length, 1);
+  assert.match(lines.join(""), /已接受，待完成 \(aabbccdd\)/);
+  assert.doesNotMatch(lines.join(""), /succeeded|已完成|1 lines/);
+});
+
 test("Host折叠入口在展开错误后恢复成功摘要且不重复添加状态", () => {
   const tool = registerCompactTools(compactTools).resolvers[0]("edit", () => undefined);
   const theme = { bold: (text) => text, fg: (_color, text) => text };

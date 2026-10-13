@@ -1,7 +1,7 @@
 import { basename, dirname } from "node:path";
 import { homedir } from "node:os";
 
-const TOOL_NAMES = ["read", "bash", "edit", "write", "find", "grep", "ls"];
+const TOOL_NAMES = ["read", "bash", "bash_async", "edit", "write", "find", "grep", "ls", "apply_patch"];
 const COMPACT_SKILL_PATCH = Symbol.for("pi-config.compact-skill-renderer");
 const COMPACT_SUMMARY_KEY = "compactToolsSummary";
 
@@ -56,6 +56,24 @@ function expandedBlock(text, theme, Text, Container, maxLines) {
   return container;
 }
 
+// 失败原因组件：先按终端列宽换行，再限制物理行，原始结果始终不变；invalidate 后以当前主题重建。
+function failedResult({ Text, truncateToWidth, text, theme }) {
+  const errorText = `✗ ${text.trim() || "工具执行失败（未提供错误信息）"}`;
+  let body = new Text(theme.fg("error", errorText), 1, 0);
+  return {
+    render(width) {
+      const lines = body.render(width);
+      return lines.length <= 4 ? lines : [
+        ...lines.slice(0, 3),
+        truncateToWidth(theme.fg("dim", "… 展开查看完整错误"), width, "…"),
+      ];
+    },
+    invalidate() {
+      body = new Text(theme.fg("error", errorText), 1, 0);
+    },
+  };
+}
+
 function resultRenderer({ Text, Container, truncateToWidth, summary, maxLines = 60 }) {
   return (result, options, theme, context) => {
     const text = textOutput(result);
@@ -66,23 +84,7 @@ function resultRenderer({ Text, Container, truncateToWidth, summary, maxLines = 
       return new Text(theme.fg("dim", `  └ ${resultSummary}`), 1, 0);
     }
     if (context?.state) context.state[COMPACT_SUMMARY_KEY] = resultSummary;
-    if (failed) {
-      const errorText = `✗ ${text.trim() || "工具执行失败（未提供错误信息）"}`;
-      let body = new Text(theme.fg("error", errorText), 1, 0);
-      return {
-        render(width) {
-          // 先按终端列宽换行，再限制物理行，原始结果始终不变。
-          const lines = body.render(width);
-          return lines.length <= 4 ? lines : [
-            ...lines.slice(0, 3),
-            truncateToWidth(theme.fg("dim", "… 展开查看完整错误"), width, "…"),
-          ];
-        },
-        invalidate() {
-          body = new Text(theme.fg("error", errorText), 1, 0);
-        },
-      };
-    }
+    if (failed) return failedResult({ Text, truncateToWidth, text, theme });
     return new Text("", 0, 0);
   };
 }
@@ -185,6 +187,43 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
       },
       renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} lines` }),
     },
+    // bash_async 专用精简显示：不 alias 同步 bash（其 "1 lines" 摘要既无接受语义又用错标题）。
+    bash_async: {
+      renderCall(args, theme, context) {
+        const command = truncate(String(args?.command || "...").replace(/\s+/g, " ").trim(), 70);
+        return singleLine(title("bash_async", theme.fg("accent", `"${command}"`), theme), theme, context);
+      },
+      renderResult(result, options, theme, context) {
+        const text = textOutput(result);
+        const failed = context?.isError === true || result?.isError === true;
+        // 已接受语义只来自合法 typed receipt：错误以 context.isError 为权威，partial 不提前接受。
+        const launch = !failed && options.isPartial !== true && result?.details?.kind === "bash-async-launch"
+          ? result.details
+          : undefined;
+        const shortJob = launch && typeof launch.jobId === "string" && launch.jobId
+          ? ` (${launch.jobId.slice(0, 8)})`
+          : "";
+        const launchSummary = launch ? `已接受，待完成${shortJob}` : undefined;
+        if (options.expanded) {
+          // 展开态显示完整原文：launch 的完整身份（receipt JSON）仅在此可见；错误保留完整原因。
+          if (text) return expandedBlock(text, theme, Text, Container, 60);
+          return new Text(theme.fg("dim", `  └ ${failed ? "失败" : launchSummary || "（未识别的回执格式）"}`), 1, 0);
+        }
+        if (launch) {
+          if (context?.state) context.state[COMPACT_SUMMARY_KEY] = launchSummary;
+          return new Text("", 0, 0);
+        }
+        // 失败/未知回执不保留旧摘要，避免“已接受”叠加在失败或未识别状态上。
+        if (context?.state) delete context.state[COMPACT_SUMMARY_KEY];
+        if (failed) return failedResult({ Text, truncateToWidth, text, theme });
+        // 未知格式中性显示原文：不猜接受/成功，也不做 production 执行输出兼容。
+        return singleLine(
+          theme.fg("dim", text ? truncate(text.replace(/\s+/g, " ").trim(), 100) : "（未识别的回执格式）"),
+          theme,
+          context,
+        );
+      },
+    },
     edit: {
       renderCall(args, theme, context) {
         const count = Array.isArray(args?.edits) ? args.edits.length : 1;
@@ -225,6 +264,40 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
         return pathCall("ls", shortPath(args?.path), "", theme, context);
       },
       renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} entries`, maxLines: 40 }),
+    },
+    apply_patch: {
+      // 折叠/展开都只显示工具名：不显示 patch 参数，也不读共享成功摘要。
+      renderCall(_args, theme) {
+        const call = title("apply_patch", "", theme);
+        return {
+          render(width) {
+            return [truncateToWidth(call, width, "…")];
+          },
+          invalidate() {},
+        };
+      },
+      renderResult(result, options, theme, context) {
+        const failed = context?.isError === true || result?.isError === true;
+        const text = textOutput(result);
+        if (failed) {
+          // 失败原因优先于文件列表：展开显示完整错误块（60 行上限），折叠显示 ✗ 并限四行；
+          // 空成功列表不得掩盖失败原因。
+          if (options.expanded) {
+            if (text) return expandedBlock(text, theme, Text, Container, 60);
+            return new Text(theme.fg("dim", "  └ 失败"), 1, 0);
+          }
+          return failedResult({ Text, truncateToWidth, text, theme });
+        }
+        // 成功直接显示完整 A/M/D 文件列表：由权威 details 数组生成，不限条数、不加计数/框线/JSON；
+        // details 缺数组时回退 content 原文行；长路径由 Text 按终端列宽自然换行。
+        const details = result?.details;
+        const entries = [
+          ...(Array.isArray(details?.added) ? details.added : []).map((path) => `A ${path}`),
+          ...(Array.isArray(details?.modified) ? details.modified : []).map((path) => `M ${path}`),
+          ...(Array.isArray(details?.deleted) ? details.deleted : []).map((path) => `D ${path}`),
+        ];
+        return new Text(entries.length > 0 ? entries.join("\n") : text, 1, 0);
+      },
     },
   };
 

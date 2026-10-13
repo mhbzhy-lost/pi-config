@@ -77,7 +77,8 @@ function installCollapsedSingleLineRenderer(name: ToolName, renderer: any, { Tex
 }
 
 /**
- * 仅拥有七个工具的显示字段，不注册、执行或激活工具。
+ * 拥有 read/bash/edit/write/find/grep/ls/apply_patch 的显示字段，不注册、执行或激活工具。
+ * apply_patch 不进入单行折叠：折叠与展开都显示工具名和完整 A/M/D 文件列表，失败原因单独可见。
  * Host 按注册顺序解析 next 链；前置 resolver 不调用 next 即可截断本 owner，非 last-wins。
  */
 export function createCompactToolRendererResolver(dependencies: Dependencies): ToolRendererResolver {
