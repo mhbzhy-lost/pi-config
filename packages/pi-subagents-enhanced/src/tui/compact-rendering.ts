@@ -257,8 +257,8 @@ function compactAgentRoster(result: unknown, text: string): string {
       // 非 JSON 文本：不伪造名单，保持中性占位。
     }
   }
-  if (rows.length === 0) return "Available agents: (no roster)";
-  return ["Available agents", ...rows.map(({ name, description }) => `• ${name}${description ? `：${description}` : ""}`)].join("\n");
+  if (rows.length === 0) return "(no roster)";
+  return rows.map(({ name, description }) => `• ${name}${description ? `：${description}` : ""}`).join("\n");
 }
 
 export function formatCompactSubagentToolResult(result: unknown, args: unknown, context?: { isError?: boolean }) {

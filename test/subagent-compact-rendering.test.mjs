@@ -364,3 +364,104 @@ test("compact notification uses leaf presentation metadata instead of raw failed
   assert.equal(rendered, "◇ TDD RED · reported\n? Need context · needs-context");
   assert.doesNotMatch(rendered, /✗|runtime-failed/);
 });
+
+test("compact list projects only the roster rows without the Available agents heading", () => {
+  // 夹具镜像 extension.ts executeControl(list) 的真实回执：details.agents 为扁平
+  // description 字段，content JSON 为 name+frontmatter 条目。
+  const result = {
+    content: [{
+      type: "text",
+      text: JSON.stringify([
+        { name: "delegate", frontmatter: { description: "派发并跟踪子任务" } },
+        { name: "executor", frontmatter: { description: "执行具体实现" } },
+        { name: "reviewer", frontmatter: { description: "审查产出" } },
+      ], null, 2),
+    }],
+    details: {
+      agents: [
+        { name: "delegate", description: "派发并跟踪子任务", model: null, models: [], tools: null },
+        { name: "executor", description: "执行具体实现", model: null, models: [], tools: null },
+        { name: "reviewer", description: "审查产出", model: null, models: [], tools: null },
+      ],
+    },
+  };
+  const before = clone(result);
+  const args = { action: "list" };
+  const beforeArgs = clone(args);
+
+  const rendered = formatCompactSubagentToolResult(result, args);
+
+  assert.equal(
+    rendered,
+    "• delegate：派发并跟踪子任务\n• executor：执行具体实现\n• reviewer：审查产出",
+  );
+  assert.doesNotMatch(rendered, /Available agents/);
+  assert.deepEqual(result, before);
+  assert.deepEqual(args, beforeArgs);
+});
+
+test("compact list falls back to the raw roster JSON when structured details are missing", () => {
+  // details 缺失时只读 parse 原 content JSON，投影不变且不改原始 payload。
+  const result = {
+    content: [{
+      type: "text",
+      text: JSON.stringify([
+        { name: "delegate", frontmatter: { description: "派发并跟踪子任务" } },
+        { name: "executor", frontmatter: { description: "执行具体实现" } },
+      ], null, 2),
+    }],
+  };
+  const before = clone(result);
+
+  const rendered = formatCompactSubagentToolResult(result, { action: "list" });
+
+  assert.equal(rendered, "• delegate：派发并跟踪子任务\n• executor：执行具体实现");
+  assert.doesNotMatch(rendered, /Available agents/);
+  assert.deepEqual(result, before);
+});
+
+test("compact list keeps a neutral empty-roster placeholder without inventing rows", () => {
+  const emptyDetails = {
+    content: [{ type: "text", text: JSON.stringify([], null, 2) }],
+    details: { agents: [] },
+  };
+  const beforeDetails = clone(emptyDetails);
+  assert.equal(formatCompactSubagentToolResult(emptyDetails, { action: "list" }), "(no roster)");
+  assert.deepEqual(emptyDetails, beforeDetails);
+
+  const emptyContent = { content: [{ type: "text", text: "[]" }] };
+  const beforeContent = clone(emptyContent);
+  assert.equal(formatCompactSubagentToolResult(emptyContent, { action: "list" }), "(no roster)");
+  assert.deepEqual(emptyContent, beforeContent);
+
+  const unparseable = { content: [{ type: "text", text: "agent discovery unavailable" }] };
+  const beforeUnparseable = clone(unparseable);
+  assert.equal(formatCompactSubagentToolResult(unparseable, { action: "list" }), "(no roster)");
+  assert.deepEqual(unparseable, beforeUnparseable);
+});
+
+test("compact list errors pass through unchanged and nearby actions keep their projections", () => {
+  // list 失败回执原样透传，不误标成功也不加名册投影。
+  const failure = {
+    content: [{ type: "text", text: "Agent discovery failed: no pi/agents directory." }],
+    isError: true,
+  };
+  const beforeFailure = clone(failure);
+  assert.equal(
+    formatCompactSubagentToolResult(failure, { action: "list" }),
+    "Agent discovery failed: no pi/agents directory.",
+  );
+  assert.deepEqual(failure, beforeFailure);
+
+  // 非 list 动作不受名册渲染变化影响（interrupt 投影既有行为回归）。
+  const interrupt = {
+    content: [{ type: "text", text: "Interrupt requested for async run run-list-1." }],
+    details: { mode: "management", results: [] },
+  };
+  const beforeInterrupt = clone(interrupt);
+  assert.equal(
+    formatCompactSubagentToolResult(interrupt, { action: "interrupt", id: "run-list-1" }),
+    "已中断 · run-list-1",
+  );
+  assert.deepEqual(interrupt, beforeInterrupt);
+});
