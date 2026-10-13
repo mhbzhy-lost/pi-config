@@ -19,6 +19,7 @@
     "src/agents-global/**/*.ts",
     "src/apply-patch/**/*.ts",
     "src/bash-cwd/**/*.ts",
+    "src/bash-async/**/*.ts",
     "src/basic-memory/**/*.ts",
     "src/compact-tools/**/*.ts",
     "src/model-system-prompt/**/*.ts",

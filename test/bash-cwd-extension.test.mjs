@@ -223,7 +223,8 @@ test("bash-cwd preserves native renderers and resolves settings only from execut
     const extensionSource = await readFile(new URL("../pi/extensions/bash-cwd.ts", import.meta.url), "utf8");
     const mockPath = join(temporaryDirectory, "pi-mock.mjs");
     const extensionPath = join(temporaryDirectory, "bash-cwd.ts");
-    const bashCwdExtensionUrl = pathToFileURL(new URL("../src/bash-cwd/extension.ts", import.meta.url).pathname).href;
+    const bashCwdExtensionUrl = pathToFileURL(new URL("../src/bash-cwd/index.ts", import.meta.url).pathname).href;
+    const bashAsyncUrl = pathToFileURL(new URL("../src/bash-async/index.ts", import.meta.url).pathname).href;
     const { jiti, paths } = await loadPiTestRuntime(import.meta.url);
 
     await writeFile(mockPath, `
@@ -254,20 +255,34 @@ export function createBashToolDefinition(cwd, options = {}) {
 `);
     const source = extensionSource
       .replace("@earendil-works/pi-coding-agent", pathToFileURL(mockPath).href)
-      .replace("../../src/bash-cwd/extension.ts", bashCwdExtensionUrl);
+      .replace("../../src/bash-cwd/index.ts", bashCwdExtensionUrl)
+      .replace("../../src/bash-async/index.ts", bashAsyncUrl);
     await writeFile(extensionPath, source);
 
     const { default: bashCwd } = await jiti.import(extensionPath);
     const mock = await jiti.import(mockPath);
     const registered = [];
-    bashCwd({ registerTool: (tool) => registered.push(tool) });
+    const messageRenderers = [];
+    bashCwd({
+      registerTool: (tool) => registered.push(tool),
+      on() {},
+      registerCommand() {},
+      // 完成回执绑定是已授权的 public Host 能力：mock 必须收集而非缺方法，
+      // 否则入口在首次调用 registerMessageRenderer 时抛 TypeError（首次聚焦运行的实际偏离）。
+      registerMessageRenderer: (customType, renderer) => messageRenderers.push({ customType, renderer }),
+    });
 
     assert.equal(mock.settingsCalls.length, 0);
-    assert.equal(registered.length, 1);
+    assert.equal(registered.length, 2);
+    assert.equal(registered[1].name, "bash_async");
+    assert.equal(registered[1].outputSchema, undefined);
     assert.equal(registered[0].name, "bash");
     assert.equal(registered[0].renderShell, undefined);
     assert.equal(registered[0].renderCall, "native-call");
     assert.equal(registered[0].renderResult, "native-result");
+    assert.deepEqual(messageRenderers.map(({ customType }) => customType), ["bash-async-complete"]);
+    assert.equal(messageRenderers.length, 1);
+    assert.equal(typeof messageRenderers[0].renderer, "function");
     await registered[0].execute("no-context", { command: "pwd" }, undefined, undefined, undefined);
     assert.equal(mock.settingsCalls.length, 0);
     assert.deepEqual(mock.storageReads, []);
@@ -302,5 +317,10 @@ export function createBashToolDefinition(cwd, options = {}) {
 test("bash-cwd leaves compact display binding to the renderer-only owner", async () => {
   const extensionSource = await readFile(new URL("../pi/extensions/bash-cwd.ts", import.meta.url), "utf8");
 
-  assert.doesNotMatch(extensionSource, /renderShell|renderCall|renderResult|compact-tools|pi-tui/);
+  // renderShell/renderCall/renderResult/compact-tools 仍不得进入执行 owner；
+  // pi-tui 仅作为已授权 completion MessageRenderer 的依赖注入能力放行，不承担工具渲染。
+  assert.doesNotMatch(extensionSource, /renderShell|renderCall|renderResult|compact-tools/);
+  const messageRendererBindings = [...extensionSource.matchAll(/registerMessageRenderer\(\s*["']([^"']+)["']/g)].map((match) => match[1]);
+  assert.deepEqual(messageRendererBindings, ["bash-async-complete"]);
+  assert.match(extensionSource, /import \{ Text, truncateToWidth \} from "@earendil-works\/pi-tui";/);
 });

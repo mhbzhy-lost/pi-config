@@ -1,15 +1,15 @@
 import { checkShellPolicy, checkSensitivePath } from "./shell-policy.ts";
-import { validateDeclaredBashCwd } from "../bash-cwd/policy.ts";
+import { validateDeclaredBashCwd } from "../bash-cwd/index.ts";
 
 export function createSecurityGatesExtension(pi, {
   shellPolicy = checkShellPolicy,
 }: any = {}) {
   pi.on("tool_call", async (event, ctx) => {
-    // Check sensitive path access for read/write/edit tools
+    // read/write/edit 的敏感路径门禁与 shell 门禁分开处理。
     const sensitiveViolation = checkSensitivePath({ toolName: event.toolName, input: event.input, cwd: ctx.cwd || "." });
     if (sensitiveViolation) return { block: true, reason: sensitiveViolation.reason };
 
-    if (event.toolName !== "bash" || typeof event.input?.command !== "string") return undefined;
+    if (!["bash", "bash_async"].includes(event.toolName) || typeof event.input?.command !== "string") return undefined;
     const workspaceRoot = ctx.cwd;
     if (!workspaceRoot) return { block: true, reason: "无法取得可信工作目录，安全门禁已按 fail-closed 阻断 bash" };
     let cwd = workspaceRoot;

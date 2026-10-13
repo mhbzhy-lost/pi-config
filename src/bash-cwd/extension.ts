@@ -2,7 +2,7 @@ import { validateDeclaredBashCwd } from "./policy.ts";
 
 const cwdDescription = "可选；命令在此目录执行";
 
-export function createBashCwdExtension(pi, {
+export function createBashCwdToolDefinition({
   workspaceRoot = process.cwd(),
   createBashToolDefinition,
   getBashOptions = () => ({}),
@@ -16,7 +16,7 @@ export function createBashCwdExtension(pi, {
   const baseGuidelines = baseDefinition.promptGuidelines ?? [];
   const baseParameters = baseDefinition.parameters;
 
-  pi.registerTool({
+  return {
     ...baseDefinition,
     name: "bash",
     parameters: {
@@ -28,23 +28,30 @@ export function createBashCwdExtension(pi, {
     },
     promptGuidelines: [...baseGuidelines, cwdDescription],
     async execute(id, { cwd, ...rest }, signal, onUpdate, ctx) {
-      const validatedCwd = cwd === undefined
-        ? undefined
-        : await validateDeclaredBashCwd({ cwd, workspaceRoot });
-      const options = getBashOptions(ctx);
-      const executionOptions = validatedCwd === undefined
-        ? options
-        : {
-            ...options,
-            spawnHook: (spawnContext) => {
-              const next = options.spawnHook?.(spawnContext) ?? spawnContext;
-              return { ...next, cwd: validatedCwd };
-            },
-          };
-      const definition = createBashToolDefinition(workspaceRoot, executionOptions);
+      const { definition } = await prepareBashCwdExecution({
+        workspaceRoot, createBashToolDefinition, getBashOptions,
+      }, { cwd }, ctx);
       return definition.execute(id, rest, signal, onUpdate, ctx);
     },
-  });
+  };
+}
+
+/** 只解析一次 cwd 和 options，供同步执行与异步 launch 共用。 */
+export async function prepareBashCwdExecution({ workspaceRoot = process.cwd(), createBashToolDefinition, getBashOptions = () => ({}) }: { workspaceRoot?: string; createBashToolDefinition?: (...args: any[]) => any; getBashOptions?: (...args: any[]) => any }, { cwd }: { cwd?: string }, ctx, transformOptions = (options) => options) {
+  const validatedCwd = cwd === undefined ? undefined : await validateDeclaredBashCwd({ cwd, workspaceRoot });
+  const options = transformOptions(getBashOptions(ctx));
+  const executionOptions = validatedCwd === undefined ? options : {
+    ...options,
+    spawnHook: (spawnContext) => {
+      const next = options.spawnHook?.(spawnContext) ?? spawnContext;
+      return { ...next, cwd: validatedCwd };
+    },
+  };
+  return { definition: createBashToolDefinition(workspaceRoot, executionOptions), cwd: validatedCwd ?? ctx?.cwd ?? workspaceRoot };
+}
+
+export function createBashCwdExtension(pi, options = {}) {
+  pi.registerTool(createBashCwdToolDefinition(options));
 }
 
 export default createBashCwdExtension;

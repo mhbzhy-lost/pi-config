@@ -141,3 +141,17 @@ test("tool_call blocks destructive git via bash shell-policy", async () => {
   assert.equal(result.block, true);
   assert.match(result.reason, /不可逆 Git/);
 });
+
+test("bash_async 与 bash 共用 shell policy/cwd，不因改工具名放行", async () => {
+  const handlers = setup();
+  const gate = handlers.get('tool_call');
+  for (const command of ['git reset --hard HEAD~1', 'rm -rf /Users/shared']) {
+    const sync = await gate({ toolName: 'bash', input: { command } }, { cwd: workspace });
+    const async = await gate({ toolName: 'bash_async', input: { command } }, { cwd: workspace });
+    assert.deepEqual(async, sync); assert.equal(async.block, true);
+  }
+  const missing = await gate({ toolName: 'bash_async', input: { command: 'pwd' } }, {});
+  assert.equal(missing.block, true);
+  const invalid = await gate({ toolName: 'bash_async', input: { command: 'pwd', cwd: '/nonexistent-bash-async' } }, { cwd: workspace });
+  assert.equal(invalid.block, true);
+});
