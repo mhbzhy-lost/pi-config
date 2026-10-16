@@ -1,0 +1,168 @@
+{
+  "taskId": "dispatch-00f7c764",
+  "task": "B：新执行基线",
+  "contractSha256": "00f7c7644c75e04a4588a40f470ce6c94b979fefc237794281ef456a999f45ce",
+  "recordedAt": "2026-10-14T07:02:16Z",
+  "recordedAtLocal": "2026-10-14 15:02:16 +0800",
+  "plan": {
+    "unifiedPlanPath": "docs/plans/2026-10-13-remaining-runtime-execution.md",
+    "readComplete": true,
+    "executionModeChosen": "Subagent-Driven",
+    "reviewStatus": "额外reviewer已完成，计划已按review修订；本轮不自动再次review"
+  },
+  "git": {
+    "head": "a9875d62a75a0d5ee2893646ea5a96e89bbf8e27",
+    "headSubject": "docs(testing): 记录合同围栏测试规范",
+    "headCommittedAt": "2026-10-13 17:40:05 +0800",
+    "branch": "main",
+    "indexEmpty": true,
+    "stagedFileCount": 0,
+    "statusPathsClassified": {
+      "trackedModifiedUnstaged": [
+        "docs/architecture/task-scheduler-adapter-contract.md",
+        "docs/plans/2026-10-11-runtime-followups.md",
+        "docs/plans/2026-10-13-background-activity-footer.md"
+      ],
+      "untracked": [
+        "docs/plans/2026-10-13-remaining-runtime-execution.md",
+        "docs/plans/records/2026-10-13-legacy-plan-review.md"
+      ],
+      "staged": [],
+      "deleted": [],
+      "unknownDirty": []
+    },
+    "dirtyDisposition": "父层inline编写/修订计划所致，原dirty现场保护：不清理、不stash/reset、不stage、不commit/push"
+  },
+  "versions": {
+    "node": {
+      "actual": "v26.8.1",
+      "required": ">=22.19.0",
+      "satisfied": true
+    },
+    "piCodingAgent": {
+      "actual": "1.0.4",
+      "evidence": "根package.json依赖与node_modules/@earendil-works/pi-coding-agent/package.json现场一致"
+    },
+    "piSubagents": {
+      "actual": "0.75.0",
+      "evidence": "packages/pi-subagents-enhanced/package.json dependencies及packages/pi-subagents-enhanced/node_modules/pi-subagents/package.json现场一致"
+    },
+    "taskScheduler": {
+      "package": "@amaster.ai/pi-task-scheduler",
+      "actual": "0.1.9",
+      "evidence": "pi/npm/node_modules/@amaster.ai/pi-task-scheduler/package.json（vendored路径，src/task-scheduler/adapter.ts实际引用该dist入口）现场一致"
+    },
+    "versionContradictions": []
+  },
+  "knownPlanInputs": [
+    {
+      "path": "docs/architecture/task-scheduler-adapter-contract.md",
+      "status": "tracked-modified-unstaged",
+      "present": true
+    },
+    {
+      "path": "docs/plans/2026-10-11-runtime-followups.md",
+      "status": "tracked-modified-unstaged",
+      "present": true
+    },
+    {
+      "path": "docs/plans/2026-10-13-background-activity-footer.md",
+      "status": "tracked-modified-unstaged",
+      "present": true
+    },
+    {
+      "path": "docs/plans/2026-10-13-remaining-runtime-execution.md",
+      "status": "untracked",
+      "present": true,
+      "note": "统一计划原文档，父层inline编写"
+    },
+    {
+      "path": "docs/plans/records/2026-10-13-legacy-plan-review.md",
+      "status": "untracked",
+      "present": true,
+      "note": "本轮review结果，父层已保存并在派发合同中精确声明"
+    }
+  ],
+  "resourceScopes": {
+    "static-evidence": "静态文档/source精确核对，不运行业务",
+    "unit-runner": "容量1，覆盖tsc/Node test",
+    "manifest-writer": "F1单writer：manifest/lock/tsconfig",
+    "fake-tui": "F5b详情壳与presenter",
+    "visible-host": "容量1，覆盖I4/H2/F7视觉部分，I4与H2不可并发",
+    "heartbeat-fixture": "H1/H2隔离fixture，各任务独立临时根",
+    "session-registry-fixture": "S1v等registry回归，各任务独立临时根"
+  },
+  "resourceScopeConstraints": [
+    "禁止未经审计运行npm test或all-integration",
+    ".integration.mjs必须显式调用，不靠npm glob",
+    "静态gate只做精确文档/source核对，不运行业务",
+    "不修改上游/node_modules源码/vendor，不维护依赖fork/patch",
+    "不读真实settings/models/auth/credential、完整session或authority正文",
+    "不stash/reset/clean、不提交/push；原dirty现场保护",
+    "真实Host/child/通知/kill类命令仅I4/H2按其各自gate授权，其余任务禁止",
+    "同文件并发用独立worktree或串行publish，不伪造功能依赖"
+  ],
+  "terminalStates": {
+    "enum": [
+      "implemented",
+      "verified",
+      "closed-unconfirmed",
+      "blocked-upstream",
+      "blocked-evidence",
+      "blocked-environment",
+      "not-applicable"
+    ],
+    "recordFields": [
+      "taskId",
+      "status",
+      "evidenceLinks",
+      "commands(exitCode)",
+      "unverified",
+      "nextAction"
+    ],
+    "rule": "blocked可使DAG交付记录收口，但绝不计为功能完成；I通知、session竞态和Q唤醒不得用关闭记录替代已实现"
+  },
+  "waves": {
+    "wave0": ["B"],
+    "wave1ReadyAfterB": ["S1g", "F0", "F1", "F4g", "I1", "Q1", "H1", "R1", "V1"],
+    "wave2": ["S1a", "F2a", "F3", "F4a", "F5a", "I2", "Q2", "H2", "R2", "V2"],
+    "wave3": ["S1b", "F2b", "F4b", "F5b", "I3", "Q3"],
+    "wave4": ["S1v", "F6", "I4"],
+    "wave5": ["F7"],
+    "wave6": ["Z"],
+    "note": "Wave不是屏障，各任务前驱完成即派"
+  },
+  "historicalBaseline": {
+    "statement": "既有失败baseline与历史acceptance记录均为历史事实，不构成本次运行的green基线；本轮验收以各任务实际命令exit与现场证据为准",
+    "notOverwritten": true,
+    "note": "历史baseline/acceptance不覆盖、不删除；计划dirty不要求清理"
+  },
+  "bScopeBoundary": {
+    "statement": "B为静态基线任务，仅记录HEAD/index/status/版本/资源授权投影；计划执行中的资源命令（unit-runner/visible-host等）均未启动，B不构成任何运行期完成证明",
+    "resourceCommandsStarted": false,
+    "runtimeVerificationPerformed": false
+  },
+  "sensitiveReadAvoidance": {
+    "notRead": [
+      "pi/settings.json等settings配置",
+      "pi/models.json等models配置",
+      "auth/credential凭据",
+      "authority正文",
+      ".state/目录内容",
+      "完整session正文"
+    ],
+    "readInstead": "仅package metadata（根package.json、packages/pi-subagents-enhanced/package.json、已安装包package.json版本字段）、AGENTS.md本仓规范、git status/diff metadata（路径级，未读dirty正文）"
+  },
+  "validation": {
+    "jsonParse": {
+      "command": "node -e 'JSON.parse(require(\"fs\").readFileSync(\"docs/plans/records/2026-10-13-remaining-runtime-baseline.json\",\"utf8\"))'",
+      "exitCode": 0
+    },
+    "gitDiffCheck": {
+      "command": "git diff --check",
+      "exitCode": 0
+    }
+  },
+  "blockers": [],
+  "escalations": []
+}

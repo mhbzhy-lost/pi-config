@@ -4,6 +4,10 @@
 
 **执行状态（2026-10-11）：**用户选择 Inline，已产出静态调用链、覆盖边界和暂缓决策。初次 T0 未及时停止且路径分类不足；用户确认清理后已重建 schema v2 文档基线。当前仅收口调查文档，未完成生产 provenance、selector/epoch 完整合同或行为验证；五项 TODO 均未实施。checkbox 只表示其文字步骤实际完成，不表示问题已修复；缺少直接证据的步骤保持未勾选。最新用户决策为“文档化并推送，先不做实际代码改动”。
 
+**再审状态（2026-10-13）：**用户已要求重新审核并补齐后续计划；本轮授权阅读、审查和计划修订，不自动实施。上段“最新用户决策”仅描述 2026-10-11 历史阶段。以下 T0–T11 作为历史调查账本保留，不重跑已完成步骤、不覆盖 schema v2 基线或历史 acceptance；尚未闭合的工作按文末增量入口另行形成实施合同。暂缓、关闭和未授权不等于永久不可实现。
+
+**新批次入口：** `docs/plans/2026-10-13-remaining-runtime-execution.md`。用户后续已要求实际可见系统通知、隔离测试主 Host 派发 child 后 SIGKILL 的 heartbeat 验收，以及本仓受控入口 session 独占；不修改上游。本文的禁止新增 case/真实实验/通知等条款只描述历史调查，不覆盖新计划限定的 I4/H2 验收。任何真实用户进程、任务和权限设置仍不在授权范围；不得把新授权改写到历史验收中。
+
 **目标：** 对 RPC session 协商失败、supervisor 回复消费视图、heartbeat 孤儿清理、纯派发回执唤醒和主会话空闲通知五项后续事项完成非敏感 provenance，形成可审查的产品/技术决策，并仅在生产事实与用户授权同时满足时实施最小改动。
 
 **架构：** 先以唯一 public 入口、权威身份、事件/进程顺序和首个偏离为证据，分别完成五条独立调查；调查不能证明 production 可达时保持 fail-closed，不增加兼容分支。确认可修复且 owner 明确后，沿现有 dispatch、supervisor、child lifecycle 和 Host event 边界实施最小修改，不创建第二 authority、第二 sender、私有 IPC、轮询或自动恢复框架。
@@ -15,7 +19,7 @@
 - 计划执行前须先冻结当前工作区、HEAD、index 和本计划涉及路径；不得覆盖既有 dirty，不得执行 `reset`、`restore`、`stash`、force push 或 raw managed-worktree 操作。
 - 本计划默认不提交、不 push；提交必须取得单独明确授权，并使用 `git-commit-convention` skill。
 - Node 最低版本固定为 `>=22.19.0`；不因本计划要求 Node 26，也不安装或升级依赖。
-- 默认禁止 TDD 及所有 TDD 类 skill；不写 RED 测试、不新增 test case。只同步确有影响的既有断言/fixture，并运行获准的纯测试或静态检查。
+- 历史调查阶段默认禁止 TDD 及所有 TDD 类 skill；不写 RED 测试、不新增 test case，只同步确有影响的既有断言/fixture，并运行获准的纯测试或静态检查。此限制不借用为未来功能缺少验证的理由；后续实施计划须单独声明实现后新增的展示/生命周期/投递合同验证范围，仍不使用 TDD。
 - 不运行真实 Pi Host、真实 RPC/PTY、真实 provider/model 请求、真实业务 child、真实 MCP、初始化脚本、完整 integration、付费 canary 或危险 parent-SIGKILL 实验；合成 fixture、fake API、静态源码和非敏感 metadata 可用。
 - 不读取、复制、hash 或输出真实 `pi/settings.json`、`pi/models.json`、`pi/auth.json`、凭据、完整 session 正文、authority 内容或用户目录宽扫描结果。需要诊断时只请求字段级非敏感投影。
 - 外部工具不得通过 MCP 接入；不修改 `node_modules`、上游依赖或生成 vendor Host。若根因只存在于上游，形成明确 upstream boundary 记录并停止本仓 production 修复。
@@ -50,8 +54,8 @@ T6、T7、T8、T9、T10 ──> T11 聚焦验收与账本收口
 - `T3 → T8`：只有确认 heartbeat、ACK、lease、runner 和后代进程的合法 production 顺序后，才能决定本仓是否有 owner；不能凭静态可能性添加清理 fallback。
 - `T4 → T9`：triggerTurn 选择器必须先有精确 receipt 形态和保留消息语义，才能修改投递 options。
 - `T5 → T10`：空闲通知必须先证明主会话登记表、settled 边沿和 status 查询覆盖，再决定是否进入后续实现计划；heartbeat 的完整覆盖不是该通知的硬依赖。
-- `T4 → T9`：T9 只能消费 T4 证明过的 sender/字段 owner；若 sender 在上游或只有文本标题，T9 只交付关闭决策，不写 TUI 或 dispatch production。
-- `T5 → T10`：T10 只能消费 T5 证明过的登记 owner、session epoch 和 status projection；缺任一项则关闭，不实现半套通知。
+- `T4 → T9`：历史 T9 只消费 T4 已证明的 sender/字段 owner；当时未证明合法 options 接点或只能识别标题时暂缓实现。sender 在上游并不证明本仓所有 options 接点不可行，后续应增量核实，不写 TUI observer 代替 sender。
+- `T5 → T10`：历史 T10 只消费 T5 已证明的登记 owner、session epoch 和 status projection；缺任一项则暂缓。缺少现成 registry 是后续设计输入，不是永久关闭条件，不实现半套通知。
 - `T3/T4/T5/T8/T9/T10` 不直接修改共享 TODO 账本，统一由 T11 单一 writer 收口；资源互斥不替代 DAG 依赖。
 - `T6–T10 → T11`：最终验收必须同时核对已实施项、明确关闭项、未实施项、日志和限制，避免把调查完成误报为修复完成。
 
@@ -168,7 +172,7 @@ T6、T7、T8、T9、T10 ──> T11 聚焦验收与账本收口
 
 **接口契约：**
 - Consumes：主进程、broker、lease、ACK、runner、child 和独立 bash 后代的公开启动顺序与 owner 关系。
-- Produces：一份 source classification 和清理覆盖矩阵，行键为 `managed/coding/generic/binding-failed/runner-child/bash-descendant`，列至少为 `birth/ack/renewal/parent-loss/termination/escalation/descendant-reaping/owner`；每行标明 `sourceClass=static|production|test|unconfirmed`，静态报告默认不得升级为 production proof。
+- Produces：一份 source classification 和清理覆盖矩阵，行键为 `managed/coding/generic/binding-failed/runner-child/bash-descendant`，列至少为 `birth/ack/renewal/parent-loss/termination/escalation/descendant-reaping/owner`；每行区分 `sourceClass=production|test|unconfirmed` 与 `evidenceMode=static|field-projection|isolated-runtime`，不能把 static 混作数据来源类别，静态报告默认不得升级为现场 production proof。
 
 **验收标准：**分别证明已覆盖路径与缺口；说明 `45–65s` 静态估计的前提；不把 generic、绑定失败或独立 bash 后代的缺口写成已修复；明确本仓 owner、上游 owner 或来源未证实。不得通过真实 kill 实验补证。
 
@@ -195,7 +199,7 @@ T6、T7、T8、T9、T10 ──> T11 聚焦验收与账本收口
 
 **接口契约：**
 - Consumes：现有 subagent tool 返回值、真实 sender 的结构化字段和完成/失败/暂停/部分结果/批量通知的差异。
-- Produces：精确 selector 决策合同；只有能从真实 sender 的稳定结构化字段证明“单条 dispatch complete、无新增业务结果”时才允许 `triggerTurn:false`。若只能依赖标题文本、sender 在上游或字段不稳定，产出 `ownerScope=upstream|unconfirmed` 和关闭 T9 的决策，不实现 selector。
+- Produces：精确 selector 决策合同；只有能从真实 sender 的稳定结构化字段证明“单条 dispatch complete、无新增业务结果”时才允许 `triggerTurn:false`。历史阶段若只有标题文本、接入 owner 未证明或字段不稳定，则暂缓 T9；sender 位于上游单独不足以证明无合法本仓 options 接入点。
 
 **验收标准：**选择器不依赖易误匹配的宽标题正则、不按是否有 child 盲判、不影响真实 completion/failure/decision；文档列出最小正例、反例和字段缺失时的 fail-closed 行为。
 
@@ -222,7 +226,7 @@ T6、T7、T8、T9、T10 ──> T11 聚焦验收与账本收口
 
 **接口契约：**
 - Consumes：用户已确认的触发条件、唯一 dispatch 入口登记事实、可用 status 查询和主会话 settled/新活动边沿。
-- Produces：不依赖全局 active-runs 枚举的 owner/登记/逐 ID 查询可行性决策；必须记录 `ownerComponent`、`ownerPath`、`ownerScope`、登记时点、resume 新 ID 时点、replacement/reload 清理点和 session epoch。状态字段必须记录实际 projection；本仓 `runtimeFromStatus` 使用 `status.asyncSnapshot.runs.find(run.id === runId)?.state` 的 run-level 状态，缺字段不得推断为终态。明确 `running/queued/start-resume` 为活跃、`paused/终态` 为不活跃、未知/查询失败 fail-closed；不把 heartbeat 全覆盖当硬依赖。
+- Produces：不依赖全局 active-runs 枚举的 owner/登记/逐 ID 查询可行性决策；必须记录 `ownerComponent`、`ownerPath`、`ownerScope`、登记时点、resume 新 ID 时点、replacement/reload 清理点和 session epoch。状态字段必须记录实际 projection；当前 `runtimeFromStatus` 优先读 `details.state`（或顶层 state），再回退顶层 `asyncSnapshot.runs` 的精确 runId 匹配，并仅将 running 状态或 `details.running` 算作 running。它是控制面身份 helper，不是空闲通知完整分类器，不可直接复用其布尔值。后续 idle 合同须证明 public status 的实际返回形态与冲突字段拒绝规则；缺字段不得推断为终态。明确 `running/queued/start-resume` 为活跃、`paused/终态` 为不活跃、未知/查询失败 fail-closed；不把 heartbeat 全覆盖当硬依赖。
 
 **验收标准：**确认成功 dispatch/recovery ID 不会跨主会话错误复用；新用户输入/resume/new dispatch 使旧通知候选失效；通知只在 `agent_settled` 后一次判定；不会把 workspace、terminal proof、supervisor ACK 或消费回执加入额外条件；未发送系统通知、未申请权限。
 
@@ -332,7 +336,7 @@ T6、T7、T8、T9、T10 ──> T11 聚焦验收与账本收口
 
 **接口契约：**
 - Consumes：T4 selector 合同。
-- Produces：只有能从真实 sender 的稳定结构化字段证明“单条 dispatch complete、无新增业务结果”时才允许后续 `triggerTurn:false`；消息仍投递、持久化、TUI 可见、事件保留。若只能依赖标题文本、sender 在上游或字段不稳定，产出 `ownerScope=upstream|unconfirmed` 与关闭决策，不实现 selector。
+- Produces：只有能从真实 sender 的稳定结构化字段证明“单条 dispatch complete、无新增业务结果”时才允许后续 `triggerTurn:false`；消息仍投递、持久化、TUI 可见、事件保留。历史阶段若只有标题文本、合法接点未证明或字段不稳定，则产出暂缓决策；不能仅因 sender 在上游断言所有本仓 options 接点不可用。
 
 **验收标准：**必须记录 sender 的真实 owner 和字段来源；不得把 `completion-notices.ts` 的 `message_end`/UI observer 当 sender。无法证明结构化字段互斥时，以“调查完成、实现关闭”验收；不丢消息、不改 content、事件 payload 或 TUI 投影，不宣称既有 observer 测试覆盖 selector。
 
@@ -360,7 +364,7 @@ T6、T7、T8、T9、T10 ──> T11 聚焦验收与账本收口
 
 **接口契约：**
 - Consumes：T5 的登记/查询合同。
-- Produces：owner/生命周期可行性决策。若可行，记录 `agent_settled` 后按当前 session epoch 登记的 run IDs 逐一查询；状态必须从 `status.asyncSnapshot.runs.find(run.id === runId)?.state` 提取，只有明确的 `paused` 或终态允许候选通知；`running/queued/start/resume`、缺字段、owner 不匹配、unknown、status error 或新活动均不通知。若 owner 不可证明，关闭实现并保留 fail-closed。
+- Produces：owner/生命周期可行性决策。若可行，记录 `agent_settled` 后按当前 session epoch 登记的 run IDs 逐一查询；先锁定 public status 返回形态和精确 runId 匹配规则，不假定所有投影只位于同一字段。只有明确的 `paused` 或终态允许候选通知；`running/queued/start/resume`、缺字段、冲突字段、owner 不匹配、unknown、status error 或新活动均不通知。历史阶段未证明 owner 时暂缓实现并保留 fail-closed；不以缺少现成 registry 代替后续设计决策。
 
 **验收标准：**必须记录 `ownerComponent`、`ownerPath`、`ownerScope`、登记时点、resume 新 ID 时点、replacement/reload 清理点和 session epoch。当前没有这些事实时，以“调查完成、通知实现关闭”验收；不需要全局 active-runs 枚举、不用本地计数代替 status、不等待 consumption/workspace/terminal proof、不跨 session 复用 run ID；本任务不调用真实 `osascript`。
 
@@ -411,3 +415,19 @@ T6、T7、T8、T9、T10 ──> T11 聚焦验收与账本收口
 ## 计划完成判定
 
 本计划只有在 T0–T11 的记录、决策、代码（如获授权）和验证范围均可追溯时才算完成。若某项被证明是来源未证实、上游 owner 或用户暂缓，必须写明“记录已产出、生产修复未实施”，不得用绿色测试、checkbox 或静态分析替代生产结论。当前仅文档整理阶段收口：T1/T2 缺生产样本，T4/T5 缺完整接入/生命周期合同，实际代码与真实流程继续暂缓。
+
+## 再审后的增量入口（不是自动实施授权）
+
+| 条目 | 不再重复的历史工作 | 尚需交付物 | 可推进与停止边界 |
+| --- | --- | --- | --- |
+| RPC session | 已记录的复合能力标签和静态调用链 | 精确失败样本的非敏感入口、身份、版本、时序和首个偏离 | 无样本保持未证实；只在证明本仓生产缺陷后声明精确修复路径，不新增 fallback |
+| supervisor | 已记录 submitted/queued/delivered/consumed/gate-open 的区别 | 精确 request/reply/steer 顺序与权威消费事实 | 不以 UI、提交成功或 pending 空开 gate；与统一 footer 无硬依赖 |
+| heartbeat | 已完成静态覆盖矩阵与 owner 边界 | 接受现有限制的明确处置，或有范围/权限的独立清理能力设计 | 不宣称所有后代已被清理；不自动运行 kill 实验或改上游安装物；不是 idle 前置 |
+| 纯派发 triggerTurn | 已定位上游 sender，确认 TUI observer 不是 sender | 稳定结构化 receipt 正反例、相对 tool result 新信息、合法 options 接点和 fail-closed 合同 | 新增接入设计不要求先有生产事故；仍须证明不会抑制真实完成/错误/决策或混合批量通知，不改 content/持久化/事件 |
+| idle 通知 | 产品条件已确认、缺全局枚举不是阻塞 | 唯一派发入口实际成功 ID 登记、resume 新 ID、session epoch、权威 status 分类、候选失效和一次通知合同 | 登记集合不是权威状态；与 footer 显示 registry 分离；真实 macOS 通知调用另行授权，失败不影响任务 |
+
+- 后续只派发增量未闭合任务，不重新执行 T0–T11。新任务建立新基线，历史 `baseline.json` 和 `acceptance.md` 原样保留。
+- 投递 options 与系统通知属于独立行为 feature，不是 footer renderer 任务；不能把 registry 共用为第二控制 authority，也不能用 footer 有限 history 推断所有 child 已空闲。
+- 历史 T4/T9、T5/T10 中的“关闭”一律限于当时调查范围；新的接口/生命周期设计仍可在明确合同和实施授权后推进。所需 production WritePaths 未证明前不预授权猜测路径。
+- `/tmp` 报告只是补充历史资料；新任务以 pinned 源码、入库 decision/bug 和字段级样本为依据。历史日志丢失不能由 prose 重建实验通过事实。
+- 本轮不授权通知权限、真实 Host/RPC/provider/child、kill 实验或 commit/push。修订完成后由用户选择 Subagent-Driven / Inline 或继续 review。
