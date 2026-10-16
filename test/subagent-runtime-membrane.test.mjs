@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -19,6 +20,7 @@ import { createSupervisorAdapter } from "../packages/pi-subagents-enhanced/src/s
 import { createSupervisorControlPlane, supervisorCanonicalDigest } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-control-plane.ts";
 import {
   createSupervisorRequestMailbox,
+  createSubagentDispatchTraceFileSink,
   createTypedSubagentExtension as createTypedSubagentExtensionProduction,
   installHeadlessTypedSubagentRuntime as installHeadlessTypedSubagentRuntimeProduction,
   TYPED_SUBAGENT_DESCRIPTION,
@@ -2526,4 +2528,349 @@ test("替换代偿失败携原异常诊断，ready 仍阻断并允许恢复重�
   await next.ready({}, {});
   assert.equal(started, 1);
   await next.dispose();
+});
+
+/* -------------------- D3：supervisor status/reply 只读诊断接线 -------------------- */
+
+const SUPERVISOR_CANARY_PATH = "/Users/canary/.pi/sessions/child-canary.jsonl";
+const SUPERVISOR_CANARY_BODY = "TASK-BODY-CANARY";
+const SUPERVISOR_CANARY_DIGEST = `sha256:${"c".repeat(64)}`;
+const SUPERVISOR_CANARIES = [SUPERVISOR_CANARY_PATH, SUPERVISOR_CANARY_BODY, SUPERVISOR_CANARY_DIGEST, "canary", "CANARY"];
+/** root 不可验证时的唯一 fail-closed 包络；它绝不等于「无 pending」。 */
+const UNAVAILABLE_DIAGNOSTIC = {
+  schemaVersion: "supervisor-diagnostics.v1", availability: "unavailable",
+  code: "SUPERVISOR_DIAGNOSTICS_UNAVAILABLE", requests: [], receipts: [], complete: false,
+};
+const DIAGNOSTIC_REQUEST_KEYS = ["createdAt", "expiresAt", "ownerGeneration", "requestGeneration", "requestId", "runId", "state"];
+/** D2 的唯一 state 文件名（与 supervisor-control-plane.ts 的 stateKey 一致）。 */
+const supervisorStateFile = (persistenceRoot, rootSessionId) =>
+  join(persistenceRoot, `supervisor-${createHash("sha256").update(rootSessionId).digest("hex")}.json`);
+
+const canaryError = () => Object.assign(new Error(`open '${SUPERVISOR_CANARY_PATH}' failed: ${SUPERVISOR_CANARY_BODY}`), {
+  code: "authority_store_unavailable", cause: new Error(SUPERVISOR_CANARY_DIGEST),
+});
+
+function assertNoCanary(value, label) {
+  const text = JSON.stringify(value) ?? "";
+  for (const canary of SUPERVISOR_CANARIES) assert.equal(text.includes(canary), false, `${label} 泄漏 canary：${canary}`);
+}
+
+/** 合法 correlation（producer 形状），只用于验证敏感关联事实不进诊断投影。 */
+function supervisorCorrelation() {
+  return {
+    asyncDir: SUPERVISOR_CANARY_PATH, pid: 7, lifecycleSessionId: "lifecycle-canary", processBirth: "7:1.5",
+    sessionFile: SUPERVISOR_CANARY_PATH, childSessionId: "child-canary", toolCallId: "tool-canary",
+    agent: "executor", childIndex: 0, reason: "need_decision", requestBodyDigest: SUPERVISOR_CANARY_DIGEST,
+  };
+}
+
+const ownedPlaneOptions = (rootSessionId, overrides = {}) => ({
+  readOwnerReceipt: async (runId) => ({ runId, rootSessionId, ownerGeneration: 1 }),
+  readRuntime: async (runId) => ({ runId, ownerGeneration: 1, liveRunEpoch: 4, running: true, steerable: true }),
+  ...overrides,
+});
+const unownedPlaneOptions = (overrides = {}) => ({
+  readOwnerReceipt: async () => { throw Object.assign(new Error("non-workspace run"), { code: "unknown_run" }); },
+  readRuntime: async (runId) => ({ runId, running: true, steerable: true }),
+  ...overrides,
+});
+
+/** 经公开 createTypedSubagentExtension 组装一个 supervisor 工具现场（不改 production 接线）。 */
+function createSupervisorScenario({ plane, native, rootSessionId = "diag-root-1", resolveRootSessionId, diagnosticSink }) {
+  const pi = createPi();
+  const adapter = createSupervisorAdapter();
+  const nativeActions = [];
+  adapter.bind(async (_toolCallId, params) => {
+    nativeActions.push(params?.action);
+    if (params?.action === "reply" && native?.throwWith) throw native.throwWith;
+    return native?.result ?? { content: [{ type: "text", text: "native" }] };
+  });
+  createTypedSubagentExtension(pi, {
+    rpc: createRpc(), cleanupStore: {}, supervisorAdapter: adapter, supervisorControlPlane: plane,
+    ...(resolveRootSessionId === null ? {} : { resolveRootSessionId: resolveRootSessionId ?? ((sessionManager) => sessionManager.getSessionId()) }),
+    ...(diagnosticSink ? { diagnosticSink } : {}),
+  });
+  const host = { cwd: "/repo", sessionManager: { getSessionId: () => rootSessionId } };
+  const ingress = async (details) => pi.handlers.get("message_end")[0]({ message: { customType: "subagent_supervisor_request", details } }, host);
+  const supervisor = (params) => pi.tools[2].execute("supervisor-tool-call", params, signal, undefined, host);
+  const count = (action) => nativeActions.filter((entry) => entry === action).length;
+  return { pi, host, ingress, supervisor, count, nativeActions };
+}
+
+test("supervisor status 透传 native content/details 并附本 root 的只读白名单诊断", async () => {
+  const plane = createSupervisorControlPlane(ownedPlaneOptions("diag-root-1", { randomId: () => "status-receipt" }));
+  const nativeResult = Object.freeze({
+    content: Object.freeze([{ type: "text", text: "native status body" }]),
+    isError: false,
+    details: Object.freeze({ pending: 1, nativeField: "kept" }),
+  });
+  const scenario = createSupervisorScenario({ plane, native: { result: nativeResult } });
+  await scenario.ingress({ id: "ask-b", runId: "run-b", agent: "executor", reason: "need_decision", expectsReply: true, correlation: supervisorCorrelation() });
+  await scenario.ingress({ id: "ask-a", runId: "run-a", agent: "executor", reason: "need_decision", expectsReply: true });
+  assert.deepEqual(scenario.pi.messages, [], "合法注册不得产生失败消息");
+
+  const status = await scenario.supervisor({ action: "status" });
+  assert.equal(status.content, nativeResult.content, "content 必须按引用原样透传，不改写 raw");
+  assert.equal(status.isError, false);
+  assert.equal(status.details.pending, 1, "原 details 字段完整保留");
+  assert.equal(status.details.nativeField, "kept");
+  assert.deepEqual(Object.keys(nativeResult.details).sort(), ["nativeField", "pending"], "native 结果对象不得被就地改写");
+  const diagnostic = status.details.supervisorDiagnostic;
+  assert.equal(diagnostic.schemaVersion, "supervisor-diagnostics.v1");
+  assert.equal(diagnostic.availability, "available");
+  assert.equal(diagnostic.complete, true);
+  assert.equal("code" in diagnostic, false, "available 包络不带错误码");
+  assert.deepEqual(diagnostic.requests.map((request) => request.requestId), ["ask-a", "ask-b"], "按 ID 稳定排序");
+  for (const request of diagnostic.requests) assert.deepEqual(Object.keys(request).sort(), DIAGNOSTIC_REQUEST_KEYS, "request 投影只能是白名单字段");
+  assert.deepEqual(diagnostic.receipts, []);
+  assert.equal(scenario.count("status"), 1, "native status 只透传一次");
+  assertNoCanary(diagnostic, "status 诊断");
+});
+
+test("supervisor status 的 replyTo 只作 requestId 过滤，只读且不触发 TTL 改写", async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), "supervisor-status-readonly-"));
+  try {
+    let clock = 1_000;
+    const options = { ...ownedPlaneOptions("status-root-2"), persistenceRoot: stateRoot, now: () => clock };
+    const seeding = createSupervisorControlPlane(options);
+    assert.equal((await seeding.registerSupervisorRequest({ id: "ask-kept", runId: "run-kept", reason: "need_decision" }, "status-root-2")).status, "registered");
+    assert.equal((await seeding.registerSupervisorRequest({ id: "ask-filtered", runId: "run-filtered", reason: "need_decision" }, "status-root-2")).status, "registered");
+    const stateFile = supervisorStateFile(stateRoot, "status-root-2");
+    const bytesBefore = await readFile(stateFile);
+    const mtimeBefore = (await stat(stateFile)).mtimeMs;
+
+    const realPlane = createSupervisorControlPlane(options);
+    const readCalls = [];
+    const plane = { ...realPlane, readDiagnostics: (root, filter) => { readCalls.push({ root, filter }); return realPlane.readDiagnostics(root, filter); } };
+    const scenario = createSupervisorScenario({ plane, rootSessionId: "status-root-2" });
+    // 远超 20 分钟 TTL：事务路径会改写 expired，只读诊断必须保持存储观察值。
+    clock += 60 * 60 * 1000;
+    const filtered = await scenario.supervisor({ action: "status", replyTo: "ask-kept" });
+    assert.deepEqual(readCalls, [{ root: "status-root-2", filter: { requestId: "ask-kept" } }], "root 只能来自当前 Host authority，replyTo 只能作过滤");
+    const diagnostic = filtered.details.supervisorDiagnostic;
+    assert.equal(diagnostic.availability, "available");
+    assert.deepEqual(diagnostic.requests.map((request) => [request.requestId, request.state]), [["ask-kept", "pending"]], "requestId 过滤只收窄，且不得把 TTL 后的 pending 改写为 expired");
+    assert.deepEqual(diagnostic.receipts, []);
+
+    const all = await scenario.supervisor({ action: "status" });
+    assert.deepEqual(readCalls[1], { root: "status-root-2", filter: undefined }, "无 replyTo 时不传过滤条件");
+    assert.deepEqual(all.details.supervisorDiagnostic.requests.map((request) => request.requestId), ["ask-filtered", "ask-kept"]);
+
+    assert.deepEqual(await readFile(stateFile), bytesBefore, "只读诊断不得改变 durable state 字节");
+    assert.equal((await stat(stateFile)).mtimeMs, mtimeBefore, "只读诊断不得改变 durable state mtime");
+    // 对照：TTL 收敛仍只属于事务路径（loadRoot），只读诊断既不改写也不冒充。
+    const intent = { schemaVersion: "supervisor-control-intent.v1", intentId: "ttl-probe", runId: "run-kept", rootSessionId: "status-root-2", ownerGeneration: 1, kind: "reply", requestId: "ask-kept", requestGeneration: 1, payloadDigest: supervisorCanonicalDigest("approved") };
+    assert.equal((await realPlane.resolveSupervisorControl(intent, "status-root-2")).code, "SUPERVISOR_REQUEST_NOT_PENDING", "事务路径 loadRoot 已把过期 pending 收敛为 expired，TTL 判定未被诊断接线改变");
+    assert.equal(realPlane.snapshot().requests.find((request) => request.requestId === "ask-kept").state, "expired");
+    const afterTransaction = await realPlane.readDiagnostics("status-root-2", { requestId: "ask-kept" });
+    assert.deepEqual(afterTransaction.requests.map((request) => [request.requestId, request.state]), [["ask-kept", "pending"]], "过期未写回存储：只读诊断仍报告存储观察值");
+    assert.deepEqual(await readFile(stateFile), bytesBefore, "对照路径也未产生额外 durable 写入");
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+for (const scenario of [
+  { name: "root resolver 抛异常", resolveRootSessionId: () => { throw new Error("ROOT_SESSION_UNAVAILABLE"); } },
+  { name: "未接线 root resolver", resolveRootSessionId: null },
+  { name: "root resolver 返回非字符串", resolveRootSessionId: () => undefined },
+  { name: "控制面未启用", enabled: () => false },
+  { name: "控制面缺 readDiagnostics", withoutReadDiagnostics: true },
+]) {
+  test(`owner/root 不明（${scenario.name}）时 status 附 unavailable，不查询任何 root`, async () => {
+    const realPlane = createSupervisorControlPlane(ownedPlaneOptions("other-root"));
+    await realPlane.registerSupervisorRequest({ id: "ask-other", runId: "run-other", reason: "need_decision" }, "other-root");
+    const readCalls = [];
+    const plane = {
+      ...realPlane,
+      readDiagnostics: (root, filter) => { readCalls.push({ root, filter }); return realPlane.readDiagnostics(root, filter); },
+      ...(scenario.enabled ? { enabled: scenario.enabled } : {}),
+    };
+    const exposed = scenario.withoutReadDiagnostics ? (() => { const { readDiagnostics: _ignored, ...rest } = plane; return rest; })() : plane;
+    const nativeResult = { content: [{ type: "text", text: "native status" }], details: { nativeField: "kept" } };
+    const fixture = createSupervisorScenario({ plane: exposed, native: { result: nativeResult }, rootSessionId: "diag-root-1", resolveRootSessionId: scenario.resolveRootSessionId });
+    const status = await fixture.supervisor({ action: "status", replyTo: "ask-other" });
+    assert.deepEqual(status.details.supervisorDiagnostic, UNAVAILABLE_DIAGNOSTIC, "unavailable 必须是固定 fail-closed 包络");
+    assert.deepEqual(readCalls, [], "root 不可验证/控制面未启用时不得调用 readDiagnostics，也不得改查其它 root");
+    assert.equal(status.content, nativeResult.content, "native content 原样透传");
+    assert.equal(status.details.nativeField, "kept", "原 details 字段保留");
+    assert.equal(fixture.count("status"), 1);
+  });
+}
+
+for (const malformed of [
+  { name: "非对象", value: "supervisor-diagnostics.v1" },
+  { name: "错 schemaVersion", value: { schemaVersion: "supervisor-diagnostics.v2", availability: "available", requests: [], receipts: [], complete: true } },
+  { name: "白名单外顶层键", value: { schemaVersion: "supervisor-diagnostics.v1", availability: "available", requests: [], receipts: [], complete: true, leaked: SUPERVISOR_CANARY_PATH } },
+  { name: "request 行携带路径", value: { schemaVersion: "supervisor-diagnostics.v1", availability: "available", requests: [{ requestId: SUPERVISOR_CANARY_PATH, runId: "run-1", state: "pending", ownerGeneration: 1, requestGeneration: 1, createdAt: 1, expiresAt: 2 }], receipts: [], complete: true } },
+  { name: "unavailable 却携带事实", value: { schemaVersion: "supervisor-diagnostics.v1", availability: "unavailable", code: "SUPERVISOR_DIAGNOSTICS_UNAVAILABLE", requests: [{ requestId: "ask-1", runId: "run-1", state: "pending", ownerGeneration: 1, requestGeneration: 1, createdAt: 1, expiresAt: 2 }], receipts: [], complete: false } },
+  { name: "receipt 行缺 consumed", value: { schemaVersion: "supervisor-diagnostics.v1", availability: "available", requests: [], receipts: [{ schemaVersion: "supervisor-receipt-diagnostic.v1", receiptId: "receipt-1", runId: "run-1", status: "queued" }], complete: true } },
+]) {
+  test(`readDiagnostics 返回畸形包络（${malformed.name}）时 status fail closed 成 unavailable`, async () => {
+    const plane = { readDiagnostics: async () => malformed.value, enabled: () => true };
+    const status = await createSupervisorScenario({ plane }).supervisor({ action: "status" });
+    assert.deepEqual(status.details.supervisorDiagnostic, UNAVAILABLE_DIAGNOSTIC);
+    assertNoCanary(status.details, "status details");
+  });
+}
+
+test("readDiagnostics 抛异常时 status 仍返回 native 结果并附 unavailable", async () => {
+  const readCalls = [];
+  const plane = { readDiagnostics: async (root) => { readCalls.push(root); throw canaryError(); }, enabled: () => true };
+  const nativeResult = { content: [{ type: "text", text: "native status" }], isError: false, details: { nativeField: "kept" } };
+  const status = await createSupervisorScenario({ plane, native: { result: nativeResult } }).supervisor({ action: "status" });
+  assert.deepEqual(readCalls, ["diag-root-1"], "只查当前 Host root");
+  assert.deepEqual(status.details.supervisorDiagnostic, UNAVAILABLE_DIAGNOSTIC);
+  assert.equal(status.content, nativeResult.content);
+  assert.equal(status.isError, false, "诊断失败不得把 status 变成错误结果");
+  assertNoCanary(status, "status 结果");
+});
+
+test("supervisor reply 仅在 committed 后附 D0 receipt 投影：queued≠consumed，幂等/失败不伪装成功", async () => {
+  const plane = createSupervisorControlPlane(unownedPlaneOptions({ randomId: () => "reply-receipt" }));
+  const nativeResult = Object.freeze({ content: Object.freeze([{ type: "text", text: "native reply delivered" }]), details: Object.freeze({ nativeField: "kept" }) });
+  const scenario = createSupervisorScenario({ plane, native: { result: nativeResult }, rootSessionId: "reply-root-1" });
+  await scenario.ingress({ id: "ask-1", runId: "run-1", agent: "delegate", reason: "need_decision", expectsReply: true });
+
+  const reply = await scenario.supervisor({ action: "reply", replyTo: "ask-1", message: "approved" });
+  assert.equal(reply.content, nativeResult.content, "reply 文本与 native sender 结果原样");
+  assert.equal(reply.details.nativeField, "kept");
+  assert.equal("supervisorDiagnostic" in reply.details, false, "reply 不附 status 诊断");
+  assert.deepEqual(reply.details.deliveryReceiptDiagnostic, {
+    schemaVersion: "supervisor-receipt-diagnostic.v1", receiptId: "receipt-reply-receipt", runId: "run-1",
+    requestId: "ask-1", status: "queued", consumed: false, requestGeneration: 1, ownerGeneration: 1,
+  }, "只投影本次 committed.receipt，queued 不等于 consumed");
+  assert.equal(scenario.count("reply"), 1);
+  assert.equal(plane.snapshot().requests[0].state, "pending", "queued 回执不得声称 child 已消费");
+
+  const replay = await scenario.supervisor({ action: "reply", replyTo: "ask-1", message: "approved" });
+  assert.equal(replay.isError, true);
+  assert.equal(replay.details.code, "SUPERVISOR_DELIVERY_IDEMPOTENT");
+  assert.equal("deliveryReceiptDiagnostic" in replay.details, false, "幂等路径不得伪装成本次提交成功");
+  assert.equal(scenario.count("reply"), 1, "幂等路径不得再次投递");
+
+  // native 投递失败：抛原错误，只留下 failed 回执事实。
+  const failing = createSupervisorScenario({ plane, native: { result: nativeResult, throwWith: new Error("native delivery failed") }, rootSessionId: "reply-root-1" });
+  await failing.ingress({ id: "ask-2", runId: "run-2", agent: "delegate", reason: "need_decision", expectsReply: true });
+  await assert.rejects(failing.supervisor({ action: "reply", replyTo: "ask-2", message: "approved" }), /native delivery failed/);
+
+  // 终局消费：只有真实 observe 能把 queued 推进为 delivered/consumed。
+  const consumed = await plane.observeReplyConsumption({ runId: "run-1", requestId: "ask-1", payloadDigest: supervisorCanonicalDigest("approved") }, "reply-root-1");
+  assert.equal(consumed.status, "committed");
+  assert.equal(consumed.receipt.consumed, true);
+  const status = await scenario.supervisor({ action: "status" });
+  const diagnostic = status.details.supervisorDiagnostic;
+  assert.equal(diagnostic.availability, "available");
+  assert.deepEqual(diagnostic.receipts.map((entry) => [entry.requestId, entry.status, entry.consumed]), [["ask-1", "delivered", true], ["ask-2", "failed", false]]);
+  assert.deepEqual(diagnostic.requests.map((entry) => [entry.requestId, entry.state]), [["ask-1", "replied"], ["ask-2", "failed"]]);
+  assert.equal("idempotencyKey" in diagnostic.receipts[0], false, "receipt 投影不得暴露 idempotencyKey");
+  assertNoCanary(diagnostic, "status 诊断");
+});
+
+test("真实控制面 producer 经文件 sink 落盘 owner/runtime/persistence 诊断且 canary 不落盘", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "supervisor-diagnostic-plane-"));
+  const stateRoot = await mkdtemp(join(tmpdir(), "supervisor-diagnostic-state-"));
+  try {
+    const file = join(directory, "trace.jsonl");
+    await writeFile(file, "", { mode: 0o600 });
+    const sink = createSubagentDispatchTraceFileSink(file);
+    const error = canaryError();
+    // owner-read-failed / runtime-read-failed：真实公开 identityForRun，且三态不变。
+    const unavailablePlane = createSupervisorControlPlane({ diagnosticSink: sink, readOwnerReceipt: async () => { throw error; }, readRuntime: async () => { throw error; } });
+    const identity = await unavailablePlane.identityForRun("run-diag-1");
+    assert.equal(identity.ownerState, "unavailable", "诊断接线不得改变 fail-closed owner 三态");
+    assert.equal(identity.runtime, undefined);
+    // persistence-rejected：TTL 后真实 loadRoot producer。
+    let clock = 1_000;
+    const persistedOptions = { persistenceRoot: stateRoot, diagnosticSink: sink, now: () => clock, readOwnerReceipt: async () => { throw Object.assign(new Error("non-workspace"), { code: "unknown_run" }); } };
+    const seeding = createSupervisorControlPlane(persistedOptions);
+    assert.equal((await seeding.registerSupervisorRequest({ id: "ask-ttl", runId: "run-ttl", reason: "need_decision" }, "sink-root-1")).status, "registered");
+    clock += 21 * 60 * 1000;
+    const reloaded = createSupervisorControlPlane(persistedOptions);
+    assert.equal(await reloaded.ready("sink-root-1"), true);
+    assert.equal(reloaded.snapshot().requests[0].state, "expired", "TTL 判定仍由事务路径拥有");
+    // persistence-corrupt：损坏 state 的真实 producer。
+    const stateFile = supervisorStateFile(stateRoot, "sink-root-1");
+    const state = JSON.parse(await readFile(stateFile, "utf8"));
+    state.value.requests[0].requestDigest = `sha256:${"f".repeat(64)}`;
+    await writeFile(stateFile, JSON.stringify(state));
+    const corrupted = createSupervisorControlPlane(persistedOptions);
+    assert.equal(await corrupted.ready("sink-root-1"), false);
+    sink.dispose();
+
+    const text = await readFile(file, "utf8");
+    const records = text.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    const phases = records.map((record) => record.phase);
+    for (const expected of ["supervisor-owner-read-failed", "supervisor-runtime-read-failed", "supervisor-persistence-rejected", "supervisor-persistence-corrupt"]) {
+      assert.ok(phases.includes(expected), `缺少真实 producer 诊断 ${expected}：${JSON.stringify(phases)}`);
+    }
+    for (const record of records) {
+      assert.equal(record.version, 1);
+      assert.equal(record.eventKind, "supervisor-diagnostic");
+      assert.equal(Number.isSafeInteger(record.monotonicMs), true);
+      assert.equal("error" in record || "cause" in record || "type" in record, false);
+    }
+    assert.equal(records.find((record) => record.phase === "supervisor-persistence-rejected").errorCode, "SUPERVISOR_REQUEST_EXPIRED");
+    for (const canary of SUPERVISOR_CANARIES) assert.equal(text.includes(canary), false, `诊断文件泄漏 canary：${canary}`);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("真实 extension/replay producer 经文件 sink 落盘 registration/compensation/replay 诊断", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "supervisor-diagnostic-extension-"));
+  try {
+    const file = join(directory, "trace.jsonl");
+    await writeFile(file, "", { mode: 0o600 });
+    const sink = createSubagentDispatchTraceFileSink(file);
+    const error = canaryError();
+    // registration-failed：真实 message_end ingress（owner authority 不可用）。
+    const unavailablePlane = createSupervisorControlPlane({ diagnosticSink: sink, readOwnerReceipt: async () => { throw error; }, readRuntime: async () => { throw error; } });
+    const registration = createSupervisorScenario({ plane: unavailablePlane, diagnosticSink: sink });
+    await registration.ingress({ id: "ask-reg", runId: "run-reg", reason: "need_decision" });
+    assert.equal(registration.pi.messages.at(-1)?.customType, "subagent_supervisor_registration_failed");
+    assert.equal(registration.pi.messages.at(-1)?.details?.code, "SUPERVISOR_OWNER_UNAVAILABLE");
+    // delivery-compensation-failed：真实 reply 链路 + 被阻塞的补偿提交。
+    const realPlane = createSupervisorControlPlane({ ...unownedPlaneOptions(), diagnosticSink: sink, randomId: () => "compensation-receipt" });
+    const blockedPlane = { ...realPlane, async commitDelivery(input, root) { if (input.success === false) throw error; return realPlane.commitDelivery(input, root); } };
+    const compensation = createSupervisorScenario({ plane: blockedPlane, native: { result: { content: [{ type: "text", text: "native" }] }, throwWith: new Error("native delivery failed") }, rootSessionId: "compensation-root-1", diagnosticSink: sink });
+    await compensation.ingress({ id: "ask-comp", runId: "run-comp", agent: "delegate", reason: "need_decision", expectsReply: true });
+    await assert.rejects(compensation.supervisor({ action: "reply", replyTo: "ask-comp", message: "approved" }), /supervisor reply delivery and compensation failed/);
+    // replay-failed：真实 createSupervisorReplay producer（当前无 production 实例化点）。
+    // supervisor-replay.ts 依赖链上的 durable-contract.ts 使用 TS parameter property，
+    // Node strip-only 模式无法直接 import，因此沿用本文件已有的 jiti 实例。
+    const { createSupervisorReplay } = await runtimeJiti.import("../packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-replay.ts");
+    const { createOwnerReceipt } = await runtimeJiti.import("../packages/pi-subagents-enhanced/src/subagent-dispatch/authority-contract.ts");
+    const replay = createSupervisorReplay({
+      outbox: {}, barrier: { beginReplayBarrier() { throw error; } }, consumerId: "supervisor-1",
+      ownerValidator: async () => true, cursorValidator: async () => true,
+      deliverySink: { async hasDelivered() { return false; }, async deliver() {} }, diagnosticSink: sink,
+    });
+    const replayed = await replay.replaySupervisor({
+      rootSessionId: "root-1", runId: "run-1",
+      ownerReceipt: createOwnerReceipt({ receiptId: "owner-1", rootSessionId: "root-1", runId: "run-1", ownerGeneration: 2, processBirth: "birth-1", revision: 1, authorizationReference: `sha256:${"a".repeat(64)}` }),
+      after: { rootSessionId: "root-1", runId: "run-1", ownerGeneration: 2, epoch: 3, sequence: 0 }, batchSize: 1,
+    });
+    assert.equal(replayed.status, "blocked-unknown", "replay 失败仍 fail closed");
+    sink.dispose();
+
+    const text = await readFile(file, "utf8");
+    const records = text.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    const phases = records.map((record) => record.phase);
+    for (const expected of ["supervisor-registration-failed", "supervisor-delivery-compensation-failed", "supervisor-replay-failed"]) {
+      assert.ok(phases.includes(expected), `缺少真实 producer 诊断 ${expected}：${JSON.stringify(phases)}`);
+    }
+    const registrationRecord = records.find((record) => record.phase === "supervisor-registration-failed");
+    assert.deepEqual({ ...registrationRecord, monotonicMs: 0 }, { version: 1, eventKind: "supervisor-diagnostic", phase: "supervisor-registration-failed", monotonicMs: 0, requestId: "ask-reg", runId: "run-reg", errorCode: "SUPERVISOR_OWNER_UNAVAILABLE" });
+    assert.deepEqual({ ...records.find((record) => record.phase === "supervisor-delivery-compensation-failed"), monotonicMs: 0 }, { version: 1, eventKind: "supervisor-diagnostic", phase: "supervisor-delivery-compensation-failed", monotonicMs: 0 });
+    for (const record of records) {
+      assert.equal(record.version, 1);
+      assert.equal(record.eventKind, "supervisor-diagnostic");
+      assert.equal("error" in record || "cause" in record || "secondaryError" in record || "compensation" in record || "deliveryPhase" in record, false);
+    }
+    for (const canary of SUPERVISOR_CANARIES) assert.equal(text.includes(canary), false, `诊断文件泄漏 canary：${canary}`);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

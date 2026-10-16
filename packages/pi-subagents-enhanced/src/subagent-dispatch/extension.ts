@@ -14,13 +14,21 @@ import { createHeadlessSubagentApi } from "./runtime-membrane.ts";
 import { buildWorkflowSpawn, createWorkflowChildStartCollector, childStartTimeoutMs } from "./workflow-spawn.ts";
 import { getTitleRegistry, normalizeSubagentTitle } from "./title-registry.ts";
 import { createSupervisorAdapter, createSupervisorTool } from "./supervisor-adapter.ts";
-import { supervisorCanonicalDigest } from "./supervisor-control-plane.ts";
+import { supervisorCanonicalDigest, type SupervisorDiagnosticsRequestV1, type SupervisorDiagnosticsV1 } from "./supervisor-control-plane.ts";
 import { findGoalRunCoordinator } from "./root-broker-registry.ts";
 import { resolveModelCandidates, resolveModelSelection, type ModelSelectionWarning } from "./model-selection.ts";
 import { createRunAuthorization } from "./run-authorization.ts";
 import { createAuthorizedDispatch } from "./execution-contract.ts";
 import { dispatchExecution, createGenericDispatchAdapter, createCodingDispatchAdapter } from "./execution.ts";
 import { createSubagentRpcFailureDetails } from "./errors.ts";
+import {
+  projectRpcNegotiation,
+  projectSupervisorReceipt,
+  projectSupervisorTrace,
+  type RpcNegotiationDiagnosticV1,
+  type RpcNegotiationDispatchPath,
+  type RpcNegotiationDispatchPathProjection,
+} from "./diagnostics.ts";
 import { registerRequiredChildExtensions } from "pi-subagents/required-child-extensions";
 
 
@@ -129,6 +137,220 @@ const WORKING_STATE_EVENTS = new Set([
   "delivery-result", "agent-start", "agent-end", "agent-settled", "ui-prompt-start", "ui-prompt-end",
 ]);
 
+/** D0 投影允许的 dispatchPath 字面量；白名单外一律拒绝，不回显调用方取值。 */
+const RPC_NEGOTIATION_DISPATCH_PATHS: readonly RpcNegotiationDispatchPathProjection[] = Object.freeze([
+  "coding", "generic", "unknown",
+]);
+/** D0 投影的 7 个布尔结论字段；缺任一字段或类型不符即拒绝整条投影。 */
+const RPC_NEGOTIATION_BOOLEAN_FIELDS = Object.freeze([
+  "capabilitiesEnvelopePresent", "versionOk", "spawnMethodOk", "sessionIdPresent",
+  "lifecycleIdentityPresent", "sessionCwdPresent", "cwdEqual",
+]);
+/** missingCapabilities 只可能是 4 个既有安全 capability 名与复合身份标签。 */
+const RPC_NEGOTIATION_MISSING_WHITELIST = Object.freeze([
+  "asyncSpawn", "processTerminalProof", "launchResolvedExtensions",
+  "runtimeAcknowledgedExtensions", "rpc:v1/session",
+]);
+/** 完整键集：出现白名单外的键即视为畸形/投毒输入，整条投影 fail closed。 */
+const RPC_NEGOTIATION_ALLOWED_KEYS = Object.freeze([
+  "schemaVersion", "stage", "dispatchPath", ...RPC_NEGOTIATION_BOOLEAN_FIELDS, "missingCapabilities",
+]);
+
+/**
+ * D1：trace sink 侧的 negotiation 白名单再校验。只有结构完整的 D0 投影才允许落盘，
+ * 且逐字段重建（绝不展开原对象），因此调用方自带的 error.detail、正文、路径或未知
+ * capability 名都不可能借该嵌套字段进入诊断文件。
+ */
+function safeRpcNegotiationDiagnostic(value: unknown): RpcNegotiationDiagnosticV1 | undefined {
+  // 本文件的 isRecord() 没有类型谓词，在此就地窄化，不改动共享判定函数。
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const projection = value as Record<string, unknown>;
+  for (const key of Object.keys(projection)) {
+    if (!RPC_NEGOTIATION_ALLOWED_KEYS.includes(key)) return undefined;
+  }
+  if (projection.schemaVersion !== "rpc-negotiation-diagnostic.v1") return undefined;
+  if (projection.stage !== "spawn-capability-assertion") return undefined;
+  const dispatchPath = RPC_NEGOTIATION_DISPATCH_PATHS.find((name) => name === projection.dispatchPath);
+  if (dispatchPath === undefined) return undefined;
+  for (const field of RPC_NEGOTIATION_BOOLEAN_FIELDS) {
+    if (typeof projection[field] !== "boolean") return undefined;
+  }
+  const missing = projection.missingCapabilities;
+  if (!Array.isArray(missing)) return undefined;
+  const missingCapabilities: string[] = [];
+  for (const name of missing) {
+    if (typeof name !== "string" || !RPC_NEGOTIATION_MISSING_WHITELIST.includes(name)) return undefined;
+    if (!missingCapabilities.includes(name)) missingCapabilities.push(name);
+  }
+  return {
+    schemaVersion: "rpc-negotiation-diagnostic.v1",
+    stage: "spawn-capability-assertion",
+    dispatchPath,
+    capabilitiesEnvelopePresent: projection.capabilitiesEnvelopePresent as boolean,
+    versionOk: projection.versionOk as boolean,
+    spawnMethodOk: projection.spawnMethodOk as boolean,
+    sessionIdPresent: projection.sessionIdPresent as boolean,
+    lifecycleIdentityPresent: projection.lifecycleIdentityPresent as boolean,
+    sessionCwdPresent: projection.sessionCwdPresent as boolean,
+    cwdEqual: projection.cwdEqual as boolean,
+    missingCapabilities: Object.freeze(missingCapabilities),
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * D3：supervisor 诊断安全包络（status/reply 只读投影 + trace sink 独立分支）
+ * ------------------------------------------------------------------ */
+
+/** 与 diagnostics.ts / supervisor-control-plane.ts 同规则的 safe ID 形态：路径、正文、oversize 一律拒绝。 */
+const SAFE_DIAGNOSTIC_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
+/** D2 readDiagnostics 的唯一 schemaVersion 与唯一 unavailable code（固定值，不含任何底层错误细节）。 */
+const SUPERVISOR_DIAGNOSTICS_SCHEMA_VERSION = "supervisor-diagnostics.v1";
+const SUPERVISOR_DIAGNOSTICS_UNAVAILABLE_CODE = "SUPERVISOR_DIAGNOSTICS_UNAVAILABLE";
+/** 包络顶层键集；出现白名单外的键即视为畸形/投毒输入，整份投影 fail closed。 */
+const SUPERVISOR_DIAGNOSTICS_ALLOWED_KEYS = Object.freeze([
+  "schemaVersion", "availability", "code", "requests", "receipts", "complete",
+]);
+/** request 投影行的精确白名单键集与状态枚举（计划 D2/D3 字段）。 */
+const SUPERVISOR_DIAGNOSTIC_REQUEST_KEYS = Object.freeze([
+  "requestId", "runId", "state", "ownerGeneration", "requestGeneration", "createdAt", "expiresAt",
+]);
+const SUPERVISOR_REQUEST_STATES: readonly string[] = Object.freeze([
+  "pending", "replying", "replied", "expired", "failed",
+]);
+/** D2 每组 50 条上限；超出说明合同被违背，整份投影 fail closed，不做部分透传。 */
+const SUPERVISOR_DIAGNOSTIC_GROUP_LIMIT = 50;
+
+/** 与既有 trace 记录一致的单调钟（毫秒）；只用于诊断包络层，不作为业务时间事实。 */
+function monotonicNowMs(): number {
+  return Math.floor(Number(process.hrtime.bigint() / 1_000_000n));
+}
+
+/** root 不可验证或读取失败时的 fail-closed 包络；绝不表达成「无 pending」。 */
+function unavailableSupervisorDiagnostics(): SupervisorDiagnosticsV1 {
+  return Object.freeze({
+    schemaVersion: SUPERVISOR_DIAGNOSTICS_SCHEMA_VERSION,
+    availability: "unavailable" as const,
+    code: SUPERVISOR_DIAGNOSTICS_UNAVAILABLE_CODE,
+    requests: Object.freeze([]),
+    receipts: Object.freeze([]),
+    complete: false,
+  });
+}
+
+const safeDiagnosticId = (value: unknown): string | undefined =>
+  typeof value === "string" && SAFE_DIAGNOSTIC_ID.test(value) && !value.includes("..") ? value : undefined;
+
+const boundedClock = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+
+const positiveGeneration = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 1 ? value : undefined;
+
+/** request 投影行：逐字段重建（绝不展开原对象），任一字段畸形即拒绝整份包络。 */
+function safeSupervisorDiagnosticRequest(value: unknown): SupervisorDiagnosticsRequestV1 | undefined {
+  if (!isRecord(value)) return undefined;
+  const row = value as Record<string, unknown>;
+  for (const key of Object.keys(row)) {
+    if (!SUPERVISOR_DIAGNOSTIC_REQUEST_KEYS.includes(key)) return undefined;
+  }
+  const requestId = safeDiagnosticId(row.requestId);
+  const runId = safeDiagnosticId(row.runId);
+  const state = typeof row.state === "string" ? SUPERVISOR_REQUEST_STATES.find((name) => name === row.state) : undefined;
+  const ownerGeneration = positiveGeneration(row.ownerGeneration);
+  const requestGeneration = positiveGeneration(row.requestGeneration);
+  const createdAt = boundedClock(row.createdAt);
+  const expiresAt = boundedClock(row.expiresAt);
+  if (requestId === undefined || runId === undefined || state === undefined || ownerGeneration === undefined
+    || requestGeneration === undefined || createdAt === undefined || expiresAt === undefined) return undefined;
+  return Object.freeze({
+    requestId, runId, state: state as SupervisorDiagnosticsRequestV1["state"],
+    ownerGeneration, requestGeneration, createdAt, expiresAt,
+  });
+}
+
+/**
+ * D3：对 D2 readDiagnostics 的输出再做一次白名单重建后才允许进入工具 details。
+ * receipt 行复用 D0 的 projectSupervisorReceipt（同一权威投影），任何偏离都 fail closed
+ * 成 unavailable，绝不把畸形/未知字段透传给模型或落进会话 details。
+ */
+function safeSupervisorDiagnostics(value: unknown): SupervisorDiagnosticsV1 {
+  if (!isRecord(value)) return unavailableSupervisorDiagnostics();
+  const envelope = value as Record<string, unknown>;
+  for (const key of Object.keys(envelope)) {
+    if (!SUPERVISOR_DIAGNOSTICS_ALLOWED_KEYS.includes(key)) return unavailableSupervisorDiagnostics();
+  }
+  if (envelope.schemaVersion !== SUPERVISOR_DIAGNOSTICS_SCHEMA_VERSION) return unavailableSupervisorDiagnostics();
+  const availability = envelope.availability === "available" || envelope.availability === "unavailable"
+    ? envelope.availability
+    : undefined;
+  if (availability === undefined || typeof envelope.complete !== "boolean") return unavailableSupervisorDiagnostics();
+  // code 只可能是固定 unavailable 码，且只允许出现在 unavailable 包络上。
+  if (envelope.code !== undefined
+    && (availability !== "unavailable" || envelope.code !== SUPERVISOR_DIAGNOSTICS_UNAVAILABLE_CODE)) {
+    return unavailableSupervisorDiagnostics();
+  }
+  if (!Array.isArray(envelope.requests) || !Array.isArray(envelope.receipts)) return unavailableSupervisorDiagnostics();
+  if (envelope.requests.length > SUPERVISOR_DIAGNOSTIC_GROUP_LIMIT
+    || envelope.receipts.length > SUPERVISOR_DIAGNOSTIC_GROUP_LIMIT) return unavailableSupervisorDiagnostics();
+  // unavailable 是 fail-closed 语义，不允许同时携带任何 request/receipt 事实。
+  if (availability === "unavailable" && (envelope.requests.length > 0 || envelope.receipts.length > 0)) {
+    return unavailableSupervisorDiagnostics();
+  }
+  const requests: SupervisorDiagnosticsRequestV1[] = [];
+  for (const raw of envelope.requests) {
+    const projected = safeSupervisorDiagnosticRequest(raw);
+    if (projected === undefined) return unavailableSupervisorDiagnostics();
+    requests.push(projected);
+  }
+  const receipts = [];
+  for (const raw of envelope.receipts) {
+    const projected = projectSupervisorReceipt(raw);
+    if (projected === undefined) return unavailableSupervisorDiagnostics();
+    receipts.push(projected);
+  }
+  return Object.freeze({
+    schemaVersion: SUPERVISOR_DIAGNOSTICS_SCHEMA_VERSION,
+    availability,
+    ...(availability === "unavailable" ? { code: SUPERVISOR_DIAGNOSTICS_UNAVAILABLE_CODE } : {}),
+    requests: Object.freeze(requests),
+    receipts: Object.freeze(receipts),
+    complete: envelope.complete,
+  });
+}
+
+/**
+ * D3：只有 phase/type 声称 `supervisor-` 的记录才进入 sink 的独立 supervisor 分支；
+ * 其余记录的 version/monotonicMs 门禁与既有白名单一字未改。前缀只是廉价预筛，
+ * 9 类枚举的权威判定仍由 D0 projectSupervisorTrace 完成。
+ */
+function supervisorDiagnosticCandidate(entry: unknown): boolean {
+  if (!isRecord(entry)) return false;
+  const record = entry as Record<string, unknown>;
+  const label = typeof record.phase === "string" ? record.phase
+    : typeof record.type === "string" ? record.type : undefined;
+  return label !== undefined && label.startsWith("supervisor-");
+}
+
+/**
+ * D3：只在工具结果的 details 上追加一个诊断字段；content、isError 与其余字段按原值保留，
+ * 原结果对象不被改写（可能是 frozen 或调用方持有的 raw）。无法安全追加时原样返回，
+ * 绝不为了展示诊断而覆盖或重建 raw details。
+ */
+function withSupervisorDiagnosticDetail(
+  result: unknown,
+  key: "supervisorDiagnostic" | "deliveryReceiptDiagnostic",
+  value: unknown,
+) {
+  if (value === undefined || !isRecord(result)) return result;
+  const record = result as Record<string, unknown>;
+  if (record.details !== undefined && !isRecord(record.details)) return result;
+  const details = {
+    ...(isRecord(record.details) ? record.details as Record<string, unknown> : {}),
+    [key]: value,
+  };
+  return { ...record, details };
+}
+
 export function createSubagentDispatchTraceFileSink(file = process.env.PI_SUBAGENT_DISPATCH_TRACE_FILE): (((entry: unknown) => void) & { dispose?: () => void }) | undefined {
   if (file === undefined || file === "") return undefined;
   if (typeof file !== "string") throw new TypeError("subagent dispatch trace path must be a string");
@@ -151,10 +373,29 @@ export function createSubagentDispatchTraceFileSink(file = process.env.PI_SUBAGE
     throw error;
   }
   let closed = false;
-  const sink: ((entry: unknown) => void) & { dispose?: () => void } = (entry: any) => {
-    if (closed) return;
-    if (!entry || entry.version !== 1 || !Number.isSafeInteger(entry.monotonicMs)) return;
-    const record = typeof entry.toolCallId === "string" && TRACE_PHASES.has(entry.phase)
+  /** 唯一写入门禁：0600/O_NOFOLLOW/inode 复核、失败即永久关闭（D1 原样保留，仅提取为局部闭包）。 */
+  const persist = (record: unknown) => {
+    try {
+      const current = lstatSync(file);
+      const held = fstatSync(fd);
+      if (!validate(current) || !validate(held) || current.dev !== opened.dev || current.ino !== opened.ino
+          || held.dev !== opened.dev || held.ino !== opened.ino) {
+        closed = true;
+        closeSync(fd);
+        return;
+      }
+      writeSync(fd, `${JSON.stringify(record)}\n`, undefined, "utf8");
+    } catch {
+      closed = true;
+      try { closeSync(fd); } catch { /* 诊断文件已经不可用。 */ }
+    }
+  };
+  /** 既有 dispatch/working-state 白名单记录（形状、门禁与 D1 完全一致，仅提取为局部函数）。 */
+  const traceRecord = (entry: any) => {
+    if (!entry || entry.version !== 1 || !Number.isSafeInteger(entry.monotonicMs)) return undefined;
+    // D1：只有 tool-failed 可以携带嵌套 negotiation 投影；其余 phase 一律忽略该字段。
+    const negotiation = entry.phase === "tool-failed" ? safeRpcNegotiationDiagnostic(entry.negotiation) : undefined;
+    return typeof entry.toolCallId === "string" && TRACE_PHASES.has(entry.phase)
       ? {
         version: 1, toolCallId: entry.toolCallId, phase: entry.phase, monotonicMs: entry.monotonicMs,
         ...(typeof entry.parentSessionId === "string" ? { parentSessionId: entry.parentSessionId } : {}),
@@ -165,6 +406,7 @@ export function createSubagentDispatchTraceFileSink(file = process.env.PI_SUBAGE
         ...(typeof entry.errorCode === "string" ? { errorCode: entry.errorCode } : {}),
         ...(typeof entry.stage === "string" ? { stage: entry.stage } : {}),
         ...(typeof entry.timestamp === "string" ? { timestamp: entry.timestamp } : {}),
+        ...(negotiation === undefined ? {} : { negotiation }),
       }
       : typeof entry.hostSessionId === "string" && typeof entry.completionOwnerId === "string" && WORKING_STATE_EVENTS.has(entry.event)
         ? {
@@ -182,21 +424,22 @@ export function createSubagentDispatchTraceFileSink(file = process.env.PI_SUBAGE
           ...(typeof entry.deliveryResult === "string" ? { deliveryResult: entry.deliveryResult } : {}),
         }
         : undefined;
-    if (!record) return;
-    try {
-      const current = lstatSync(file);
-      const held = fstatSync(fd);
-      if (!validate(current) || !validate(held) || current.dev !== opened.dev || current.ino !== opened.ino
-          || held.dev !== opened.dev || held.ino !== opened.ino) {
-        closed = true;
-        closeSync(fd);
-        return;
-      }
-      writeSync(fd, `${JSON.stringify(record)}\n`, undefined, "utf8");
-    } catch {
-      closed = true;
-      try { closeSync(fd); } catch { /* 诊断文件已经不可用。 */ }
+  };
+  const sink: ((entry: unknown) => void) & { dispose?: () => void } = (entry: any) => {
+    if (closed) return;
+    // 既有白名单优先：任何原本能落盘的记录形状不变，即使被投毒附加 supervisor-* 字段。
+    const record = traceRecord(entry);
+    if (record !== undefined) {
+      persist(record);
+      return;
     }
+    // D3：supervisor 诊断是独立白名单分支，不受上面 dispatch/working-state 的 version+monotonicMs
+    // 门禁约束（多数 producer 不带这两个字段）；version 与单调钟只在诊断包络层补齐，不补业务
+    // 身份与消费事实。error/cause/secondaryError/compensation 对象、正文、路径、token、payload digest
+    // 均不落盘。未知 supervisor-* phase/type fail closed（整条丢弃），也不回落到其它分支。
+    if (!supervisorDiagnosticCandidate(entry)) return;
+    const supervisor = projectSupervisorTrace(entry, monotonicNowMs());
+    if (supervisor !== undefined) persist(supervisor);
   };
   sink.dispose = () => {
     if (closed) return;
@@ -267,7 +510,7 @@ function lifecycleSessionIdentity(session) {
   return nonempty(identity) ? identity : undefined;
 }
 
-function assertSpawnCapabilities(result, cwd) {
+function assertSpawnCapabilities(result, cwd, dispatchPath: RpcNegotiationDispatchPath) {
   const methods = new Set(Array.isArray(result?.methods) ? result.methods : []);
   const session = result?.session;
   const securityMissing = [];
@@ -295,6 +538,9 @@ function assertSpawnCapabilities(result, cwd) {
     error.code = "CAPABILITY_NEGOTIATION_FAILED";
     error.missingCapabilities = securityMissing;
     error.upgradeStopped = true;
+    // D1：只在失败时附 D0 布尔投影（无正文/路径/身份值）；准入判定、code/message、
+    // missingCapabilities、upgradeStopped 与上面的断言顺序全部保持原样。
+    error.detail = Object.freeze({ negotiation: projectRpcNegotiation(result, cwd, dispatchPath) });
     throw error;
   }
 }
@@ -830,9 +1076,12 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
   const runtimePrompt = renderDispatchPrompt(runtimeIr);
   trace.stage = "rpc-ping";
   const capabilities = await rpc.ping({ diagnostic: { toolCallId, sink: trace } });
+  // D1：把同次 ping 的 D0 安全投影挂在本次调用的 trace 闭包上，供失败 details/trace 使用。
+  // ping 未成功回包时该字段保持未定义，绝不补造投影或保留 raw 回包。
+  trace.rpcNegotiation = projectRpcNegotiation(capabilities, orchestratorCwd, "coding");
   trace.stage = "workflow-spawn";
 
-  assertSpawnCapabilities(capabilities, orchestratorCwd);
+  assertSpawnCapabilities(capabilities, orchestratorCwd, "coding");
   trace.parentSessionId = lifecycleSessionIdentity(capabilities.session);
   await prepareCodingSpawn(runtimeIr, ticket);
   titleRegistry.prepare({ agent: runtimeIr.agent, task: runtimePrompt, title: runtimeIr.title });
@@ -1036,12 +1285,16 @@ async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRe
   const orchestratorCwd = workspace?.originRoot ?? ctx.cwd;
   trace.stage = "rpc-ping";
   const capabilities = await rpc.ping({ diagnostic: { toolCallId, sink: trace } });
+  // D1：generic 的 assertSpawnAllowed 早于统一断言抛出，其错误只带 code/operation，
+  // errors.ts 的白名单会丢弃 error.detail；因此这里先把同次 ping 的 D0 投影挂在本次
+  // 调用的 trace 闭包上，由 execute 的既有 catch 安全合并。缺 ping 时保持未定义。
+  trace.rpcNegotiation = projectRpcNegotiation(capabilities, orchestratorCwd, "generic");
   const negotiatedCapabilities = capabilities?.capabilities
     ? await negotiateCapabilities(rpc, { cwd: orchestratorCwd, diagnostic: { toolCallId, sink: trace }, response: capabilities })
     : undefined;
   negotiatedCapabilities?.assertSpawnAllowed();
 
-  assertSpawnCapabilities(capabilities, orchestratorCwd);
+  assertSpawnCapabilities(capabilities, orchestratorCwd, "generic");
   trace.parentSessionId = lifecycleSessionIdentity(capabilities.session);
   titleRegistry.prepare({ agent: normalizedInput.agent, task: normalizedInput.task, title });
   const workflowKey = `typed-${createId()}`;
@@ -1262,6 +1515,32 @@ async function executeControl(input, rpc, supervisorControlPlane, toolCallId, di
 function createControlledSupervisorAdapter(adapter, supervisorControlPlane, registrationFailures, resolveRootSessionId, diagnosticSink) {
   if (!supervisorControlPlane) return adapter;
   const flights = new Map<string, Promise<unknown>>();
+  /**
+   * D3：status 只读诊断。root 身份只取当前 Host authority（ctx.sessionManager 经
+   * resolveRootSessionId），不接受 agent 参数指定的 root，也不查询其它 root；已有 replyTo
+   * 只能作为 requestId 精确过滤收窄本 root 投影。只调用 D2 的 readDiagnostics（无 TTL
+   * 改写、无 loadRoot/ready/transaction、不铸造 token）；root 不可验证、控制面未启用或
+   * 读取异常一律附 unavailable，绝不解释成「无 pending」。
+   */
+  const readStatusDiagnostic = async (params: any, ctx: any): Promise<SupervisorDiagnosticsV1> => {
+    if (typeof supervisorControlPlane.readDiagnostics !== "function") return unavailableSupervisorDiagnostics();
+    if (supervisorControlPlane.enabled?.() === false) return unavailableSupervisorDiagnostics();
+    let rootSessionId: unknown;
+    try { rootSessionId = resolveRootSessionId?.(ctx?.sessionManager); } catch { rootSessionId = undefined; }
+    if (typeof rootSessionId !== "string" || rootSessionId.length === 0) return unavailableSupervisorDiagnostics();
+    const filter = typeof params?.replyTo === "string" && params.replyTo.length > 0 ? { requestId: params.replyTo } : undefined;
+    try {
+      return safeSupervisorDiagnostics(await supervisorControlPlane.readDiagnostics(rootSessionId, filter));
+    } catch {
+      // 诊断读取不得改变 status 结果；异常同样 fail closed。
+      return unavailableSupervisorDiagnostics();
+    }
+  };
+  // native status 透传不变：先拿原生结果，再在 details 上追加只读投影；content/其余字段原样。
+  const executeStatus = async (toolCallId, params, signal, onUpdate, ctx) => {
+    const result = await adapter.execute(toolCallId, params, signal, onUpdate, ctx);
+    return withSupervisorDiagnosticDetail(result, "supervisorDiagnostic", await readStatusDiagnostic(params, ctx));
+  };
   const executeReply = async (toolCallId, params, signal, onUpdate, ctx) => {
       if (params?.action !== "reply" || supervisorControlPlane.enabled?.() === false) return adapter.execute(toolCallId, params, signal, onUpdate, ctx);
       let hostRootSessionId;
@@ -1292,7 +1571,10 @@ function createControlledSupervisorAdapter(adapter, supervisorControlPlane, regi
         const result = await adapter.execute(toolCallId, params, signal, onUpdate, ctx);
         const committed = await supervisorControlPlane.commitDelivery({ intent: decision.intent }, hostRootSessionId);
 
-        return committed.status === "committed" ? result : controlFailure(committed.code, committed.receipt);
+        if (committed.status !== "committed") return controlFailure(committed.code, committed.receipt);
+        // D3：只投影本次 committed.receipt（不用 snapshot 猜测）。queued 不等于 consumed；
+        // 投影失败（畸形 receipt）时不附字段，也不把提交失败/幂等路径伪装成成功。
+        return withSupervisorDiagnosticDetail(result, "deliveryReceiptDiagnostic", projectSupervisorReceipt(committed.receipt));
       } catch (error) {
         const compensationError = await compensateSupervisorDelivery({ supervisorControlPlane, intent: decision.intent, hostRootSessionId, code: "SUPERVISOR_REPLY_DELIVERY_FAILED", primaryError: error, diagnosticSink, phase: "reply" });
         throw compensationError ? new AggregateError([error, compensationError], "supervisor reply delivery and compensation failed", { cause: error }) : error;
@@ -1301,6 +1583,8 @@ function createControlledSupervisorAdapter(adapter, supervisorControlPlane, regi
   return Object.freeze({
     bind: (...args) => adapter.bind(...args), dispose: () => adapter.dispose?.(), isBound: () => adapter.isBound?.(),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
+      // D3：status 诊断分支必须在 reply 早 return 之前处理，否则 status 永远只能拿到 native 透传。
+      if (params?.action === "status") return executeStatus(toolCallId, params, signal, onUpdate, ctx);
       if (params?.action !== 'reply' || typeof params.replyTo !== 'string') return executeReply(toolCallId, params, signal, onUpdate, ctx);
       const key = params.replyTo;
       const prior = flights.get(key);
@@ -1627,14 +1911,25 @@ export function createTypedSubagentExtension(
         const code = error?.code
           ?? (error instanceof CodingDispatchContractError ? error.code : "SUBAGENT_RPC_FAILED");
         const isRpcFailure = code === "SUBAGENT_RPC_FAILED" || typeof error?.operation === "string";
+        // D1：同次 ping 的已验证 D0 投影；再校验一次，保证 details/trace 只可能出现白名单字段。
+        const negotiation = safeRpcNegotiationDiagnostic(trace.rpcNegotiation);
         const details = isRpcFailure
-          ? createSubagentRpcFailureDetails({
-            taskId: input?.taskId, toolCallId, stage: trace.stage,
-            rpcOperation: error?.operation ?? (trace.stage === "rpc-ping" ? "ping" : trace.stage === "workflow-spawn" ? "spawn" : trace.stage),
-            error,
-          })
+          ? {
+            ...createSubagentRpcFailureDetails({
+              taskId: input?.taskId, toolCallId, stage: trace.stage,
+              rpcOperation: error?.operation ?? (trace.stage === "rpc-ping" ? "ping" : trace.stage === "workflow-spawn" ? "spawn" : trace.stage),
+              error,
+            }),
+            // assertSpawnAllowed 的错误不带 detail，原字段全部保留，只在本 catch 追加投影。
+            ...(negotiation === undefined ? {} : { negotiation }),
+          }
           : error?.detail;
-        trace("tool-failed", { errorCode: code, ...(isRpcFailure ? details : {}) });
+        trace("tool-failed", {
+          errorCode: code,
+          ...(isRpcFailure ? details : {}),
+          // 统一断言失败走非 RPC 分支：details 已由 error.detail 携带投影，trace 单独附白名单字段。
+          ...(isRpcFailure || negotiation === undefined ? {} : { negotiation }),
+        });
         return failure(code, error instanceof Error ? error.message : String(error), details, error?.keypath);
       }
     },

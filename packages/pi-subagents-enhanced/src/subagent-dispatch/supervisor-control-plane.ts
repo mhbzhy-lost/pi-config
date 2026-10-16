@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { DurableStorage } from "./durable-storage.ts";
+import { projectSupervisorReceipt, type SupervisorReceiptDiagnosticV1 } from "./diagnostics.ts";
 
 export type SupervisorRequestState = "pending" | "replying" | "replied" | "expired" | "failed";
 export type SupervisorRequestV1 = {
@@ -20,6 +21,28 @@ export type SupervisorDeliveryReceipt = {
 
 // A non-workspace run has no broker owner generation; only Host session authority can fence its requests.
 const UNOWNED_OWNER_GENERATION = 1;
+/** D2：每组（requests/receipts）最多返回 50 条，超出截断并置 complete=false。 */
+const DIAGNOSTICS_GROUP_LIMIT = 50;
+/** D2：读取失败唯一固定错误码；不携带任何底层错误细节。 */
+const SUPERVISOR_DIAGNOSTICS_UNAVAILABLE = "SUPERVISOR_DIAGNOSTICS_UNAVAILABLE";
+
+/** readDiagnostics 的 request 投影行：白名单字段，绝不含 correlation/requestDigest 等敏感载荷。 */
+export type SupervisorDiagnosticsRequestV1 = {
+  requestId: string; runId: string; state: SupervisorRequestState;
+  ownerGeneration: number; requestGeneration: number; createdAt: number; expiresAt: number;
+};
+
+/** D2：supervisor 自身 root 有界只读诊断快照。unavailable 时为固定 code 的 fail closed，绝不解释成空 pending。 */
+export type SupervisorDiagnosticsV1 = {
+  schemaVersion: "supervisor-diagnostics.v1";
+  availability: "available" | "unavailable";
+  /** 仅 availability === "unavailable" 时存在，固定值，不含任何底层错误文本/cause。 */
+  code?: typeof SUPERVISOR_DIAGNOSTICS_UNAVAILABLE;
+  requests: readonly SupervisorDiagnosticsRequestV1[];
+  receipts: readonly SupervisorReceiptDiagnosticV1[];
+  /** 任一组超过 50 条被截断时为 false。 */
+  complete: boolean;
+};
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const isObject = (v: unknown): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
@@ -268,6 +291,95 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
     const intent = { schemaVersion: 'supervisor-control-intent.v1' as const, intentId: receipt.receiptId, rootSessionId: request.rootSessionId, runId: request.runId, ownerGeneration: request.ownerGeneration, kind: 'reply' as const, requestId: request.requestId, requestGeneration: request.requestGeneration, payloadDigest: observation.payloadDigest };
     return markDeliveryConsumed(intent, hostRootSessionId);
   }
+  // D2：持久化模式下按既有 schema/stateDigest 语义只读重读自身 root 已存 state。
+  // 不做 TTL 过期改写、不写 corruptRoots、不触发诊断 sink、不改任何 Map/Set；
+  // 任何校验失败直接抛出，由 readDiagnostics 统一 fail closed，绝不新增宽容分支。
+  async function readPersistedRootStateForDiagnostics(root: string): Promise<{ requests: SupervisorRequestV1[]; receipts: SupervisorDeliveryReceipt[] }> {
+    if (!storage) throw new Error("diagnostics storage unavailable");
+    const saved: any = await storage.read(stateKey(root));
+    if (!saved) return { requests: [], receipts: [] };
+    const value: any = saved.value;
+    if (!isObject(value) || value.schemaVersion !== "supervisor-state.v1" || value.rootSessionId !== root || !Array.isArray(value.requests) || !Array.isArray(value.receipts) || !Array.isArray(value.replyPayloads) || typeof value.stateDigest !== "string") throw new Error("state schema invalid");
+    const { stateDigest: savedDigest, ...stateBody } = value;
+    if (savedDigest !== stateDigest(stateBody)) throw new Error("state digest mismatch");
+    const persistedRequests: SupervisorRequestV1[] = [];
+    for (const raw of value.requests) {
+      const request = parseSupervisorRequestV1(raw);
+      if (request.rootSessionId !== root) throw new Error("request root mismatch");
+      persistedRequests.push(request);
+    }
+    const persistedReceipts: SupervisorDeliveryReceipt[] = [];
+    for (const raw of value.receipts) {
+      if (!isObject(raw) || Object.keys(raw).some(key => !["receiptId", "idempotencyKey", "kind", "status", "consumed", "runId", "requestId", "code", "rootSessionId", "ownerGeneration", "requestGeneration", "requestDigest"].includes(key)) || typeof raw.idempotencyKey !== "string" || typeof raw.receiptId !== "string" || raw.rootSessionId !== root || typeof raw.runId !== "string" || !Number.isSafeInteger(raw.ownerGeneration) || (raw.requestGeneration !== undefined && !Number.isSafeInteger(raw.requestGeneration)) || (raw.requestDigest !== undefined && !DIGEST.test(raw.requestDigest))) throw new Error("receipt schema invalid");
+      persistedReceipts.push(raw as SupervisorDeliveryReceipt);
+    }
+    return { requests: persistedRequests, receipts: persistedReceipts };
+  }
+  // D2：supervisor 自身 root 的有界只读 provenance 投影（只读安全副本）。
+  // 唯一允许的文件系统副作用是 DurableStorage.read 首次为自身 persistenceRoot 执行的 0700
+  // ensureRoot mkdir；已有 state 文件字节/mtime 不变。不调用 loadRoot/ready/transaction
+  // （避免 TTL 过期改写与 Map 重载），不改任何 Map/Set，不铸造 token，不启动 broker，
+  // 不扫描其它 root；requests 保持存储观察值，不额外计算 expired/gate-open。
+  async function readDiagnostics(rootSessionId: string, filter?: { requestId?: string }): Promise<SupervisorDiagnosticsV1> {
+    try {
+      // root 身份由调用方 Host resolver 提供；形状不合法时 fail closed，不发起任何读取。
+      safeId(rootSessionId, "rootSessionId");
+      let requestIdFilter: string | undefined;
+      if (filter !== undefined) {
+        if (!isObject(filter) || Object.keys(filter).some(key => key !== "requestId")) throw new Error("diagnostics filter invalid");
+        if (filter.requestId !== undefined && (typeof filter.requestId !== "string" || !ID.test(filter.requestId) || filter.requestId.includes(".."))) throw new Error("diagnostics filter invalid");
+        requestIdFilter = filter.requestId;
+      }
+      let storedRequests: SupervisorRequestV1[];
+      let storedReceipts: SupervisorDeliveryReceipt[];
+      if (storage) {
+        // 持久化模式：直接 read 唯一 DurableStorage 对应 root 的已存 state 并验证既有 schema/digest。
+        const persisted = await readPersistedRootStateForDiagnostics(rootSessionId);
+        storedRequests = persisted.requests; storedReceipts = persisted.receipts;
+      } else {
+        // 无持久化：从既有内存 Map 过滤出本 root 的安全副本（不引用原对象，不修改 Map）。
+        storedRequests = [...requests.values()].filter(request => request.rootSessionId === rootSessionId);
+        storedReceipts = [...receipts.values()].filter(receipt => receipt.rootSessionId === rootSessionId);
+      }
+      if (requestIdFilter !== undefined) {
+        // requestId 只能收窄本 root 的投影（request 与其对应 receipt 同步收窄），绝不扩大 scope。
+        storedRequests = storedRequests.filter(request => request.requestId === requestIdFilter);
+        storedReceipts = storedReceipts.filter(receipt => receipt.requestId === requestIdFilter);
+      }
+      // 按 ID 升序稳定排序（相等时保持存储顺序），每组最多 50 条。
+      storedRequests.sort((a, b) => (a.requestId < b.requestId ? -1 : a.requestId > b.requestId ? 1 : 0));
+      storedReceipts.sort((a, b) => (a.receiptId < b.receiptId ? -1 : a.receiptId > b.receiptId ? 1 : 0));
+      const complete = storedRequests.length <= DIAGNOSTICS_GROUP_LIMIT && storedReceipts.length <= DIAGNOSTICS_GROUP_LIMIT;
+      const projectedRequests = storedRequests.slice(0, DIAGNOSTICS_GROUP_LIMIT).map(request => Object.freeze({
+        requestId: request.requestId, runId: request.runId, state: request.state,
+        ownerGeneration: request.ownerGeneration, requestGeneration: request.requestGeneration,
+        createdAt: request.createdAt, expiresAt: request.expiresAt,
+      }));
+      const projectedReceipts: SupervisorReceiptDiagnosticV1[] = [];
+      for (const receipt of storedReceipts.slice(0, DIAGNOSTICS_GROUP_LIMIT)) {
+        const projected = projectSupervisorReceipt(receipt);
+        if (!projected) throw new Error("receipt diagnostic projection failed");
+        projectedReceipts.push(projected);
+      }
+      return Object.freeze({
+        schemaVersion: "supervisor-diagnostics.v1" as const,
+        availability: "available" as const,
+        requests: Object.freeze(projectedRequests),
+        receipts: Object.freeze(projectedReceipts),
+        complete,
+      });
+    } catch {
+      // 读取失败 fail closed：固定 code 的 unavailable，绝不解释成「空 pending」，不外泄任何错误细节。
+      return Object.freeze({
+        schemaVersion: "supervisor-diagnostics.v1" as const,
+        availability: "unavailable" as const,
+        code: SUPERVISOR_DIAGNOSTICS_UNAVAILABLE,
+        requests: Object.freeze([]),
+        receipts: Object.freeze([]),
+        complete: false,
+      });
+    }
+  }
   return Object.freeze({
     registerSupervisorRequest: async (native: any, hostRootSessionId?: string) => {
       const identity = await readOwnerState(native?.runId);
@@ -278,6 +390,7 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
     commitDelivery: (input: any, root?: string) => transaction(input.intent.rootSessionId, () => commitDelivery(input, root)),
     markDeliveryConsumed: (intent: any, root?: string) => transaction(intent.rootSessionId, () => markDeliveryConsumed(intent, root)),
     observeReplyConsumption: (value: any, root: string) => transaction(root, () => observeReplyConsumption(value, root)),
+    readDiagnostics: (rootSessionId: string, filter?: { requestId?: string }) => readDiagnostics(rootSessionId, filter),
     closeRootRequests: (root: string) => transaction(root, () => closeRootRequests(root)),
     expireTerminalRequests: (runId: string, root: string, state?: 'expired' | 'failed') => transaction(root, () => expireTerminalRequests(runId, root, state)),
     ready: async (rootSessionId: string) => transaction(rootSessionId, () => loadRoot(rootSessionId)),
