@@ -2,7 +2,7 @@
 
 ## 总结
 
-**总状态：partial，而非全部功能全绿。** 用户将主线剩余任务改为Inline，明确授权逐验收单元commit；当前主线实现、无kill真实CLI和真实TUI L2均完成。N1联网、P3单次SIGKILL、L3观感未获对应批准/确认，不把blocked算功能完成。未push，未运行全仓npm test。
+**总状态：partial，而非全部功能全绿。** 用户将主线剩余任务改为Inline，明确授权逐验收单元commit；当前主线实现、无kill真实CLI和真实TUI L2均完成。N1官方源联网已获用户澄清授权，安装链兼容修复已online/offline各8/8、verify通过；P3与heartbeat类型尾项均已通过，当前closeout仅L3仍待用户本人确认。保留历史失败，不将后续新工具/gate计划当本批完成。未push，未运行全仓npm test。
 
 基线：`baseline.json`、历史HEAD `a9875d6`。最初dirty包含多轮已完成未提交成果；当前按逻辑单元精确stage/commit，不stash/reset/clean，不覆盖旧实验现场。
 
@@ -15,11 +15,11 @@
 | P0 | verified | pty-driver.md；7行为测试+after退出账本，py_compile0，33710b4 |
 | P1/S1事务 | verified | owner-harness.md；8非PTY+78合同，root types0，60d3a6c |
 | P2 | verified | owner-cli.md；真实受控5/5，5cd1cc1 |
-| P3 | blocked-permission | owner-esrch.md；未发SIGKILL |
+| P3 | verified | owner-esrch.md；明确授权后1/1、一次SIGKILL/reap/ESRCH/replacement，e0afc9d |
 | V1 | verified | visual-harness.md；4/4+fixture tsc0，d6d58fc |
 | V2 | L2 verified / L3 pending-user | visual-acceptance.md；真实8/8，b8abd89 |
 | D0–D3 | verified diagnostic only | rpc-diagnostics.md/supervisor-diagnostics.md；af9713e，不冒称历史根因已修 |
-| N1 | blocked-environment/permission | package-acceptance.md；2pass/6ENOTCACHED、无网络 |
+| N1 | verified isolated install | codemode1.0.4 override后官方online/offline各8/8、verify0；package-acceptance.md。当前物理Host未重装 |
 | bash_async引导/observer | verified | 39/39，b583052；634deb4补齐公开协议/Host接线 |
 | edit原生diff | verified L1 | 91/91+root types0，7bd97f9；用户终端观感未签核 |
 | prompt override | verified | 32/32；关联32pass+1既有TODO，c5923b6 |
@@ -29,7 +29,7 @@
 
 ## 最终真实命令
 
-所有npm命令显式 `npm_config_registry=https://registry.npmjs.org/ npm_config_offline=true`；没有使用手淘/第三方源、没有npm install、没有升级依赖。
+所有npm命令显式官方 `npm_config_registry=https://registry.npmjs.org/`；除用户授权N1联网补缓存外均offline，无手淘/第三方源。N1只在临时fixture安装，根仅package-lock-only同步codemode1.0.4兼容约束，不改当前node_modules、不升级Pi版本。
 
 | 组 | 结果 |
 | --- | --- |
@@ -46,10 +46,10 @@
 | root+package `npm run typecheck` | exit0 |
 | offline `npm run verify:subagents-enhanced` | exit0，1259 upstream files、151 import edges、1819 tarball files/17442782 bytes |
 | visual fixture显式tsc（package TypeScript5.9.3） | exit0；根TypeScript7显式files先TS5112，改用既有编译器，不改依赖 |
-| heartbeat fixture显式tsc | exit2：既有process-birth-identity.ts三处Error.code未声明；不属于本次fixture修复，未跨界修/不吞错 |
+| heartbeat fixture显式tsc | 历史exit2后三处Error.code类型最小修复，现exit0；身份测试8/8、默认harness2pass/1skip，2ff3b61 |
 | diff check | exit0；含本批untracked在精确stage后的cached check |
 
-不同组测试有重叠，不将数字相加冒充独立用例总数。package八项不重复运行必失败安装，沿用N1真实失败证据；verify通过不消除其6fail。
+不同组测试有重叠，不将数字相加冒充独立用例总数。N1历史6ENOTCACHED与后来1符号失败保留；当前在根/增强安装根override后官方online/offline各8/8通过，不因verify单独通过抹除旧失败。
 
 ## 来源分类与修复边界
 
@@ -71,7 +71,7 @@
 - 每操作独立工具与MD/tool guidance迁移：只有研究，尚未实施；research提交不是功能提交。
 - idle、triggerTurn、resume(model)、scheduler store/lock按既定决定暂缓或独立处理。
 - 具体用户RPC/supervisor故障的字段级归因仍unknown，不能用合法fixture证明该历史个案。
-- 官方npm补缓存和P3需要各自明确授权；L3需要用户一次现场确认。
+- 官方npm补缓存与P3已由用户明确授权并执行通过，不重复索要；L3仍需要用户一次现场确认。N1的当前物理Host未重装，不把隔离安装成功说成当前会话已换依赖。
 
 ## 提交说明
 

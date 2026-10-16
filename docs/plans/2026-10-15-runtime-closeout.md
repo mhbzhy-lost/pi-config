@@ -332,3 +332,8 @@ Receipt字段：schemaVersion=`supervisor-receipt-diagnostic.v1`、receiptId/run
 ## 2026-10-16 Inline收口索引
 
 已实现和验证分支已勾选；P3、N1和L3并未通过，不能因总账收口标绿。P0实际为7行为测试+after账本（非静态8计数），P2为5/5，V2为8/8。最新完整证据见 `docs/plans/records/2026-10-15-runtime-closeout/acceptance.md`。新的supervisor gate与工具拆分不在本closeout自动扩展范围内。
+
+
+## N1/P3/类型尾项的后续授权与实测
+
+用户已澄清官方源联网授权并批准其余明确尾项直接执行：P3已1/1、一次受控SIGKILL且reap/ESRCH/replacement完成；heartbeat类型修复身份8/8+fixture tsc0；N1增加官方codemode1.0.4安装根override后online/offline各8/8、verify0。旧N1/P3 not-granted门禁仅历史快照，不再重复索要。L3仍待本人确认，新gate/工具拆分另按各自计划。

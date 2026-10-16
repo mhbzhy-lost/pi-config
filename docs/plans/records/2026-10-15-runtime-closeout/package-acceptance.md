@@ -3,8 +3,8 @@
 **taskId:** N1（dispatch-e4e325f4）
 **date:** 2026-10-15
 **executor:** executor（unit-runner + npm-cache-writer 单槽，父层已授当前槽位优先）
-**status:** blocked-environment（6 个 package fixture 用例因离线缓存缺失失败，非 production/测试/校验器缺陷）；同窗口离线 `verify:subagents-enhanced` 真实通过（exit 0）
-**network-package-cache:** **not-granted**（`baseline.json` authorization.networkPackageCache.state=not-granted；父层中途指引再次确认：不能把计划执行当网络授权）
+**当前状态：** 修复已通过完整 online→offline 复验：各8/8，verify exit0。根和enhanced安装根增加官方pi-codemode1.0.4 override，根lock-only同步，不改当前node_modules或上游。补充版本约束回归断言后的最后一次offline仍8/8、root/package typecheck与diffcheck全部exit0。下文§1–§6为2026-10-15历史快照，不再代表当前授权或缓存状态。
+**network-package-cache:** **granted（仅官方源）**；旧baseline的not-granted为历史事实，不据此重复索要授权。
 
 ## 1. 范围与输入
 
@@ -70,7 +70,7 @@ npm error request to https://registry.npmjs.org/typescript failed: cache mode is
 
 推论：修掉 `typescript` 单点后，fixture 安装仍会依次暴露 acorn/yaml 等缺失——印证计划"不手工固定『只差一个tgz』假设"。且 fixture devDeps（4 个 @earendil-works peer）的完整传递依赖树（pi-ai 的 anthropic/aws/google/openai 树、pi-coding-agent 的 chord/codemode/mcp/telemetry 树等）大半无官方源 packument，**完整官方依赖清单只能在获批联网窗口内由 npm 实际解析枚举**，本记录不冒称完整。
 
-## 5. 授权状态与下一步（需用户授权）
+## 5. 历史授权状态与当时下一步（已被2026-10-16澄清取代）
 
 - `network-package-cache = not-granted`：本轮未联网、未安装、未运行 root/package 的 setup，仅原测试脚本在其隔离 fixture 内尝试安装（offline 下被 ENOTCACHED 拒绝）。
 - **用户后续需单独明确授权**从官方源 `https://registry.npmjs.org/` 补缓存（禁止生命周期脚本，`ignore-scripts=true` 不变），目标缺失至少含：`typescript` packument 与 `typescript-5.9.3.tgz`、`yaml-2.8.3.tgz`、`acorn-8.18.0.tgz`、jiti/undici packument、官方源 4 个 `@earendil-works` 1.0.4 tarball 及其传递树；获批后按计划 N1 第 3–4 步：`npm_config_offline=false` 同一原测试（仅隔离 fixture 内安装）→ 回到 offline=true 重跑 8 项 → `npm run verify:subagents-enhanced`。
@@ -83,3 +83,16 @@ npm error request to https://registry.npmjs.org/typescript failed: cache mode is
 - 缓存目录副作用仅为原脚本 npm 日志轮转（`_logs/` 计数保持 11，轮转替换旧日志），属允许的 `var/tmp/npm-cache` 写入。
 - 未重复无关全套测试（未跑 F1/P0/D0 的测试；父层指引：其余任务测试前先问槽）；本记录不覆写 `2026-10-13-footer-acceptance.md`，其 F6v 失败分类原文保留。
 - 未读取本机 npmrc/auth/token/proxy 配置（白名单 env -i + 空 user/globalconfig 双重保证）；未启动真实 Host。
+
+
+## 7. 2026-10-16 官方源授权与依赖修复实测
+
+- 用户明确澄清已经授权走官方源，不再重复索要联网许可。N1初始baseline保留历史，当前授权为官方源联网隔离fixture安装。
+- 首次online：7/8，exit1；同缓存offline：7/8，exit1；verify0。唯一失败为公开plain Node入口缺少MCP_TYPESCRIPT_PREAMBLE。来源和首偏离见 `docs/bugs/2026-10-16-pi104-codemode-dependency-drift.md`，不把root codemode1.1.0当已删除fixture的精确resolved版本。
+- 最小修复：根与enhanced安装根override codemode1.0.4，根package-lock-only同步官方tarball/integrity。npm overrides仅在安装根生效，外部consumer必须由其Host安装根消费约束；未改真实node_modules。
+- 一次错误验收遗漏npm_config_cache落至默认~/.npm导致2pass/6ENOTCACHED；执行环境错误，不是修复无效证据，保留失败。
+- 恢复隔离HOME/空user+global配置/明确仓库cache后：job837021bf，**online exit0、8/8；offline exit0、8/8；verify exit0**。ignore_scripts=true、audit/fund=false，无token/proxy继承。
+- 完整日志根：`/var/folders/27/6bnn8n7d4px6s33fvdpns89c0000gn/T/n1-pinned-official.sQQhxJ4ZYW`，online约42.3s、offline约27.1s，总命令约72.5s。verify：1259 upstream files、151 import edges、1819 tarball files/17443020 bytes。
+- 原八项包含plain Node加载、bundle闭包、upstream drift/escape/canonical负例全部通过；未删用例/未换mock/未跳过失败。
+- 此后新增manifest/lock版本防回归断言，仅加强metadata合同不更改安装或导入路径；job `ff1df6bc-cd27-41d4-9121-c0622a693cb3` 实际 succeeded/exit0：offline八项8/8、root/package typecheck、diffcheck全部通过，总约24.9s。
+- 最后环境根：`/var/folders/27/6bnn8n7d4px6s33fvdpns89c0000gn/T/n1-contract-final.4tIKeCw3gY`；未改真实Host依赖，外部models备份未读未动。

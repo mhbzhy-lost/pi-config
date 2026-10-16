@@ -33,5 +33,8 @@
     "@earendil-works/pi-coding-agent": "1.0.4",
     "@earendil-works/pi-tui": "1.0.4",
     "pi-subagents-enhanced": "file:./packages/pi-subagents-enhanced"
+  },
+  "overrides": {
+    "@earendil-works/pi-codemode": "1.0.4"
   }
 }

@@ -74,14 +74,15 @@
 
 ## 2026-10-16 Inline closeout 当前状态（取代上方旧快照的完成状态）
 
-- 用户已选择全部主线剩余任务Inline，并授权每个验收单元commit；全部npm只用官方registry，未获单独补缓存联网许可。
-- P0：7行为测试+after账本通过；P1：8非PTY+78合同测试通过；P2：受控真实CLI 5/5通过；P3：blocked-permission，未发SIGKILL。
+- 用户已选择主线剩余任务Inline，并授权每个验收单元commit；后又明确官方源联网许可，N1隔离补缓存与安装已执行。所有npm只用官方registry。后续新supervisor计划已授权subagent执行，当前closeout仍父Inline。
+- P0：7行为测试+after账本通过；P1：8非PTY+78合同测试通过；P2：受控真实CLI 5/5通过；P3后续明确授权，1/1通过，一次SIGKILL→reap→ESRCH→replacement，无补杀。
 - F1/F6基础接线：综合回归184/184；V1/V2：真实TUI8/8、L2通过、L3pending-user。
 - D0–D3：诊断已实现并提交；最后组合纯合同/诊断248/248。历史RPC/supervisor个案归因未升级为已修复。
 - edit原生diff：91/91、root typecheck通过；prompt override：32/32，关联32pass+1既有TODO；H1-key identity：111/111、package typecheck通过。
 - scheduler只读observer：49/49，store/lock并发问题仍独立未实施。
-- 旧heartbeat H2证据保持通过；4active workspace仍保留。本窗口只跑默认关闭harness（2pass+1skip），不重复kill；heartbeat fixture显式tsc被既有process-birth-identity.ts Error.code类型诊断阻塞，未跨界修。
+- 旧heartbeat H2证据保持通过；4active workspace仍保留。本窗口只跑默认关闭harness（2pass+1skip），不重复kill；heartbeat fixture显式tsc原被Error.code类型阻塞，后按用户“明确就直接做”授权完成三处最小类型修复，8/8身份测试、fixture tsc0，commit2ff3b61。
 - idle/resume(model)/triggerTurn继续原暂缓决定；每操作独立工具、MD/tool guidance迁移只有调研，尚未实施；不能当作本次closeout完成。
 - supervisor child级gate/inspect-clear仍是新计划，尚未实施，不把D3诊断当gate修复；部署必须fresh Host，不能热改当前控制状态。
 - 已完成代码正逐项commit，未push；不再沿用“HEAD a9875d6/dirty72/主代码未commit”的旧快照。
+- N1安装链失败已解决：根与enhanced安装根override官方pi-codemode1.0.4，官方online/offline各8/8、verify0；无上游patch、无真实node_modules改动。外部consumer需其Host安装根消费约束，当前物理Host未重装。closeout当前仅L3观感待用户，其他新gate/工具拆分不计入本批已完成。
 - 最新总账：`docs/plans/records/2026-10-15-runtime-closeout/acceptance.md`。

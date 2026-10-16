@@ -75,4 +75,6 @@ npm run verify:subagents-enhanced
 
 依赖准备必须在没有旧 Pi Host 使用待替换 runtime 时执行。升级后启动 fresh Host；普通 TypeScript/MJS 源码修改不需要重新安装 package，在当前 Host 中执行 `/reload` 即可生效。
 
+Pi `1.0.4` 的非 bundle ESM 入口依赖同版 codemode declarations。本仓根与本 package 作为安装根时通过 `overrides: {"@earendil-works/pi-codemode":"1.0.4"}` 防止 `^1.0.4` 漂移到缺少旧导出的版本；所有下载只使用官方 `https://registry.npmjs.org/`。npm 不会把依赖 package 的 overrides 自动应用到外部 consumer，外部 Host 安装根也需采用该约束（以及其自身 lock），否则本 package 的已验收隔离安装不能代表外部 Host 闭包兼容。仅同步 lock 不会改变当前已运行 Host 的 node_modules，不要热替换依赖。
+
 npm 发行清单只使用 canonical `bundleDependencies: ["pi-subagents"]`，发行包已经包含经过 registry 受控比较验证的 upstream 依赖闭包。发行前在 package 目录使用 `npm pack --dry-run --json --ignore-scripts` 检查内容；不要用非 dry-run pack 代替验证。

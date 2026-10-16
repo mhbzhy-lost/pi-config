@@ -103,6 +103,19 @@ test("pi-subagents-enhanced exposes a publishable pinned package contract", asyn
   const rootManifest = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8"));
   const manifest = await metadata();
   assert.equal(rootManifest.private, true);
+  // Pi 1.0.4 的非 bundle ESM 入口要求同版 codemode declarations；
+  // 安装根显式约束传递版本，避免 ^1.0.4 漂移到缺少旧导出的版本。
+  const codemodeOverride = { "@earendil-works/pi-codemode": "1.0.4" };
+  assert.deepEqual(rootManifest.overrides, codemodeOverride);
+  assert.deepEqual(manifest.overrides, codemodeOverride);
+  const rootLock = JSON.parse(await readFile(join(repoRoot, "package-lock.json"), "utf8"));
+  const lockedCodemode = Object.entries(rootLock.packages).filter(([path]) => path.endsWith("node_modules/@earendil-works/pi-codemode"));
+  assert.ok(lockedCodemode.length > 0, "根 lock 必须记录 codemode 闭包");
+  for (const [, entry] of lockedCodemode) {
+    assert.equal(entry.version, "1.0.4");
+    assert.equal(entry.resolved, "https://registry.npmjs.org/@earendil-works/pi-codemode/-/pi-codemode-1.0.4.tgz");
+    assert.match(entry.integrity, /^sha512-/);
+  }
   assert.deepEqual({
     test: rootManifest.scripts["test:subagents-enhanced"],
     workspace: rootManifest.scripts["test:subagent-workspace"],
