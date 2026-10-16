@@ -95,6 +95,15 @@ Child browser 使用 focused overlay。`Ctrl+Shift+F` 保持官方语义，只�
 
 PowerShell 当前不启用，属于非目标；未来启用前必须覆盖 Security Gates 与 Goal mutation gate。
 
+## 统一后台活动区（TUI footer）
+
+左下角是「一切后台活动任务」展示区，同时呈现 subagent（`●`）、bash_async（`⌘`）与 scheduler（`⏱`）三个 source：统一行结构、统一只读详情、图标只表类型而状态另列文字。架构与事实边界见 `docs/architecture/background-activity-display.md`。
+
+- 唯一 owner：`packages/pi-subagents-enhanced/src/tui/footer-runtime.ts`（唯一 `ctx.ui.setFooter` 调用点）+ `packages/pi-subagents-enhanced/extensions/custom-footer.ts`（唯一 `Alt+O` 注册）。根 `pi/extensions/background-activity.ts` 只发布统一 presenter factory，不调 `setFooter`、不注册快捷键；package 无根 presenter 时回落自有 standalone footer（standalone fallback）。
+- 公开入口（bare specifier）：`pi-subagents-enhanced/tui/background-activity` → `packages/pi-subagents-enhanced/src/tui/index.ts`（协议/registry + subagent source 工厂）；根显示 feature 公开入口 `src/background-activity/index.ts`（re-export 协议 + `layout.ts`/`detail-controller.ts`/`presenter.ts`）；两个 source 入口 `src/bash-async/index.ts`、`src/task-scheduler/index.ts`。消费者不深引 package `src/`。
+- 快捷键：`Alt+O` 打开只读详情（统一详情壳或 standalone browser）；详情内 `←`/`→` 跨类型切条目、`↑`/`↓`/`j`/`k` 逐行滚动、`PgUp`/`PgDn`/`Home`/`End` 翻页、`x` 展开/收起工具、鼠标滚轮滚动；`Alt+O` 或 `Esc` 只关闭并恢复 draft/editor。
+- 不提供的能力（明确边界）：详情无取消/删除/立即执行按钮，不改变命令授权；不新增 scheduler timer或轮询、不造实时 scheduler 状态；不建第二个任务/投递权威、不建 daemon；不把 `lastStatus=success` 当业务成功、不把 bash `accepted` 当消费 ACK、不把 subagent `reported`/unknown 当已完成；不新增全量恢复扫描器（fresh Host 首屏恢复缺口保留）；同 Host reload 仅恢复本分区 plain roster。身份只按稳定 row key，不按 label/状态字符串猜。`ctx.mode !== "tui"` 不构 terminal UI；RPC 的 status、消息投递与执行行为不变；raw 消息/tool result/session/结构化 `details` 不被改写。
+
 ## 角色流程与失败恢复
 
 组合流程指令归 `pi/AGENTS_GLOBAL.md`（仅父会话适用），角色方法论归 `pi/agents/{delegate,executor,reviewer}.md` 正文（`systemPromptMode: append`，由用户明确确认），共同安全与工程约束归 `pi/AGENTS_SHARED.md`；SHARED 不收纳多工具流程。三个角色 profile 保留 Pi 原生 system preamble/tools/rules，角色正文作为附加部分，不整体替换原生 prompt；models/tools/inheritance 元数据不因此扩大。
