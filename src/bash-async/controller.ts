@@ -21,6 +21,15 @@ function failureOutcome(prepared: PreparedExecution, signal: AbortSignal): BashA
 export function createBashAsyncController({ prepare, send }: Dependencies): BashAsyncController {
   let sessionId: string | undefined, generation = 0, branchEpoch = 0, closing = true;
   const jobs = new Map<string, Job>();
+  // 只读失效订阅：任务集合（active/completed）任何变更后触发；不复制任务集合，
+  // 不参与发送/取消/执行链路，退订不abort。单个listener异常独立隔离，
+  // 不影响其他listener，也不向execute或唯一send出口传播。
+  const listeners = new Set<() => void>();
+  function invalidate(): void {
+    for (const listener of [...listeners]) {
+      try { listener(); } catch { /* 观察者隔离：显示回调异常不上抛进执行链路 */ }
+    }
+  }
   function contextSafe(ctx: ExtensionToolContext, id: string): boolean {
     try { return ctx.sessionManager.getSessionId() === id && (ctx.isIdle() || !!ctx.signal); }
     catch { return false; } // Host 已使旧 ExtensionContext 失效，绝不向新会话发送。
@@ -35,6 +44,7 @@ export function createBashAsyncController({ prepare, send }: Dependencies): Bash
   const controller: BashAsyncController = {
     async start(id) {
       await controller.shutdown('start'); sessionId = id; branchEpoch = 0; closing = false; completed.length = 0;
+      invalidate(); // reset：会话重置后的空集合对观察者可见
     },
     async launch(toolCallId, request, ctx, signal) {
       if (ctx.mode !== 'tui' && ctx.mode !== 'rpc') throw new Error('bash_async 仅支持长生命周期 TUI/RPC；print/json 模式不启动后台命令');
@@ -51,6 +61,7 @@ export function createBashAsyncController({ prepare, send }: Dependencies): Bash
       const started = performance.now();
       const job: Job = { receipt, abort, settled: Promise.resolve() };
       jobs.set(receipt.jobId, job);
+      invalidate(); // accept：接受即见，新任务进入active
       // 不向已经返回的父tool转发onUpdate。原生执行完整结果只进入唯一terminal出口。
       job.settled = (async () => {
         let terminal: BashAsyncTerminalReceipt;
@@ -77,14 +88,21 @@ export function createBashAsyncController({ prepare, send }: Dependencies): Bash
           } catch (error) { terminal.completionDelivery = 'delivery-error'; terminal.deliveryError = error instanceof Error ? error.message : String(error); }
         }
         completed.push(terminal); if (completed.length > 64) completed.shift();
+        invalidate(); // 归档：jobs.delete与terminal入档后的收束状态对观察者可见
       })();
       return receipt;
     },
     async cancel(id) { const job = jobs.get(id); if (!job) return { jobId: id, accepted: false }; job.abort.abort(); await job.settled; return { jobId: id, accepted: true }; },
     cancelAll: abortJobs,
-    async invalidateBranch() { branchEpoch++; await abortJobs(); },
-    async shutdown(_reason) { closing = true; generation++; await abortJobs(); },
+    async invalidateBranch() { branchEpoch++; await abortJobs(); invalidate(); },
+    async shutdown(_reason) { closing = true; generation++; await abortJobs(); invalidate(); },
     snapshot() { return { active: [...jobs.values()].map(job => ({ ...job.receipt })), completed: completed.map(receipt => ({ ...receipt })) }; },
+    subscribe(listener) {
+      // 只登记失效回调：不复制jobs、不建立第二任务Map；退订仅移除通知。
+      if (typeof listener !== 'function') return () => undefined;
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
   };
   return controller;
 }

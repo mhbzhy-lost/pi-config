@@ -274,3 +274,94 @@ test('Host入口绑定：bash-cwd扩展注册bash-async-complete的MessageRender
   assert.equal(lines.length, 1);
   assert.ok(lines[0].startsWith(' ') && lines[0].includes('✓') && lines[0].includes('succeeded'));
 });
+
+// ---- bash_async 模型引导合同（诊断报告 docs/research/2026-10-15-bash-async-agent-guidance.md §4 改点A/B/C）----
+// 纯 fake host 断言：不启动真实 Host、不运行真实命令、不执行任何 sleep；
+// 只钉住发给模型的 description / promptGuidelines / launch 文本语义与 raw 回执不变量。
+async function guidanceHost() {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'bash-async-guidance-')));
+  const tools = [], events = new Map(), sent = [], executed = [];
+  const c = createBashAsyncExtension({
+    registerTool: t => tools.push(t), on: (k, h) => events.set(k, h), registerCommand() {}, sendMessage: (...a) => sent.push(a),
+  }, {
+    workspaceRoot: root, createBashToolDefinition,
+    getBashOptions: () => ({ operations: { async exec(command, _cwd, { onData }) { executed.push(command); onData(Buffer.from('fixture-guidance')); return { exitCode: 0 }; } } }),
+  });
+  const ctx = context({ cwd: root });
+  await events.get('session_start')({}, ctx);
+  return { c, root, tool: tools[0], sent, executed, ctx };
+}
+const LAUNCH_RECEIPT_FIELDS = ['acceptedAt', 'branchEpoch', 'command', 'cwd', 'generation', 'jobId', 'kind', 'sessionId', 'toolCallId'];
+
+test('引导合同：description 限定真实长耗时工作，含两类等待反例与无独立工作则结束回合', async () => {
+  const { c, tool, root } = await guidanceHost();
+  try {
+    assert.equal(tool.name, 'bash_async');
+    assert.ok(tool.description.includes('真实长耗时工作'), `description 缺少真实长耗时限定：${tool.description}`);
+    // 反模式一：为等回执在 bash 里 sleep/轮询；措辞不得暗示执行层有硬拒经
+    assert.ok(tool.description.includes('不要用 bash sleep 或轮询等结果'), `description 缺少 bash 等待反例：${tool.description}`);
+    // 反模式二：拿 bash_async 本身跑 sleep 当延时器
+    assert.ok(tool.description.includes('不要为等待回执执行 sleep/wait'), `description 缺少延时器反例：${tool.description}`);
+    assert.ok(tool.description.includes('延时器') && tool.description.includes('常驻 daemon'), `description 未点名延时器/daemon 误用：${tool.description}`);
+    assert.ok(tool.description.includes('继续其他无冲突工作'), `description 缺少继续无冲突工作：${tool.description}`);
+    assert.ok(tool.description.includes('结束当前回合'), `description 缺少无独立工作则结束回合：${tool.description}`);
+    assert.ok(tool.description.includes('自动投 followUp 唤醒本会话'), `description 缺少 completion 自动唤醒语义：${tool.description}`);
+    assert.ok(tool.description.includes('短查询或立即依赖输出的操作使用 bash'), `description 丢失短查询分流：${tool.description}`);
+    for (const forbidden of ['不接受 sleep', '不接受sleep', '会拒绝', '已拒绝', '拒绝执行', '会被拦']) {
+      assert.ok(!tool.description.includes(forbidden), `description 不应用硬拒措辞：${forbidden}`);
+    }
+  } finally { await c.shutdown('quit'); await rm(root, { recursive: true, force: true }); }
+});
+
+test('引导合同：guidelines 保留第1条结果判定，第2/3条含正反例、同cwd不隔离、retry/backoff 与用户 delay 例外和 scheduler_create 语义', async () => {
+  const { c, tool, root } = await guidanceHost();
+  try {
+    assert.equal(tool.promptGuidelines.length, 4, `guidelines 条目数不应变化：${tool.promptGuidelines.join(' / ')}`);
+    const [first, second, third, fourth] = tool.promptGuidelines;
+    // 第1条结果判定原句保留
+    assert.equal(first, '启动成功只代表接受任务；以 bash-async-complete 的 outcome/exitCode 判断执行结果。');
+    // 第2条：继续无冲突工作 / 结束回合 + 明确正反例 + 同 cwd 不隔离，且不整段重复第1条
+    assert.ok(second.includes('继续其他无冲突工作') && second.includes('结束当前回合'), `第2条缺少正向动作：${second}`);
+    assert.ok(second.includes('正例') && second.includes('反例'), `第2条缺少正反例：${second}`);
+    assert.ok(second.includes('bash "sleep 60"') && second.includes('轮询'), `第2条反例未点名 sleep/轮询：${second}`);
+    assert.ok(second.includes('同 cwd 并发写入并未隔离'), `第2条丢失同 cwd 不隔离提醒：${second}`);
+    assert.ok(!second.includes('outcome/exitCode 判断执行结果'), `第2条不应整段重复第1条：${second}`);
+    // 第3条：bash_async sleep/wait 反例 + 不机械全禁的例外边界 + 未来定时意图转 scheduler
+    assert.ok(third.includes('sleep/wait') && third.includes('延时器'), `第3条缺少 bash_async sleep 反例：${third}`);
+    assert.ok(third.includes('retry/backoff') && third.includes('模拟延迟') && third.includes('明确要求的 delay'), `第3条缺少真实 backoff/用户 delay 例外：${third}`);
+    assert.ok(third.includes('scheduler_create'), `第3条缺少未来定时意图入口：${third}`);
+    assert.ok(third.includes('不得自行提交定时器'), `第3条未限定 scheduler 仅用于用户未来任务：${third}`);
+    assert.ok(third.includes('绕过命令门禁') && third.includes('自建 daemon'), `第3条原有门禁约束不得丢失：${third}`);
+    // 第4条（clear_queue 等 Host/RPC 控制面事实）保持原合同，本任务不改
+    assert.equal(fourth, 'print/json 不支持；tree/独立 compaction/reload/switch/退出可能取消任务。clear_queue 可清除已提交的回执且不自动重发。');
+  } finally { await c.shutdown('quit'); await rm(root, { recursive: true, force: true }); }
+});
+
+test('引导合同：launch 首 text 块与 details 保持 raw 回执不变，仅追加第二 text 引导，含 sleep 字样的合理命令不被拦', async () => {
+  const { c, tool, ctx, sent, executed, root } = await guidanceHost();
+  try {
+    const result = await tool.execute('guid-id', { command: 'sleep 60 && echo fixture' }, undefined, undefined, ctx);
+    assert.equal(result.content.length, 2, 'launch 应返回两个 text 块');
+    assert.deepEqual(result.content.map(b => b.type), ['text', 'text']);
+    const parsed = JSON.parse(result.content[0].text);
+    assert.deepEqual(Object.keys(parsed).sort(), LAUNCH_RECEIPT_FIELDS);
+    assert.deepEqual(parsed, result.details); // 首块与 details 是同一 receipt，字段集合不变
+    assert.equal(result.details.kind, 'bash-async-launch');
+    assert.equal(result.details.command, 'sleep 60 && echo fixture');
+    assert.ok(result.details.cwd.startsWith(root));
+    const guidance = result.content[1].text;
+    for (const phrase of ['accepted 仅代表任务已接受', '不代表命令成功', '继续其他无冲突工作', '结束当前回合', '自动投 followUp 唤醒本会话', '不要用 bash 执行 sleep 等待', '不要轮询本任务状态', '不要另起阻塞命令']) {
+      assert.ok(guidance.includes(phrase), `launch 第二 text 缺少 ${phrase}：${guidance}`);
+    }
+    assert.ok(!guidance.includes('拒绝') && !guidance.includes('不接受'), `launch 引导不应用硬拒措辞：${guidance}`);
+    // 执行链与生命周期不变：指引不是拦截，命令原样进 fake 执行器，完成回执仍只自动投一次 followUp
+    const terminal = await settled(c);
+    assert.equal(executed.length, 1, '指引不是拦截：含 sleep 的命令仍应进入 fake 执行器');
+    assert.ok(executed[0].includes('sleep 60 && echo fixture'), `命令未被改写：${executed[0]}`);
+    assert.equal(terminal.length, 1);
+    assert.equal(terminal[0].outcome, 'succeeded');
+    assert.equal(terminal[0].completionDelivery, 'accepted'); // 未新增第二条通知通道
+    assert.equal(sent.length, 1);
+    assert.deepEqual(sent[0][1], { deliverAs: 'followUp', triggerTurn: true }); // 完成仍自动投 followUp，本任务不改
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

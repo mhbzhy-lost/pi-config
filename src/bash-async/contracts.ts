@@ -28,4 +28,10 @@ export type BashAsyncController = {
   invalidateBranch(): Promise<void>;
   shutdown(reason: string): Promise<void>;
   snapshot(): { active: BashAsyncLaunchReceipt[]; completed: BashAsyncTerminalReceipt[] };
+  /**
+   * 只读失效订阅（统一计划F3/footer子计划T3）：任务集合（active/completed）任何变更后
+   * 通知全部listener。listener以独立try/catch隔离，异常不影响执行与唯一send出口；
+   * 退订只移除通知，不abort任务、不复制任务集合（无第二jobs Map）。
+   */
+  subscribe(listener: () => void): () => void;
 };
