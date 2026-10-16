@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -511,7 +511,7 @@ test("project completion notifier makes only completed subagent messages visible
 test("ExtensionRunner lifecycle records only supported actual pi.on events without manufacturing run identity", async () => {
   const pi = createPi();
   const trace = [];
-  installHeadlessTypedSubagentRuntime(pi, {
+  const runtime = installHeadlessTypedSubagentRuntime(pi, {
     bootstrap(api) { api.registerTool({ name: "subagent_supervisor", execute() {} }); },
     completionNotifierFactory(_api, state) {
       state.completionOwnerId = "owner-1";
@@ -521,7 +521,7 @@ test("ExtensionRunner lifecycle records only supported actual pi.on events witho
     workingStateTrace(entry) { trace.push(entry); },
   });
 
-  for (const handler of pi.handlers.get("session_start") ?? []) await handler({}, { sessionManager: {} });
+  for (const handler of pi.handlers.get("session_start") ?? []) await handler({}, { sessionManager: { getSessionId: () => "session-1" } });
   const emitLifecycle = async (type, payload, context) => {
     for (const handler of pi.handlers.get(type) ?? []) await handler(payload, context);
   };
@@ -534,6 +534,8 @@ test("ExtensionRunner lifecycle records only supported actual pi.on events witho
   assert.equal(Object.hasOwn(trace[0], "runId"), false);
   assert.equal(pi.handlers.has("queue_update"), false);
   assert.deepEqual(payload, { sessionId: "session-1" });
+  // mock manager 搪非空合法 getSessionId 后 ready 会真实注册，用例末尾拆除注册。
+  await runtime.dispose();
 });
 
 test("ExtensionRunner shutdown disposes an owner-scoped trace sink exactly once", async () => {
@@ -1018,7 +1020,7 @@ test("headless installation wires the completion notifier to session lifecycle",
   });
 
   for (const handler of pi.handlers.get("session_start") ?? []) {
-    await handler({ reason: "startup" }, { sessionManager: { id: "session-1" } });
+    await handler({ reason: "startup" }, { sessionManager: { id: "session-1", getSessionId: () => "session-1" } });
   }
   assert.equal(notifierState.currentSessionId, "session-1");
 
@@ -1051,7 +1053,7 @@ test("workspace reminder listener registers before the completion notifier and d
       return { dispose() {} };
     },
   });
-  for (const handler of pi.handlers.get("session_start") ?? []) await handler({}, { sessionManager: { id: "session-1" } });
+  for (const handler of pi.handlers.get("session_start") ?? []) await handler({}, { sessionManager: { id: "session-1", getSessionId: () => "session-1" } });
   await pi.events.emit("subagent:async-complete", { runId: "leaf" });
   assert.deepEqual(order, ["reminder", "notifier"]);
   for (const handler of pi.handlers.get("session_shutdown") ?? []) await handler({}, {});
@@ -1064,7 +1066,7 @@ test("production upstream completion emits decorate each same-agent leaf once", 
   const delivered = [];
   let upstreamApi;
 
-  installHeadlessTypedSubagentRuntime(pi, {
+  const runtime = installHeadlessTypedSubagentRuntime(pi, {
     bootstrap(api) {
       upstreamApi = api;
       api.registerTool({ name: "subagent_supervisor", execute() {} });
@@ -1085,7 +1087,7 @@ test("production upstream completion emits decorate each same-agent leaf once", 
     },
   });
   for (const handler of pi.handlers.get("session_start") ?? []) {
-    await handler({}, { sessionManager: { id: "session-1" } });
+    await handler({}, { sessionManager: { id: "session-1", getSessionId: () => "session-1" } });
   }
 
   registry.prepare({ agent: "delegate", task: "first", title: "First task" });
@@ -1103,6 +1105,8 @@ test("production upstream completion emits decorate each same-agent leaf once", 
   assert.equal(registry.takeCompleted("delegate"), "First task", "each completion must enqueue one title only, in run order");
   assert.equal(registry.takeCompleted("delegate"), "Second task");
   assert.equal(registry.takeCompleted("delegate"), undefined);
+  // mock manager 搪非空合法 getSessionId 后 ready 会真实注册，用例末尾拆除注册。
+  await runtime.dispose();
 });
 
 test("confirmed facade workflow success is filtered before the completion notifier while its leaf remains visible", async () => {
@@ -1119,7 +1123,7 @@ test("confirmed facade workflow success is filtered before the completion notifi
     return { details: { runId: "workflow-root-1", asyncDir: "/tmp/workflow-root-1" } };
   };
 
-  installHeadlessTypedSubagentRuntime(pi, {
+  const runtime = installHeadlessTypedSubagentRuntime(pi, {
     bootstrap(api) {
       upstreamApi = api;
       api.registerTool({ name: "subagent_supervisor", execute() {} });
@@ -1141,7 +1145,7 @@ test("confirmed facade workflow success is filtered before the completion notifi
     },
   });
   for (const handler of pi.handlers.get("session_start") ?? []) {
-    await handler({}, { sessionManager: { id: "session-1" } });
+    await handler({}, { sessionManager: { id: "session-1", getSessionId: () => "session-1" } });
   }
 
   const started = await execute(pi.tools.find((tool) => tool.name === "subagent"), {
@@ -1170,6 +1174,8 @@ test("confirmed facade workflow success is filtered before the completion notifi
   }
   assert.deepEqual(delivered, ["leaf-run-1", "user-workflow", "workflow-root-1", "workflow-root-1", "workflow-root-1"]);
   assert.equal(pi.messages.length, 5, "unrelated workflow and internal non-success states remain visible");
+  // mock manager 搪非空合法 getSessionId 后 ready 会真实注册，用例末尾拆除注册。
+  await runtime.dispose();
 });
 
 test("generic dispatch validates required fields without using profile names as authorization", async () => {
@@ -2528,6 +2534,101 @@ test("替换代偿失败携原异常诊断，ready 仍阻断并允许恢复重�
   await next.ready({}, {});
   assert.equal(started, 1);
   await next.dispose();
+});
+
+const REQUIRED_CHILD_REGISTRY_KEY = Symbol.for("pi-subagents.required-child-extensions.v1");
+
+async function importRequiredChildRegistry() {
+  // 与 extension.ts 同源的上游公开 resolve 出口（pi-subagents/required-child-extensions
+  // 的底层实现文件，也是上游 async-execution/subagent-executor 查找所用的同一模块）。
+  return import(pathToFileURL(join(enhancedPackageRoot, "node_modules/pi-subagents/src/shared/required-child-extensions.js")).href);
+}
+
+function addedRegistryKeys(before) {
+  const current = globalThis[REQUIRED_CHILD_REGISTRY_KEY]?.bySession.keys() ?? [];
+  return [...current].filter((key) => !before.has(key));
+}
+
+// 回归锚点（docs/bugs/2026-10-14-required-child-session-identity.md）：持久会话下
+// sessionFile ≠ getSessionId，注册键若沿用 lifecycleSessionIdentity（文件路径优先）
+// 会令上游按 ID 的精确查找全部落空。fixture 用公开 SDK SessionManager.create 造
+// temporary 持久会话，不开 Host、不落消息正文。
+test("required-child 注册键对齐 Pi session ID：持久会话按 ID 命中，路径键不误命中且 dispose 幂等", async () => {
+  const { SessionManager } = await import("@earendil-works/pi-coding-agent");
+  const { resolveRequiredChildExtensions } = await importRequiredChildRegistry();
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "required-child-persistent-"));
+  try {
+    const manager = SessionManager.create(fixtureRoot, join(fixtureRoot, "sessions"), { id: `h1-fix-${randomUUID()}` });
+    // 退化守卫：fixture 必须真为持久会话（两身份同时存在且不等），否则本用例虚假通过。
+    assert.notEqual(manager.getSessionId(), manager.getSessionFile());
+    assert.ok(manager.getSessionFile());
+
+    const keysBefore = new Set(globalThis[REQUIRED_CHILD_REGISTRY_KEY]?.bySession.keys() ?? []);
+    assert.deepEqual(resolveRequiredChildExtensions(manager.getSessionId()), []);
+
+    const pi = createPi();
+    const extension = createTypedSubagentExtension(pi, { rpc: createRpc() });
+    await extension.ready({ reason: "startup" }, { sessionManager: manager });
+
+    // 公开 resolve 出口按 ID 精确命中，快照只含 id/path 且无 requireForAllRunners（no requiredall）。
+    const snapshot = resolveRequiredChildExtensions(manager.getSessionId());
+    assert.deepEqual(snapshot.map((entry) => entry.id), ["root-session-owner", "integration-queue"]);
+    assert.ok(snapshot.every((entry) => entry.requireForAllRunners === undefined));
+    assert.ok(snapshot.every((entry) => isAbsolute(entry.path)));
+
+    // 不双键：本次 ready 只新增 ID 一个键；按文件路径键查找必须落空（EMPTY）。
+    assert.deepEqual(addedRegistryKeys(keysBefore), [manager.getSessionId()]);
+    assert.deepEqual(resolveRequiredChildExtensions(manager.getSessionFile()), []);
+
+    // dispose 幂等：拆除后 ID 查找落空；二次 dispose 不抛错也不复活注册。
+    await extension.dispose();
+    assert.deepEqual(resolveRequiredChildExtensions(manager.getSessionId()), []);
+    await extension.dispose();
+    assert.deepEqual(resolveRequiredChildExtensions(manager.getSessionId()), []);
+    assert.equal(globalThis[REQUIRED_CHILD_REGISTRY_KEY]?.bySession.has(manager.getSessionId()), false);
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("required-child 注册键对齐 Pi session ID：in-memory 无 sessionFile 时注册与 dispose 幂等保持", async () => {
+  const { SessionManager } = await import("@earendil-works/pi-coding-agent");
+  const { resolveRequiredChildExtensions } = await importRequiredChildRegistry();
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "required-child-no-session-"));
+  try {
+    // --no-session 退化路径（--no-session → inMemory → sessionFile 恒 undefined）不得回归。
+    const manager = SessionManager.inMemory(fixtureRoot);
+    assert.equal(manager.getSessionFile(), undefined);
+    assert.ok(manager.getSessionId());
+
+    const keysBefore = new Set(globalThis[REQUIRED_CHILD_REGISTRY_KEY]?.bySession.keys() ?? []);
+    const pi = createPi();
+    const extension = createTypedSubagentExtension(pi, { rpc: createRpc() });
+    await extension.ready({ reason: "startup" }, { sessionManager: manager });
+
+    assert.deepEqual(resolveRequiredChildExtensions(manager.getSessionId()).map((entry) => entry.id), ["root-session-owner", "integration-queue"]);
+    assert.deepEqual(addedRegistryKeys(keysBefore), [manager.getSessionId()]);
+
+    await extension.dispose();
+    assert.deepEqual(resolveRequiredChildExtensions(manager.getSessionId()), []);
+    await extension.dispose();
+    assert.deepEqual(resolveRequiredChildExtensions(manager.getSessionId()), []);
+    assert.equal(globalThis[REQUIRED_CHILD_REGISTRY_KEY]?.bySession.has(manager.getSessionId()), false);
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("required-child 注册在 ctx.sessionManager.getSessionId 为空值时保持不注册，ready 正常完成", async () => {
+  // 有效 getSessionId 方法返回空值 = 原 nonempty guard 的值缺失语义（注册键为空则不注册、ready 不报错）；
+  // 不代表缺 ID 的 production 场景受支持，production 合法身份由真实 SDK 两正例覆盖。
+  const { resolveRequiredChildExtensions } = await importRequiredChildRegistry();
+  const keysBefore = new Set(globalThis[REQUIRED_CHILD_REGISTRY_KEY]?.bySession.keys() ?? []);
+  const pi = createPi();
+  const extension = createTypedSubagentExtension(pi, { rpc: createRpc() });
+  await extension.ready({ reason: "startup" }, { sessionManager: { getSessionId: () => "" } });
+  assert.deepEqual(addedRegistryKeys(keysBefore), []);
+  await extension.dispose();
 });
 
 /* -------------------- D3：supervisor status/reply 只读诊断接线 -------------------- */

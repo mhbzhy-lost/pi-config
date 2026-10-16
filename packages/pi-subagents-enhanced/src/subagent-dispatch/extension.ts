@@ -2025,7 +2025,9 @@ export function createTypedSubagentExtension(
           return;
         }
         await repayDebts(debtLane, shutdownDebt, ctx);
-        const sessionId = lifecycleSessionIdentity(ctx?.sessionManager);
+        // required-child 注册键必须等于上游全部查找点使用的 Pi session ID（getSessionId）；
+        // 持久会话下 sessionFile ≠ sessionId，沿用文件路径键会令 required 查找精确匹配落空。
+        const sessionId = ctx?.sessionManager?.getSessionId();
         if (sessionId && !requiredChildExtensionsRegistration) {
           // 同一现有 required-child 注册数组追加共享注入项，不得另起 register 造成
           // same-session duplicate。requireForAllRunners 是 registration 顶层 flag
