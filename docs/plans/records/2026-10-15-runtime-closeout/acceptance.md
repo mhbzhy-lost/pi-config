@@ -2,7 +2,7 @@
 
 ## 总结
 
-**总状态：partial，而非全部功能全绿。** 用户将主线剩余任务改为Inline，明确授权逐验收单元commit；当前主线实现、无kill真实CLI和真实TUI L2均完成。N1官方源联网已获用户澄清授权，安装链兼容修复已online/offline各8/8、verify通过；P3与heartbeat类型尾项均已通过，当前closeout仅L3仍待用户本人确认。保留历史失败，不将后续新工具/gate计划当本批完成。未push，未运行全仓npm test。
+**总状态：用户裁决closeout完成（不等于全仓所有功能全绿）。** 用户将主线剩余任务改为Inline，明确授权逐验收单元commit；当前主线实现、无kill真实CLI和真实TUI L2均完成。N1官方源联网已获用户澄清授权，安装链兼容修复已online/offline各8/8、verify通过；P3与heartbeat类型尾项均已通过，用户明确“可以认为收尾结束，TUI后验发现问题当新bug”，L3不再作为closeout阻塞，不伪造已完成本人观感确认。保留历史失败，不将后续新工具/gate计划当本批完成。未push，未运行全仓npm test。
 
 基线：`baseline.json`、历史HEAD `a9875d6`。最初dirty包含多轮已完成未提交成果；当前按逻辑单元精确stage/commit，不stash/reset/clean，不覆盖旧实验现场。
 
@@ -17,7 +17,7 @@
 | P2 | verified | owner-cli.md；真实受控5/5，5cd1cc1 |
 | P3 | verified | owner-esrch.md；明确授权后1/1、一次SIGKILL/reap/ESRCH/replacement，e0afc9d |
 | V1 | verified | visual-harness.md；4/4+fixture tsc0，d6d58fc |
-| V2 | L2 verified / L3 pending-user | visual-acceptance.md；真实8/8，b8abd89 |
+| V2 | L2 verified / L3 user-post-acceptance | 真实8/8；用户同意关闭批次，观感问题另报新bug，非代签L3 |
 | D0–D3 | verified diagnostic only | rpc-diagnostics.md/supervisor-diagnostics.md；af9713e，不冒称历史根因已修 |
 | N1 | verified isolated install | codemode1.0.4 override后官方online/offline各8/8、verify0；package-acceptance.md。当前物理Host未重装 |
 | bash_async引导/observer | verified | 39/39，b583052；634deb4补齐公开协议/Host接线 |
@@ -25,7 +25,7 @@
 | prompt override | verified | 32/32；关联32pass+1既有TODO，c5923b6 |
 | H1-key | verified focused | 111/111+package types0，110cc0e |
 | scheduler observer | verified | 49/49，4068c86；store/lock并发未改 |
-| Z1 | verified ledger / overall partial | 本记录、类型检查与聚焦回归；blocked边界保留 |
+| Z1 | closed-user | 本记录、类型检查与聚焦回归；后续新计划/历史边界不隐瞒 |
 
 ## 最终真实命令
 
@@ -71,7 +71,7 @@
 - 每操作独立工具与MD/tool guidance迁移：只有研究，尚未实施；research提交不是功能提交。
 - idle、triggerTurn、resume(model)、scheduler store/lock按既定决定暂缓或独立处理。
 - 具体用户RPC/supervisor故障的字段级归因仍unknown，不能用合法fixture证明该历史个案。
-- 官方npm补缓存与P3已由用户明确授权并执行通过，不重复索要；L3仍需要用户一次现场确认。N1的当前物理Host未重装，不把隔离安装成功说成当前会话已换依赖。
+- 官方npm补缓存与P3已由用户明确授权并执行通过，不重复索要；L3已由用户裁决转为后验，不再阻塞本批。N1的当前物理Host未重装，不把隔离安装成功说成当前会话已换依赖。
 
 ## 提交说明
 
