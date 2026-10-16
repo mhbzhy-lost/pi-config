@@ -33,9 +33,14 @@ test("subagent_worktree derives standalone ownership from live context and expos
   });
 
   assert.equal(tool.name, "subagent_worktree");
-  assert.match(tool.description, /workspace_id.*completed/i);
-  assert.match(tool.description, /integrate or discard to finish, or preserve temporarily and later release/);
-  assert.doesNotMatch(tool.description, /preserve.*terminal disposition/i);
+  // 分类2（陈旧断言数据来源登记）：以下三行旧英文正则是测试侧残留断言；
+  // 旧 factory SUBAGENT_WORKSPACE_DESCRIPTION 在 HEAD 已是合法中文（上一槽 git show 证实
+  // completed/integrate or discard 在 tool.ts 零命中），不恢复旧坏 production 句，
+  // 只把期望换为当前中文 description 的真实事实。
+  assert.match(tool.description, /workspace_id.*run 已完成/);
+  assert.match(tool.description, /allowed_dispositions.*action_token/);
+  assert.match(tool.description, /CHILD_OWNS_INTEGRATION/);
+  assert.match(tool.description, /publication=forbidden（generic）的工作区能否 integrate 以状态权威返回为准/);
   assert.deepEqual(tool.parameters.anyOf.map((branch) => branch.properties.action.const), ["list", "status", "dispose", "release"]);
   assert.equal(JSON.stringify(tool.parameters).includes("rootSessionId"), false);
   const status = await tool.execute("call", { action: "status", workspace_id: "workspace-a" }, undefined, undefined, { sessionManager: { rootSessionId: "session-a" } });
