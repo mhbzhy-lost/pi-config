@@ -11,7 +11,7 @@ export function normalizeSubagentTitle(value) {
 }
 
 function titleError(message) {
-  const error = new Error(`INVALID_TITLE: ${message}`);
+  const error = new Error(`INVALID_TITLE: ${message}`) as Error & { code: "INVALID_TITLE" };
   error.code = "INVALID_TITLE";
   return error;
 }
