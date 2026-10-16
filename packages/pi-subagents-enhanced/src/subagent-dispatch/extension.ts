@@ -212,7 +212,7 @@ const SUPERVISOR_DIAGNOSTICS_ALLOWED_KEYS = Object.freeze([
 ]);
 /** request 投影行的精确白名单键集与状态枚举（计划 D2/D3 字段）。 */
 const SUPERVISOR_DIAGNOSTIC_REQUEST_KEYS = Object.freeze([
-  "requestId", "runId", "state", "ownerGeneration", "requestGeneration", "createdAt", "expiresAt",
+  "requestId", "runId", "state", "ownerGeneration", "requestGeneration", "createdAt", "expiresAt", "childIndex", "classification",
 ]);
 const SUPERVISOR_REQUEST_STATES: readonly string[] = Object.freeze([
   "pending", "replying", "replied", "expired", "failed",
@@ -262,9 +262,15 @@ function safeSupervisorDiagnosticRequest(value: unknown): SupervisorDiagnosticsR
   const expiresAt = boundedClock(row.expiresAt);
   if (requestId === undefined || runId === undefined || state === undefined || ownerGeneration === undefined
     || requestGeneration === undefined || createdAt === undefined || expiresAt === undefined) return undefined;
+  const childIndex = row.childIndex === undefined ? undefined : boundedClock(row.childIndex);
+  const classification = row.classification;
+  if (row.childIndex !== undefined && childIndex === undefined) return undefined;
+  if (classification !== undefined && !["needs-reply", "reply-submitted", "consumed", "cleared", "terminal", "scope-unverified"].includes(classification as string)) return undefined;
   return Object.freeze({
     requestId, runId, state: state as SupervisorDiagnosticsRequestV1["state"],
     ownerGeneration, requestGeneration, createdAt, expiresAt,
+    ...(childIndex === undefined ? {} : { childIndex }),
+    ...(classification === undefined ? {} : { classification: classification as string }),
   });
 }
 
@@ -1462,6 +1468,8 @@ async function executeControl(input, rpc, supervisorControlPlane, toolCallId, di
   if (action === "steer" && supervisorControlPlane && supervisorControlPlane.enabled?.() !== false) {
     const target = canonicalSteerTarget(params);
     if (typeof target.runId !== "string") return controlFailure(target.code ?? "SUPERVISOR_STEER_TARGET_UNRESOLVED");
+    if (params.index === undefined) return controlFailure("SUPERVISOR_STEER_CHILD_AMBIGUOUS");
+    if (!Number.isSafeInteger(params.index) || params.index < 0) return controlFailure("SUPERVISOR_STEER_TARGET_INVALID");
     const identity = await supervisorControlPlane.identityForRun?.(target.runId);
     const owner = identity?.owner;
     // identityForRun 缺失或未返回三态时一律当作 unavailable，不得默认放行。
@@ -1479,16 +1487,25 @@ async function executeControl(input, rpc, supervisorControlPlane, toolCallId, di
         try { hostRootSessionId = resolveRootSessionId?.(ctx?.sessionManager); } catch { return controlFailure("SUPERVISOR_STALE_OWNER"); }
       }
       const runtime = identity?.runtime;
+      const childIndex = Number.isSafeInteger(params.index) && params.index >= 0 ? params.index : undefined;
       const decision = await supervisorControlPlane.resolveSupervisorControl({
-        schemaVersion: "supervisor-control-intent.v1", intentId: toolCallId, runId: target.runId,
+        schemaVersion: "supervisor-control-intent.v2",
+        intentId: toolCallId, runId: target.runId,
         rootSessionId: unownedRequest ? unownedRequest.rootSessionId : owner.rootSessionId,
         ownerGeneration: unownedRequest ? unownedRequest.ownerGeneration : owner.ownerGeneration, kind: "steer",
+        ...(childIndex === undefined ? {} : { childIndex }),
         payloadDigest: supervisorCanonicalDigest(params.message), liveRunEpoch: runtime?.liveRunEpoch,
       }, hostRootSessionId);
       if (decision.status === "idempotent") return controlFailure("SUPERVISOR_DELIVERY_IDEMPOTENT", decision.receipt);
       if (decision.status !== "allowed") return controlFailure(decision.code);
       try {
         const result = await rpc[action](params);
+        if (result?.isError === true) {
+          // 原生RPC错误不能记为成功queued；保留原生结果，只补偿失败事实。
+          const compensation = await compensateSupervisorDelivery({ supervisorControlPlane, intent: decision.intent, hostRootSessionId, code: "SUPERVISOR_STEER_DELIVERY_FAILED", primaryError: new Error("native steer returned isError"), diagnosticSink, phase: "steer" });
+          if (compensation) return controlFailure("SUPERVISOR_DELIVERY_COMPENSATION_BLOCKED");
+          return rpcResult(result);
+        }
         const committed = await supervisorControlPlane.commitDelivery({ intent: decision.intent }, hostRootSessionId);
 
         if (committed.status !== "committed") return controlFailure(committed.code, committed.receipt);
@@ -1557,9 +1574,14 @@ function createControlledSupervisorAdapter(adapter, supervisorControlPlane, regi
         };
         return controlFailure("SUPERVISOR_REQUEST_NOT_PENDING");
       }
+      const replyChildIndex = Number.isSafeInteger(request?.correlation?.childIndex) && request.correlation.childIndex >= 0
+        ? request.correlation.childIndex
+        : undefined;
       const intent = {
-        schemaVersion: "supervisor-control-intent.v1", intentId: toolCallId, runId: request?.runId,
+        schemaVersion: "supervisor-control-intent.v2",
+        intentId: toolCallId, runId: request?.runId,
         rootSessionId: request?.rootSessionId, ownerGeneration: request?.ownerGeneration, kind: "reply",
+        ...(replyChildIndex === undefined ? {} : { childIndex: replyChildIndex }),
         requestId: params.replyTo, requestGeneration: request?.requestGeneration,
         payloadDigest: supervisorCanonicalDigest(params.message),
       };
@@ -1569,6 +1591,11 @@ function createControlledSupervisorAdapter(adapter, supervisorControlPlane, regi
       if (decision.status !== "allowed") return controlFailure(decision.code);
       try {
         const result = await adapter.execute(toolCallId, params, signal, onUpdate, ctx);
+        if (result?.isError === true) {
+          const compensation = await compensateSupervisorDelivery({ supervisorControlPlane, intent: decision.intent, hostRootSessionId, code: "SUPERVISOR_REPLY_DELIVERY_FAILED", primaryError: new Error("native reply returned isError"), diagnosticSink, phase: "reply" });
+          if (compensation) return controlFailure("SUPERVISOR_DELIVERY_COMPENSATION_BLOCKED");
+          return result;
+        }
         const committed = await supervisorControlPlane.commitDelivery({ intent: decision.intent }, hostRootSessionId);
 
         if (committed.status !== "committed") return controlFailure(committed.code, committed.receipt);

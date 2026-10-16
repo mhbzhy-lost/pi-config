@@ -1411,7 +1411,7 @@ test("maps approved control actions to RPC and requires a resume instruction", a
 
   for (const [action, params, expected] of [
     ["status", { action: "status", id: "run-1" }, { id: "run-1" }],
-    ["steer", { action: "steer", runId: "run-1", message: "Continue." }, { runId: "run-1", message: "Continue." }],
+    ["steer", { action: "steer", index: 0, runId: "run-1", message: "Continue." }, { index: 0, runId: "run-1", message: "Continue." }],
     ["interrupt", { action: "interrupt", dir: "/tmp/run-1" }, { dir: "/tmp/run-1" }],
     ["resume", { action: "resume", id: "run-1", runId: "run-1", dir: "/tmp/run-1", index: 2, message: "Continue with the new instruction." }, { id: "run-1", runId: "run-1", dir: "/tmp/run-1", index: 2, message: "Continue with the new instruction." }],
     ["stop", { action: "stop", id: "run-1" }, { id: "run-1" }],
@@ -1802,9 +1802,9 @@ test("configured supervisor control plane fences reply and steer delivery withou
   adapter.bind(async () => { nativeCalls += 1; return { content: [{ type: "text", text: "native" }] }; });
   createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, supervisorAdapter: adapter, supervisorControlPlane: controlPlane });
   const ingress = pi.handlers.get("message_end")[0];
-  await ingress({ message: { customType: "subagent_supervisor_request", details: { id: "request-1", runId: "run-1", reason: "needs approval" } } }, ctx);
+  await ingress({ message: { customType: "subagent_supervisor_request", details: { id: "request-1", runId: "run-1", correlation: { asyncDir: "/fixture/async", pid: 7, lifecycleSessionId: "fixture-session", processBirth: "fixture-birth", sessionFile: "/fixture/session", childSessionId: "child", toolCallId: "tool", agent: "executor", childIndex: 0, reason: "need_decision", requestBodyDigest: supervisorCanonicalDigest("body") }, reason: "needs approval" } } }, ctx);
 
-  const blockedSteer = await pi.tools[0].execute("steer-1", { action: "steer", runId: "run-1", message: "approve" }, signal, undefined, ctx);
+  const blockedSteer = await pi.tools[0].execute("steer-1", { action: "steer", index: 0, runId: "run-1", message: "approve" }, signal, undefined, ctx);
   assert.equal(blockedSteer.details.code, "SUPERVISOR_REPLY_REQUIRED");
   const absentReply = await pi.tools[2].execute("reply-absent", { action: "reply", replyTo: "missing", message: "approve" }, signal, undefined, ctx);
   assert.equal(absentReply.details.code, "SUPERVISOR_REQUEST_NOT_PENDING");
@@ -1815,8 +1815,8 @@ test("configured supervisor control plane fences reply and steer delivery withou
   const repeated = await pi.tools[2].execute("reply-1", { action: "reply", replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
   assert.equal(repeated.details.receiptId, "receipt-receipt-1");
   assert.equal(nativeCalls, 1);
-  const duplicateSteer = await pi.tools[0].execute("steer-2", { action: "steer", runId: "run-1", message: "approve" }, signal, undefined, ctx);
-  assert.equal(duplicateSteer.details.code, "SUPERVISOR_REPLY_REQUIRED");
+  const duplicateSteer = await pi.tools[0].execute("steer-2", { action: "steer", index: 0, runId: "run-1", message: "approve" }, signal, undefined, ctx);
+  assert.equal(duplicateSteer.details.code, "STEER_DUPLICATES_REPLY");
   assert.equal(rpc.calls.filter((call) => call.method === "steer").length, 0);
 });
 
@@ -1836,10 +1836,10 @@ test("worktree:false unowned contact_supervisor ask registers and reply commits 
   createTypedSubagentExtension(pi, { rpc: createRpc(), cleanupStore: {}, supervisorAdapter: adapter,
     supervisorControlPlane: plane, resolveRootSessionId: (sessionManager) => sessionManager.getSessionId() });
   const native = { id: "ask-unowned-1", runId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", agent: "delegate", childIndex: 0,
-    reason: "need decision", expectsReply: true }; // worktree:false is proven by broker unknown_run, not native message metadata
+    reason: "need decision", expectsReply: true, correlation: { asyncDir: "/fixture/async", pid: 7, lifecycleSessionId: "fixture-session", processBirth: "fixture-birth", sessionFile: "/fixture/session", childSessionId: "child", toolCallId: "tool", agent: "executor", childIndex: 0, reason: "need_decision", requestBodyDigest: supervisorCanonicalDigest("body") } }; // worktree:false is proven by broker unknown_run, not native message metadata
   await pi.handlers.get("message_end")[0]({ message: { customType: "subagent_supervisor_request", details: native } }, host);
   assert.equal(plane.listPending().length, 1, "ingress must register before reply");
-  const blockedSteer = await pi.tools[0].execute("steer-while-pending", { action: "steer", runId: native.runId, message: "approved" }, signal, undefined, host);
+  const blockedSteer = await pi.tools[0].execute("steer-while-pending", { action: "steer", index: 0, runId: native.runId, message: "approved" }, signal, undefined, host);
   assert.equal(blockedSteer.details.code, "SUPERVISOR_REPLY_REQUIRED");
   const reply = await pi.tools[2].execute("reply-unowned-1", { action: "reply", replyTo: native.id, message: "approved" }, signal, undefined, host);
   assert.equal(reply.isError, undefined, `registration=${JSON.stringify(pi.messages.at(-1)?.details)}, reply=${JSON.stringify(reply.details)}`);
@@ -1860,7 +1860,7 @@ test("worktree:false unowned contact_supervisor ask registers and reply commits 
   assert.equal(consumed.receipt.receiptId, replay.details.receiptId);
   assert.equal(plane.listPending().length, 0);
   assert.equal(plane.snapshot().requests[0].state, "replied");
-  const duplicateSteer = await pi.tools[0].execute("steer-duplicate-unowned", { action: "steer", runId: native.runId, message: "approved" }, signal, undefined, host);
+  const duplicateSteer = await pi.tools[0].execute("steer-duplicate-unowned", { action: "steer", index: 0, runId: native.runId, message: "approved" }, signal, undefined, host);
   assert.equal(duplicateSteer.details?.code, "STEER_DUPLICATES_REPLY", JSON.stringify(duplicateSteer));
   const redundant = await plane.resolveSupervisorControl(intent, "host-root-1");
   assert.equal(redundant.status, "idempotent");
@@ -2085,7 +2085,7 @@ test("supervisor control plane fails closed for stale owners, expired requests, 
     adapter.bind(async () => ({ content: [{ type: "text", text: "native" }] }));
     createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, supervisorAdapter: adapter, supervisorControlPlane: controlPlane });
     const ingress = pi.handlers.get("message_end")[0];
-    await ingress({ message: { customType: "subagent_supervisor_request", details: { id: "request-1", runId: "run-1", reason: "needs approval" } } }, ctx);
+    await ingress({ message: { customType: "subagent_supervisor_request", details: { id: "request-1", runId: "run-1", correlation: { asyncDir: "/fixture/async", pid: 7, lifecycleSessionId: "fixture-session", processBirth: "fixture-birth", sessionFile: "/fixture/session", childSessionId: "child", toolCallId: "tool", agent: "executor", childIndex: 0, reason: "need_decision", requestBodyDigest: supervisorCanonicalDigest("body") }, reason: "needs approval" } } }, ctx);
     return { pi, controlPlane };
   }
 
@@ -2103,8 +2103,8 @@ test("supervisor control plane fails closed for stale owners, expired requests, 
 
   const notRunning = await createScenario({ readRuntime: async (runId) => ({ runId, ownerGeneration: 1, liveRunEpoch: 4, running: false, steerable: true }) });
   await notRunning.pi.tools[2].execute("consume-request", { action: "reply", replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
-  const blockedSteer = await notRunning.pi.tools[0].execute("not-running", { action: "steer", runId: "run-1", message: "follow up" }, signal, undefined, ctx);
-  assert.equal(blockedSteer.details.code, "SUPERVISOR_REPLY_REQUIRED");
+  const blockedSteer = await notRunning.pi.tools[0].execute("not-running", { action: "steer", index: 0, runId: "run-1", message: "follow up" }, signal, undefined, ctx);
+  assert.equal(blockedSteer.details.code, "SUPERVISOR_STEER_NOT_ALLOWED");
 
   const runtimeOwnerMismatch = await createScenario({ readRuntime: async (runId) => ({ runId, ownerGeneration: 2, liveRunEpoch: 4, running: true, steerable: true }) });
   const mismatchReply = await runtimeOwnerMismatch.pi.tools[2].execute("runtime-owner-mismatch", { action: "reply", replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
@@ -2123,10 +2123,10 @@ test("steer on a run without a broker owner receipt bypasses the control plane a
     randomId: () => "receipt-1",
   });
   createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, supervisorControlPlane: controlPlane });
-  const result = await pi.tools[0].execute("steer-no-owner", { action: "steer", runId: "run-1", message: "Continue please." }, signal, undefined, ctx);
+  const result = await pi.tools[0].execute("steer-no-owner", { action: "steer", index: 0, runId: "run-1", message: "Continue please." }, signal, undefined, ctx);
   assert.equal(result.isError, false, JSON.stringify(result));
   assert.notEqual(result.details?.code, "SUPERVISOR_INTENT_INVALID", JSON.stringify(result));
-  assert.deepEqual(rpc.calls.filter((call) => call.method === "steer"), [{ method: "steer", params: { runId: "run-1", message: "Continue please." } }]);
+  assert.deepEqual(rpc.calls.filter((call) => call.method === "steer"), [{ method: "steer", params: { index: 0, runId: "run-1", message: "Continue please." } }]);
 });
 
 test("internal Supervisor target forwards the public two-argument handle through the native five-argument closure", async () => {
@@ -2448,14 +2448,14 @@ test("steer 拒绝 id 与 runId 冲突的别名目标，不得按其中一个放
   const { pi, rpc } = createSteerScenario({
     readOwnerReceipt: async (runId) => (runId === FULL_RUN_ID ? { runId, rootSessionId: "root-1", ownerGeneration: 1 } : undefined),
   });
-  const result = await pi.tools[0].execute("steer-conflict", { action: "steer", id: FULL_RUN_ID, runId: OTHER_FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
+  const result = await pi.tools[0].execute("steer-conflict", { action: "steer", index: 0, id: FULL_RUN_ID, runId: OTHER_FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
   assert.equal(result.details.code, "SUPERVISOR_STEER_TARGET_CONFLICT", JSON.stringify(result));
   assert.deepEqual(steerCalls(rpc), [], "冲突目标绝不得投递");
 });
 
 test("steer 拒绝 dir 别名目标，避免绕过 owner 判定", async () => {
   const { pi, rpc } = createSteerScenario({ readOwnerReceipt: async (runId) => ({ runId, rootSessionId: "root-1", ownerGeneration: 1 }) });
-  const result = await pi.tools[0].execute("steer-dir", { action: "steer", dir: `/tmp/async/${FULL_RUN_ID}`, message: "hi" }, signal, undefined, ctx);
+  const result = await pi.tools[0].execute("steer-dir", { action: "steer", index: 0, dir: `/tmp/async/${FULL_RUN_ID}`, message: "hi" }, signal, undefined, ctx);
   assert.equal(result.details.code, "SUPERVISOR_STEER_TARGET_ALIAS", JSON.stringify(result));
   assert.deepEqual(steerCalls(rpc), []);
 });
@@ -2464,35 +2464,35 @@ test("steer 拒绝前缀形态 runId，避免授权目标与上游扫描解析�
   const { pi, rpc } = createSteerScenario({
     readOwnerReceipt: async (runId) => (runId === FULL_RUN_ID ? { runId, rootSessionId: "root-1", ownerGeneration: 1 } : undefined),
   });
-  const result = await pi.tools[0].execute("steer-prefix", { action: "steer", runId: FULL_RUN_PREFIX, message: "hi" }, signal, undefined, ctx);
+  const result = await pi.tools[0].execute("steer-prefix", { action: "steer", index: 0, runId: FULL_RUN_PREFIX, message: "hi" }, signal, undefined, ctx);
   assert.equal(result.details.code, "SUPERVISOR_STEER_TARGET_AMBIGUOUS", JSON.stringify(result));
   assert.deepEqual(steerCalls(rpc), []);
 });
 
 test("owner 查询抛异常时 steer 必须 fail-closed，不得当作非受管放行", async () => {
   const { pi, rpc } = createSteerScenario({ readOwnerReceipt: async () => { throw new Error("ROOT_BROKER_UNAVAILABLE"); } });
-  const result = await pi.tools[0].execute("steer-owner-error", { action: "steer", runId: FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
+  const result = await pi.tools[0].execute("steer-owner-error", { action: "steer", index: 0, runId: FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
   assert.equal(result.details.code, "SUPERVISOR_OWNER_UNAVAILABLE", JSON.stringify(result));
   assert.deepEqual(steerCalls(rpc), []);
 });
 
 test("未接线 owner 读取依赖时 steer 必须 fail-closed", async () => {
   const { pi, rpc } = createSteerScenario({ withOwnerDep: false });
-  const result = await pi.tools[0].execute("steer-no-dep", { action: "steer", runId: FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
+  const result = await pi.tools[0].execute("steer-no-dep", { action: "steer", index: 0, runId: FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
   assert.equal(result.details.code, "SUPERVISOR_OWNER_UNAVAILABLE", JSON.stringify(result));
   assert.deepEqual(steerCalls(rpc), []);
 });
 
 test("明确非受管的精确 runId 仍可 steer 透传（原缺陷修复不得回归）", async () => {
   const { pi, rpc } = createSteerScenario({ readOwnerReceipt: async () => undefined });
-  const result = await pi.tools[0].execute("steer-unowned", { action: "steer", runId: FULL_RUN_ID, message: "Continue please." }, signal, undefined, ctx);
+  const result = await pi.tools[0].execute("steer-unowned", { action: "steer", index: 0, runId: FULL_RUN_ID, message: "Continue please." }, signal, undefined, ctx);
   assert.equal(result.isError, false, JSON.stringify(result));
-  assert.deepEqual(steerCalls(rpc), [{ method: "steer", params: { runId: FULL_RUN_ID, message: "Continue please." } }]);
+  assert.deepEqual(steerCalls(rpc), [{ method: "steer", params: { index: 0, runId: FULL_RUN_ID, message: "Continue please." } }]);
 });
 
 test("受管精确 runId 在 id 与 runId 同值时仍走控制面并成功投递", async () => {
   const { pi, rpc } = createSteerScenario({ readOwnerReceipt: async (runId) => ({ runId, rootSessionId: "root-1", ownerGeneration: 1 }) });
-  const result = await pi.tools[0].execute("steer-managed", { action: "steer", id: FULL_RUN_ID, runId: FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
+  const result = await pi.tools[0].execute("steer-managed", { action: "steer", index: 0, id: FULL_RUN_ID, runId: FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
   assert.equal(result.isError, false, JSON.stringify(result));
   assert.equal(steerCalls(rpc).length, 1, "受管 run 经控制面放行后应投递一次");
 });
@@ -2503,7 +2503,7 @@ test("broker 抛 unknown_run 时判定为明确非受管并透传 steer", async 
   const { pi, rpc } = createSteerScenario({
     readOwnerReceipt: async () => { throw Object.assign(new Error("Owner is no longer current"), { code: "unknown_run" }); },
   });
-  const result = await pi.tools[0].execute("steer-unknown-run", { action: "steer", runId: FULL_RUN_ID, message: "Continue please." }, signal, undefined, ctx);
+  const result = await pi.tools[0].execute("steer-unknown-run", { action: "steer", index: 0, runId: FULL_RUN_ID, message: "Continue please." }, signal, undefined, ctx);
   assert.equal(result.isError, false, JSON.stringify(result));
   assert.equal(steerCalls(rpc).length, 1, "unknown_run 是权威的非受管信号，应透传投递");
 });
@@ -2511,7 +2511,7 @@ test("broker 抛 unknown_run 时判定为明确非受管并透传 steer", async 
 test("broker 存储类错误一律 fail-closed，不得当作非受管放行", async () => {
   for (const code of ["authority_store_unavailable", "authority_lock_contention", "cas_conflict", "revoked", "unsupported_layout"]) {
     const { pi, rpc } = createSteerScenario({ readOwnerReceipt: async () => { throw Object.assign(new Error(code), { code }); } });
-    const result = await pi.tools[0].execute(`steer-${code}`, { action: "steer", runId: FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
+    const result = await pi.tools[0].execute(`steer-${code}`, { action: "steer", index: 0, runId: FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
     assert.equal(result.details.code, "SUPERVISOR_OWNER_UNAVAILABLE", `${code} 必须 fail-closed，实际 ${JSON.stringify(result)}`);
     assert.deepEqual(steerCalls(rpc), [], `${code} 绝不得投递`);
   }
@@ -2642,7 +2642,7 @@ const UNAVAILABLE_DIAGNOSTIC = {
   schemaVersion: "supervisor-diagnostics.v1", availability: "unavailable",
   code: "SUPERVISOR_DIAGNOSTICS_UNAVAILABLE", requests: [], receipts: [], complete: false,
 };
-const DIAGNOSTIC_REQUEST_KEYS = ["createdAt", "expiresAt", "ownerGeneration", "requestGeneration", "requestId", "runId", "state"];
+const DIAGNOSTIC_REQUEST_KEYS = ["classification", "createdAt", "expiresAt", "ownerGeneration", "requestGeneration", "requestId", "runId", "state"];
 /** D2 的唯一 state 文件名（与 supervisor-control-plane.ts 的 stateKey 一致）。 */
 const supervisorStateFile = (persistenceRoot, rootSessionId) =>
   join(persistenceRoot, `supervisor-${createHash("sha256").update(rootSessionId).digest("hex")}.json`);
@@ -2722,7 +2722,7 @@ test("supervisor status 透传 native content/details 并附本 root 的只读�
   assert.equal(diagnostic.complete, true);
   assert.equal("code" in diagnostic, false, "available 包络不带错误码");
   assert.deepEqual(diagnostic.requests.map((request) => request.requestId), ["ask-a", "ask-b"], "按 ID 稳定排序");
-  for (const request of diagnostic.requests) assert.deepEqual(Object.keys(request).sort(), DIAGNOSTIC_REQUEST_KEYS, "request 投影只能是白名单字段");
+  for (const request of diagnostic.requests) assert.deepEqual(Object.keys(request).sort(), [...DIAGNOSTIC_REQUEST_KEYS, ...(request.childIndex === undefined ? [] : ["childIndex"])].sort(), "request 投影只能是白名单字段");
   assert.deepEqual(diagnostic.receipts, []);
   assert.equal(scenario.count("status"), 1, "native status 只透传一次");
   assertNoCanary(diagnostic, "status 诊断");
@@ -2863,7 +2863,7 @@ test("supervisor reply 仅在 committed 后附 D0 receipt 投影：queued≠cons
   const diagnostic = status.details.supervisorDiagnostic;
   assert.equal(diagnostic.availability, "available");
   assert.deepEqual(diagnostic.receipts.map((entry) => [entry.requestId, entry.status, entry.consumed]), [["ask-1", "delivered", true], ["ask-2", "failed", false]]);
-  assert.deepEqual(diagnostic.requests.map((entry) => [entry.requestId, entry.state]), [["ask-1", "replied"], ["ask-2", "failed"]]);
+  assert.deepEqual(diagnostic.requests.map((entry) => [entry.requestId, entry.state]), [["ask-1", "replied"], ["ask-2", "pending"]]);
   assert.equal("idempotencyKey" in diagnostic.receipts[0], false, "receipt 投影不得暴露 idempotencyKey");
   assertNoCanary(diagnostic, "status 诊断");
 });

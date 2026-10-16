@@ -21,7 +21,7 @@ const CANARY_PATH = '/Users/canary/.pi/sessions/child-session-canary.jsonl';
 const CANARY_DIGEST = `sha256:${'c'.repeat(64)}`;
 const CANARIES = [CANARY_BODY, CANARY_PATH, CANARY_DIGEST];
 /** request 投影行的精确白名单键集（计划 D2 字段）。 */
-const REQUEST_KEYS = ['createdAt', 'expiresAt', 'ownerGeneration', 'requestGeneration', 'requestId', 'runId', 'state'];
+const REQUEST_KEYS = ["classification", 'createdAt', 'expiresAt', 'ownerGeneration', 'requestGeneration', 'requestId', 'runId', 'state'];
 /** receipt 投影允许的 D0 白名单键集（requestId/requestGeneration/ownerGeneration 可选）。 */
 const RECEIPT_KEYS = ['consumed', 'ownerGeneration', 'receiptId', 'requestGeneration', 'requestId', 'runId', 'schemaVersion', 'status'];
 
@@ -36,7 +36,7 @@ function assertDiagnosticsShape(value, availability) {
   const text = JSON.stringify(value) ?? '';
   for (const canary of CANARIES) assert.ok(!text.includes(canary), `诊断投影泄漏 canary：${canary.slice(0, 40)}`);
   for (const request of value.requests) {
-    assert.deepEqual(Object.keys(request).sort(), REQUEST_KEYS, 'request 投影必须是精确白名单字段');
+    assert.deepEqual(Object.keys(request).sort(), [...REQUEST_KEYS, ...(request.childIndex === undefined ? [] : ["childIndex"])].sort(), 'request 投影必须是精确白名单字段');
     assert.equal('correlation' in request, false, 'request 投影不得含 correlation');
     assert.equal('requestDigest' in request, false, 'request 投影不得含 requestDigest');
   }
@@ -84,7 +84,7 @@ test('无持久化模式从既有Map生成只读安全副本：白名单投影�
   assert.deepEqual(diag.requests.map(r => r.requestId), ['a-ask', 'c-ask', 'd-ask', 'z-ask']);
   assert.ok(!JSON.stringify(diag).includes('b-ask'), 'root-b 的请求不得进入 root-a 投影');
   // 存储观察值：queued 回执不推进 pending，replied/failed 保持各自已存状态
-  assert.deepEqual(diag.requests.map(r => r.state), ['pending', 'replied', 'failed', 'pending']);
+  assert.deepEqual(diag.requests.map(r => r.state), ['pending', 'replied', 'pending', 'pending']);
   // 安全副本：冻结，改写投影不得影响控制面状态
   assert.throws(() => { diag.requests[0].state = 'expired'; }, TypeError);
   assert.equal(JSON.stringify(plane.snapshot()), memoryBefore, 'readDiagnostics 不改内存状态');

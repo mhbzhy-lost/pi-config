@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { DurableStorage } from "./durable-storage.ts";
 import { projectSupervisorReceipt, type SupervisorReceiptDiagnosticV1 } from "./diagnostics.ts";
+import { classifyRequest, gateBlocksChildSteer, steerReceiptKey, replyPayloadGuardKey } from "./supervisor-gate-policy.ts";
 
 export type SupervisorRequestState = "pending" | "replying" | "replied" | "expired" | "failed";
 export type SupervisorRequestV1 = {
@@ -9,14 +10,20 @@ export type SupervisorRequestV1 = {
   createdAt: number; expiresAt: number; state: SupervisorRequestState;
   correlation?: { asyncDir: string; pid: number; lifecycleSessionId: string; processBirth: string; sessionFile: string; childSessionId: string; toolCallId: string; agent: string; childIndex: number; reason: string; requestBodyDigest: string };
 };
+export type SupervisorRequestV2 = Omit<SupervisorRequestV1, "schemaVersion"> & {
+  schemaVersion: "supervisor-request.v2"; childIndex?: number;
+};
+type SupervisorRequest = SupervisorRequestV1 | SupervisorRequestV2;
 export type SupervisorControlIntentV1 = {
   schemaVersion: "supervisor-control-intent.v1"; intentId: string; runId: string;
   rootSessionId: string; ownerGeneration: number; kind: "reply" | "steer"; payloadDigest: string;
   requestId?: string; requestGeneration?: number; liveRunEpoch?: number;
 };
+export type SupervisorControlIntentV2 = Omit<SupervisorControlIntentV1, "schemaVersion"> & { schemaVersion: "supervisor-control-intent.v2"; childIndex?: number };
+export type SupervisorControlIntent = SupervisorControlIntentV1 | SupervisorControlIntentV2;
 export type SupervisorDeliveryReceipt = {
   receiptId: string; idempotencyKey: string; kind: "reply" | "steer"; status: "queued" | "delivered" | "failed"; consumed: boolean;
-  runId: string; requestId?: string; code?: string; rootSessionId?: string; ownerGeneration?: number; requestGeneration?: number;
+  runId: string; requestId?: string; code?: string; rootSessionId?: string; ownerGeneration?: number; requestGeneration?: number; childIndex?: number; requestDigest?: string;
 };
 
 // A non-workspace run has no broker owner generation; only Host session authority can fence its requests.
@@ -30,6 +37,7 @@ const SUPERVISOR_DIAGNOSTICS_UNAVAILABLE = "SUPERVISOR_DIAGNOSTICS_UNAVAILABLE";
 export type SupervisorDiagnosticsRequestV1 = {
   requestId: string; runId: string; state: SupervisorRequestState;
   ownerGeneration: number; requestGeneration: number; createdAt: number; expiresAt: number;
+  childIndex?: number; classification?: string;
 };
 
 /** D2：supervisor 自身 root 有界只读诊断快照。unavailable 时为固定 code 的 fail closed，绝不解释成空 pending。 */
@@ -48,6 +56,7 @@ const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const isObject = (v: unknown): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
 const safeId = (v: unknown, name: string) => { if (typeof v !== "string" || !ID.test(v) || v.includes("..")) throw new Error(`${name} invalid`); return v; };
 const positive = (v: unknown, name: string) => { if (!Number.isSafeInteger(v) || (v as number) <= 0) throw new Error(`${name} invalid`); return v as number; };
+const nonnegative = (v: unknown, name: string) => { if (!Number.isSafeInteger(v) || (v as number) < 0) throw new Error(`${name} invalid`); return v as number; };
 const digestRef = (v: unknown, name: string) => { if (typeof v !== "string" || !DIGEST.test(v)) throw new Error(`${name} invalid`); return v; };
 const stable = (v: any): string => Array.isArray(v) ? `[${v.map(stable).join(",")}]` : isObject(v) ? `{${Object.keys(v).sort().map(k => `${JSON.stringify(k)}:${stable(v[k])}`).join(",")}}` : JSON.stringify(v);
 export function supervisorCanonicalDigest(value: unknown): string { return `sha256:${createHash("sha256").update(stable(value)).digest("hex")}`; }
@@ -82,6 +91,77 @@ export function parseSupervisorControlIntentV1(value: unknown): SupervisorContro
   return value as SupervisorControlIntentV1;
 }
 
+export function parseSupervisorControlIntent(value: unknown): SupervisorControlIntent {
+  if (!isObject(value) || value.schemaVersion === "supervisor-control-intent.v1") return parseSupervisorControlIntentV1(value);
+  if (value.schemaVersion !== "supervisor-control-intent.v2") throw new Error("intent schema unsupported");
+  const { childIndex, ...body } = value;
+  parseSupervisorControlIntentV1({ ...body, schemaVersion: "supervisor-control-intent.v1" });
+  if (value.kind === "steer" || Object.hasOwn(value, "childIndex")) nonnegative(childIndex, "childIndex");
+  return value as SupervisorControlIntentV2;
+}
+
+function requestChild(request: SupervisorRequest): number | undefined {
+  return request.correlation?.childIndex;
+}
+
+function parseStoredRequest(value: unknown): SupervisorRequest {
+  if (!isObject(value) || value.schemaVersion === "supervisor-request.v1") return parseSupervisorRequestV1(value);
+  if (value.schemaVersion !== "supervisor-request.v2") throw new Error("request schema unsupported");
+  const { childIndex, ...body } = value;
+  const legacy = parseSupervisorRequestV1({ ...body, schemaVersion: "supervisor-request.v1" });
+  if (Object.hasOwn(value, "childIndex")) {
+    nonnegative(childIndex, "childIndex");
+    if (childIndex !== legacy.correlation?.childIndex) throw new Error("request child scope mismatch");
+  } else if (legacy.correlation) throw new Error("request child scope missing");
+  return value as SupervisorRequestV2;
+}
+
+function migrateRequest(request: SupervisorRequest): SupervisorRequestV2 {
+  const childIndex = requestChild(request);
+  return { ...request, schemaVersion: "supervisor-request.v2", ...(childIndex === undefined ? {} : { childIndex }) };
+}
+
+function replyKey(intent: SupervisorControlIntent): string {
+  // 原v1键保持可读；v2键精确绑定root/run/owner，避免跨scope幂等碰撞。
+  return intent.schemaVersion === "supervisor-control-intent.v1"
+    ? `${intent.requestId}:${intent.requestGeneration}:${intent.payloadDigest}`
+    : `${intent.rootSessionId}:${intent.runId}:${intent.ownerGeneration}:${intent.requestId}:${intent.requestGeneration}:${intent.childIndex ?? "unverified"}:${intent.payloadDigest}`;
+}
+
+function parseStoredState(value: unknown, root: string) {
+  if (!isObject(value)) throw new Error("state must be object");
+  exact(value, ["schemaVersion", "rootSessionId", "requests", "receipts", "replyPayloads", "stateDigest"], "state");
+  if (!["supervisor-state.v1", "supervisor-state.v2"].includes(value.schemaVersion) || value.rootSessionId !== root
+    || !Array.isArray(value.requests) || !Array.isArray(value.receipts) || !Array.isArray(value.replyPayloads)) throw new Error("state schema invalid");
+  const { stateDigest, ...body } = value;
+  if (stateDigest !== supervisorCanonicalDigest(body)) throw new Error("state digest mismatch");
+  const parsedRequests = value.requests.map(raw => {
+    if (value.schemaVersion === "supervisor-state.v1" && raw?.schemaVersion !== "supervisor-request.v1") throw new Error("legacy request schema invalid");
+    const request = parseStoredRequest(raw);
+    if (request.rootSessionId !== root) throw new Error("request root mismatch");
+    return request;
+ });
+  const parsedReceipts = value.receipts.map(raw => {
+    const keys = ["receiptId", "idempotencyKey", "kind", "status", "consumed", "runId", "requestId", "code", "rootSessionId", "ownerGeneration", "requestGeneration", "requestDigest",
+      ...(value.schemaVersion === "supervisor-state.v2" ? ["childIndex"] : [])];
+    if (!isObject(raw) || Object.keys(raw).some(key => !keys.includes(key)) || raw.rootSessionId !== root
+      || typeof raw.idempotencyKey !== "string" || !["reply", "steer"].includes(raw.kind)
+      || !["queued", "delivered", "failed"].includes(raw.status) || typeof raw.consumed !== "boolean"
+      || (raw.status === "delivered") !== raw.consumed) throw new Error("receipt schema invalid");
+    safeId(raw.receiptId, "receiptId"); safeId(raw.runId, "runId"); positive(raw.ownerGeneration, "ownerGeneration");
+    if (raw.requestId !== undefined) safeId(raw.requestId, "requestId");
+    if (raw.requestGeneration !== undefined) positive(raw.requestGeneration, "requestGeneration");
+    if (raw.requestDigest !== undefined) digestRef(raw.requestDigest, "requestDigest");
+    if (raw.childIndex !== undefined) nonnegative(raw.childIndex, "childIndex");
+    return raw as SupervisorDeliveryReceipt;
+  });
+  for (const key of value.replyPayloads) {
+    if (typeof key !== "string" || !(key.startsWith(`${root}:`) || key.startsWith(`supervisor-reply-guard.v2:${root}:`))
+      || !/:sha256:[a-f0-9]{64}$/.test(key)) throw new Error("reply payload schema invalid");
+  }
+  return { requests: parsedRequests, receipts: parsedReceipts, replyPayloads: value.replyPayloads as string[] };
+}
+
 export type SupervisorOwnerState = "owned" | "unowned" | "unavailable";
 export type SupervisorRunIdentity = {
   owner: unknown;
@@ -95,7 +175,7 @@ export type SupervisorControlPlaneOptions = {
   now?: () => number; randomId?: () => string; persistenceRoot?: string; diagnosticSink?: (entry: unknown) => void;
 };
 export function createSupervisorControlPlane(options: SupervisorControlPlaneOptions = {}) {
-  const requests = new Map<string, SupervisorRequestV1>();
+  const requests = new Map<string, SupervisorRequest>();
   const receipts = new Map<string, SupervisorDeliveryReceipt>();
   const replyPayloads = new Set<string>();
   const now = options.now ?? (() => Date.now());
@@ -120,33 +200,24 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
     try {
       const saved: any = await storage.read(stateKey(root));
       const value: any = saved?.value ?? { schemaVersion: "supervisor-state.v1", rootSessionId: root, requests: [], receipts: [], replyPayloads: [], stateDigest: stateDigest({ schemaVersion: "supervisor-state.v1", rootSessionId: root, requests: [], receipts: [], replyPayloads: [] }) };
-      if (!isObject(value) || value.schemaVersion !== "supervisor-state.v1" || value.rootSessionId !== root || !Array.isArray(value.requests) || !Array.isArray(value.receipts) || !Array.isArray(value.replyPayloads) || typeof value.stateDigest !== "string") throw new Error("state schema invalid");
-      const { stateDigest: savedDigest, ...stateBody } = value;
-      if (savedDigest !== stateDigest(stateBody)) throw new Error("state digest mismatch");
-      for (const raw of value.requests) {
-        const request = parseSupervisorRequestV1(raw);
-        if (request.rootSessionId !== root) throw new Error("request root mismatch");
-        if (request.state === 'pending' && now() >= request.expiresAt) {
-          request.state = 'expired'; report({ type: 'supervisor-persistence-rejected', rootSessionId: root, requestId: request.requestId, code: 'SUPERVISOR_REQUEST_EXPIRED' });
+      const parsed = parseStoredState(value, root);
+      for (const request of parsed.requests) {
+        const migrated = migrateRequest(request);
+        if (migrated.state === 'pending' && now() >= migrated.expiresAt) {
+          migrated.state = 'expired'; report({ type: 'supervisor-persistence-rejected', rootSessionId: root, requestId: migrated.requestId, code: 'SUPERVISOR_REQUEST_EXPIRED' });
         }
-        requests.set(`${root}:${request.runId}:${request.ownerGeneration}:${request.requestId}:${request.requestDigest}`, request);
+        requests.set(`${root}:${migrated.runId}:${migrated.ownerGeneration}:${migrated.requestId}:${migrated.requestDigest}`, migrated);
       }
-      for (const raw of value.receipts) {
-        if (!isObject(raw) || Object.keys(raw).some(key => !["receiptId", "idempotencyKey", "kind", "status", "consumed", "runId", "requestId", "code", "rootSessionId", "ownerGeneration", "requestGeneration", "requestDigest"].includes(key)) || typeof raw.idempotencyKey !== "string" || typeof raw.receiptId !== "string" || raw.rootSessionId !== root || typeof raw.runId !== "string" || !Number.isSafeInteger(raw.ownerGeneration) || (raw.requestGeneration !== undefined && !Number.isSafeInteger(raw.requestGeneration)) || (raw.requestDigest !== undefined && !DIGEST.test(raw.requestDigest))) throw new Error("receipt schema invalid");
-        receipts.set(raw.idempotencyKey, raw as SupervisorDeliveryReceipt);
-      }
-      for (const raw of value.replyPayloads) {
-        if (typeof raw !== "string" || !raw.startsWith(`${root}:`) || !/:sha256:[a-f0-9]{64}$/.test(raw)) throw new Error("reply payload schema invalid");
-        replyPayloads.add(raw);
-      }
+      for (const receipt of parsed.receipts) receipts.set(receipt.idempotencyKey, receipt);
+      for (const payload of parsed.replyPayloads) replyPayloads.add(payload);
       loadedRoots.add(root);
       return true;
     } catch (error) { persistenceError(root, error); return false; }
   }
   async function saveRoot(root: string) {
     if (!storage || corruptRoots.has(root)) return;
-    const stateBody = { schemaVersion: "supervisor-state.v1", rootSessionId: root,
-      requests: [...requests.values()].filter(request => request.rootSessionId === root),
+    const stateBody = { schemaVersion: "supervisor-state.v2", rootSessionId: root,
+      requests: [...requests.values()].filter(request => request.rootSessionId === root).map(migrateRequest),
       receipts: [...receipts.values()].filter(receipt => receipt.rootSessionId === root),
       replyPayloads: [...replyPayloads].filter(payload => payload.startsWith(`${root}:`)) };
     const value = { ...stateBody, stateDigest: stateDigest(stateBody) };
@@ -158,8 +229,13 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
     throw new Error("SUPERVISOR_PERSISTENCE_CONFLICT");
   }
   // 所有公开durable操作在同一root锁内重载最新状态，禁止对陈旧snapshot只重试写。
+  const memoryLanes = new Map<string, Promise<unknown>>();
   async function transaction<T>(root: string, operation: () => Promise<T>): Promise<T> {
-    if (!storage) return operation();
+    if (!storage) {
+      const flight = (memoryLanes.get(root) ?? Promise.resolve()).catch(() => undefined).then(operation);
+      memoryLanes.set(root, flight);
+      try { return await flight; } finally { if (memoryLanes.get(root) === flight) memoryLanes.delete(root); }
+    }
     let release: (() => Promise<void>) | undefined;
     const deadline = Date.now() + 5000;
     for (;;) {
@@ -205,33 +281,59 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
     const existing = requests.get(key); if (existing) return { status: "registered" as const, request: existing };
     const t = now();
     const request = parseSupervisorRequestV1({ ...(native.correlation ? { correlation: native.correlation } : {}), schemaVersion: "supervisor-request.v1", requestId, runId: native.runId, rootSessionId: owner.rootSessionId, ownerGeneration: owner.ownerGeneration, requestGeneration: Number.isSafeInteger(native.requestGeneration) ? native.requestGeneration : 1, requestDigest, createdAt: t, expiresAt: t + 20 * 60 * 1000, state: "pending" });
-    requests.set(key, request); await saveRoot(owner.rootSessionId); return { status: "registered" as const, request };
+    const migrated = migrateRequest(request);
+    requests.set(key, migrated); await saveRoot(owner.rootSessionId); return { status: "registered" as const, request: migrated };
   }
-  function findPending(intent: SupervisorControlIntentV1) { return [...requests.values()].find(r => r.state === "pending" && r.runId === intent.runId && r.rootSessionId === intent.rootSessionId && r.ownerGeneration === intent.ownerGeneration && r.requestId === intent.requestId && r.requestGeneration === intent.requestGeneration); }
+  function findPending(intent: SupervisorControlIntent) { return [...requests.values()].find(r => r.state === "pending" && r.runId === intent.runId && r.rootSessionId === intent.rootSessionId && r.ownerGeneration === intent.ownerGeneration && r.requestId === intent.requestId && r.requestGeneration === intent.requestGeneration); }
   async function resolveSupervisorControl(intentInput: unknown, hostRootSessionId?: string) {
-    let intent: SupervisorControlIntentV1; try { intent = parseSupervisorControlIntentV1(intentInput); } catch { return blocked("SUPERVISOR_INTENT_INVALID"); }
+    let intent: SupervisorControlIntent; try { intent = parseSupervisorControlIntent(intentInput); } catch { return blocked("SUPERVISOR_INTENT_INVALID"); }
     if (!(await loadRoot(intent.rootSessionId))) return blocked("SUPERVISOR_PERSISTENCE_CORRUPT");
     const runtime: any = await options.readRuntime?.(intent.runId);
     const { state, receipt: owner } = await readOwnerState(intent.runId);
     if (state === "owned") {
       if (!owner || owner.rootSessionId !== intent.rootSessionId || owner.ownerGeneration !== intent.ownerGeneration || runtime?.ownerGeneration !== intent.ownerGeneration) return blocked("SUPERVISOR_STALE_OWNER");
     } else if (state !== "unowned" || typeof hostRootSessionId !== "string" || hostRootSessionId !== intent.rootSessionId || intent.ownerGeneration !== UNOWNED_OWNER_GENERATION) return blocked("SUPERVISOR_STALE_OWNER");
-    const pending = intent.kind === "steer"
-      ? [...requests.values()].find(r => r.state === "pending" && r.runId === intent.runId && r.rootSessionId === intent.rootSessionId && r.ownerGeneration === intent.ownerGeneration)
-      : findPending(intent);
-    const key = intent.kind === "reply" ? `${intent.requestId}:${intent.requestGeneration}:${intent.payloadDigest}` : `${intent.runId}:${intent.ownerGeneration}:${intent.payloadDigest}:${intent.liveRunEpoch}`;
+    const allReceipts = [...receipts.values()];
+    const childIndex = intent.schemaVersion === "supervisor-control-intent.v2" ? intent.childIndex : undefined;
+    // child身份仅用于steer隔离；reply旧合同和终局消费继续按精确request身份处理。
+    if (intent.kind === "steer") {
+      if (childIndex === undefined) return blocked("SUPERVISOR_STEER_CHILD_AMBIGUOUS");
+      if (!runtime?.running || runtime?.steerable !== true
+        || (intent.liveRunEpoch !== undefined && runtime.liveRunEpoch !== intent.liveRunEpoch)) return blocked("SUPERVISOR_STEER_NOT_ALLOWED");
+    }
+    const pending = intent.kind === "reply" ? findPending(intent) : undefined;
+    if (pending && childIndex !== undefined && requestChild(pending) !== childIndex) return blocked("SUPERVISOR_REQUEST_SCOPE_UNVERIFIED");
+    const steerKey = intent.kind === "steer" ? steerReceiptKey({ ...intent, childIndex }) : undefined;
+    if (steerKey?.status === "blocked") return blocked(steerKey.code);
+    const key = intent.kind === "reply" ? replyKey(intent) : steerKey?.status === "ok" ? steerKey.key : "";
     const prior = receipts.get(key);
     if (prior && (prior.rootSessionId !== intent.rootSessionId || prior.runId !== intent.runId || prior.ownerGeneration !== intent.ownerGeneration)) return blocked('SUPERVISOR_RECEIPT_IDENTITY_MISMATCH');
-    if (prior) return { status: "idempotent" as const, receipt: prior };
-    if (pending && intent.kind === "steer") return blocked("SUPERVISOR_REPLY_REQUIRED");
+    if (prior && prior.status !== "failed") return { status: "idempotent" as const, receipt: prior };
     if (!pending && intent.kind === "reply") return blocked("SUPERVISOR_REQUEST_NOT_PENDING");
     if (pending && now() >= pending.expiresAt) { pending.state = "expired"; return blocked("SUPERVISOR_REQUEST_EXPIRED"); }
-    if (intent.kind === "steer" && (!runtime?.running || runtime?.steerable !== true || (intent.liveRunEpoch !== undefined && runtime.liveRunEpoch !== intent.liveRunEpoch))) return blocked("SUPERVISOR_STEER_NOT_ALLOWED");
-    if (intent.kind === "steer" && replyPayloads.has(`${intent.rootSessionId}:${intent.runId}:${intent.ownerGeneration}:${intent.payloadDigest}`)) return blocked("STEER_DUPLICATES_REPLY");
+    if (intent.kind === "steer") {
+      const relevant = [...requests.values()].filter(r => ["pending", "replying"].includes(r.state)
+        && r.runId === intent.runId && r.rootSessionId === intent.rootSessionId && r.ownerGeneration === intent.ownerGeneration);
+      for (const request of relevant) {
+        const classification = classifyRequest(request, allReceipts, now());
+        if (classification.status === "rejected") return blocked(classification.code);
+        if (classification.classification === "scope-unverified") return blocked("SUPERVISOR_REQUEST_SCOPE_UNVERIFIED");
+        if (gateBlocksChildSteer(classification, childIndex)) return blocked("SUPERVISOR_REPLY_REQUIRED", { requestId: request.requestId, childIndex });
+      }
+      // 重复reply正文保护按child核对；queued不是consumed，但已提交正文仍不能重复steer。
+      const duplicate = [...requests.values()].some(request => request.rootSessionId === intent.rootSessionId
+        && request.runId === intent.runId && request.ownerGeneration === intent.ownerGeneration && requestChild(request) === childIndex
+        && allReceipts.some(receipt => receipt.kind === "reply" && receipt.status !== "failed"
+          && receipt.rootSessionId === request.rootSessionId && receipt.runId === request.runId
+          && receipt.ownerGeneration === request.ownerGeneration && receipt.requestId === request.requestId
+          && receipt.requestGeneration === request.requestGeneration && receipt.idempotencyKey.endsWith(`:${intent.payloadDigest}`)));
+      const guard = replyPayloadGuardKey({ ...intent, childIndex });
+      if (duplicate || (guard.status === "ok" && replyPayloads.has(guard.key))) return blocked("STEER_DUPLICATES_REPLY");
+    }
     return { status: "allowed" as const, intent, idempotencyKey: key, request: pending };
   }
   async function commitDelivery(input: { intent: unknown; success?: boolean; code?: string; consumed?: boolean }, hostRootSessionId?: string) {
-    const intent = parseSupervisorControlIntentV1(input.intent); const decision: any = await resolveSupervisorControl(intent, hostRootSessionId);
+    const intent = parseSupervisorControlIntent(input.intent); const decision: any = await resolveSupervisorControl(intent, hostRootSessionId);
     if (decision.status === "idempotent") {
       // A queued follow-up is not terminally delivered yet. The child may
       // later consume the same correlated payload, so allow that observation
@@ -241,7 +343,10 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
         decision.receipt.consumed = true;
         const request = intent.kind === 'reply' ? [...requests.values()].find(r=>r.state!=='failed' && r.runId===intent.runId && r.rootSessionId===intent.rootSessionId && r.ownerGeneration===intent.ownerGeneration && r.requestId===intent.requestId && r.requestGeneration===intent.requestGeneration) : undefined;
         if (request) request.state = "replied";
-        if (intent.kind === "reply") replyPayloads.add(`${intent.rootSessionId}:${intent.runId}:${intent.ownerGeneration}:${intent.payloadDigest}`);
+        if (intent.kind === "reply" && request?.correlation) {
+          const guard = replyPayloadGuardKey({ ...intent, childIndex: requestChild(request) });
+          if (guard.status === "ok") replyPayloads.add(guard.key);
+        }
         await saveRoot(intent.rootSessionId);
         return { status: "committed" as const, receipt: decision.receipt };
       }
@@ -249,11 +354,15 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
     }
     if (decision.status !== "allowed") return decision;
     const consumed = input.consumed === true;
-    const receipt: SupervisorDeliveryReceipt = { receiptId: `receipt-${id()}`, idempotencyKey: decision.idempotencyKey, kind: intent.kind, status: input.success === false ? "failed" : consumed ? "delivered" : "queued", consumed, runId: intent.runId, rootSessionId: intent.rootSessionId, ownerGeneration: intent.ownerGeneration, ...(intent.requestGeneration ? { requestGeneration: intent.requestGeneration } : {}), ...(intent.requestId ? { requestId: intent.requestId } : {}), ...(input.code ? { code: input.code } : {}) };
+    const receipt: SupervisorDeliveryReceipt = { receiptId: `receipt-${id()}`, idempotencyKey: decision.idempotencyKey, kind: intent.kind, status: input.success === false ? "failed" : consumed ? "delivered" : "queued", consumed, runId: intent.runId, rootSessionId: intent.rootSessionId, ownerGeneration: intent.ownerGeneration, ...(("childIndex" in intent && intent.childIndex !== undefined) ? { childIndex: intent.childIndex } : {}), ...(decision.request ? { requestDigest: decision.request.requestDigest } : {}), ...(intent.requestGeneration ? { requestGeneration: intent.requestGeneration } : {}), ...(intent.requestId ? { requestId: intent.requestId } : {}), ...(input.code ? { code: input.code } : {}) };
     receipts.set(decision.idempotencyKey, receipt);
     if (intent.kind === "reply" && decision.request) {
-      decision.request.state = receipt.status === "delivered" ? "replied" : receipt.status === "failed" ? "failed" : "pending";
-      if (receipt.status === "delivered") replyPayloads.add(`${intent.rootSessionId}:${intent.runId}:${intent.ownerGeneration}:${intent.payloadDigest}`);
+      // 投递失败不终结待回复义务；同一请求允许显式重试。
+      decision.request.state = receipt.status === "delivered" ? "replied" : "pending";
+      if (receipt.status === "delivered" && decision.request.correlation) {
+        const guard = replyPayloadGuardKey({ ...intent, childIndex: requestChild(decision.request) });
+        if (guard.status === "ok") replyPayloads.add(guard.key);
+      }
     }
     await saveRoot(intent.rootSessionId);
     return { status: "committed" as const, receipt };
@@ -285,36 +394,30 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
     if (!(await loadRoot(hostRootSessionId))) return blocked('SUPERVISOR_PERSISTENCE_CORRUPT');
     const request = [...requests.values()].find(r => r.rootSessionId === hostRootSessionId && r.runId === observation.runId && r.requestId === observation.requestId);
     if (!request) return blocked('SUPERVISOR_REQUEST_NOT_PENDING');
-    const key = `${request.requestId}:${request.requestGeneration}:${observation.payloadDigest}`;
-    const receipt = receipts.get(key);
-    if (!receipt || receipt.kind !== 'reply' || receipt.rootSessionId !== hostRootSessionId || receipt.runId !== request.runId || receipt.ownerGeneration !== request.ownerGeneration || receipt.requestGeneration !== request.requestGeneration || receipt.status === 'failed') return blocked('SUPERVISOR_CONSUMPTION_MISMATCH');
-    const intent = { schemaVersion: 'supervisor-control-intent.v1' as const, intentId: receipt.receiptId, rootSessionId: request.rootSessionId, runId: request.runId, ownerGeneration: request.ownerGeneration, kind: 'reply' as const, requestId: request.requestId, requestGeneration: request.requestGeneration, payloadDigest: observation.payloadDigest };
+    // 以完整请求身份定位原receipt；旧v1键原样读取，不为缺child事实猜0。
+    const base = { intentId: "consumption", rootSessionId: request.rootSessionId, runId: request.runId, ownerGeneration: request.ownerGeneration,
+      kind: "reply" as const, requestId: request.requestId, requestGeneration: request.requestGeneration, payloadDigest: observation.payloadDigest };
+    const legacy = { ...base, schemaVersion: "supervisor-control-intent.v1" as const };
+    const current = { ...base, schemaVersion: "supervisor-control-intent.v2" as const,
+      ...(requestChild(request) === undefined ? {} : { childIndex: requestChild(request) }) };
+    const receipt = receipts.get(replyKey(current)) ?? receipts.get(replyKey(legacy));
+    if (!receipt || receipt.kind !== 'reply' || receipt.rootSessionId !== hostRootSessionId || receipt.runId !== request.runId
+      || receipt.ownerGeneration !== request.ownerGeneration || receipt.requestGeneration !== request.requestGeneration || receipt.status === 'failed') return blocked('SUPERVISOR_CONSUMPTION_MISMATCH');
+    const intent = receipt.idempotencyKey === replyKey(current) ? current : legacy;
     return markDeliveryConsumed(intent, hostRootSessionId);
   }
   // D2：持久化模式下按既有 schema/stateDigest 语义只读重读自身 root 已存 state。
   // 不做 TTL 过期改写、不写 corruptRoots、不触发诊断 sink、不改任何 Map/Set；
   // 任何校验失败直接抛出，由 readDiagnostics 统一 fail closed，绝不新增宽容分支。
-  async function readPersistedRootStateForDiagnostics(root: string): Promise<{ requests: SupervisorRequestV1[]; receipts: SupervisorDeliveryReceipt[] }> {
+  async function readPersistedRootStateForDiagnostics(root: string): Promise<{ requests: SupervisorRequest[]; receipts: SupervisorDeliveryReceipt[] }> {
     if (!storage) throw new Error("diagnostics storage unavailable");
     const saved: any = await storage.read(stateKey(root));
     if (!saved) return { requests: [], receipts: [] };
     const value: any = saved.value;
-    if (!isObject(value) || value.schemaVersion !== "supervisor-state.v1" || value.rootSessionId !== root || !Array.isArray(value.requests) || !Array.isArray(value.receipts) || !Array.isArray(value.replyPayloads) || typeof value.stateDigest !== "string") throw new Error("state schema invalid");
-    const { stateDigest: savedDigest, ...stateBody } = value;
-    if (savedDigest !== stateDigest(stateBody)) throw new Error("state digest mismatch");
-    const persistedRequests: SupervisorRequestV1[] = [];
-    for (const raw of value.requests) {
-      const request = parseSupervisorRequestV1(raw);
-      if (request.rootSessionId !== root) throw new Error("request root mismatch");
-      persistedRequests.push(request);
-    }
-    const persistedReceipts: SupervisorDeliveryReceipt[] = [];
-    for (const raw of value.receipts) {
-      if (!isObject(raw) || Object.keys(raw).some(key => !["receiptId", "idempotencyKey", "kind", "status", "consumed", "runId", "requestId", "code", "rootSessionId", "ownerGeneration", "requestGeneration", "requestDigest"].includes(key)) || typeof raw.idempotencyKey !== "string" || typeof raw.receiptId !== "string" || raw.rootSessionId !== root || typeof raw.runId !== "string" || !Number.isSafeInteger(raw.ownerGeneration) || (raw.requestGeneration !== undefined && !Number.isSafeInteger(raw.requestGeneration)) || (raw.requestDigest !== undefined && !DIGEST.test(raw.requestDigest))) throw new Error("receipt schema invalid");
-      persistedReceipts.push(raw as SupervisorDeliveryReceipt);
-    }
-    return { requests: persistedRequests, receipts: persistedReceipts };
+    const parsed = parseStoredState(value, root);
+    return { requests: parsed.requests, receipts: parsed.receipts };
   }
+
   // D2：supervisor 自身 root 的有界只读 provenance 投影（只读安全副本）。
   // 唯一允许的文件系统副作用是 DurableStorage.read 首次为自身 persistenceRoot 执行的 0700
   // ensureRoot mkdir；已有 state 文件字节/mtime 不变。不调用 loadRoot/ready/transaction
@@ -330,7 +433,7 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
         if (filter.requestId !== undefined && (typeof filter.requestId !== "string" || !ID.test(filter.requestId) || filter.requestId.includes(".."))) throw new Error("diagnostics filter invalid");
         requestIdFilter = filter.requestId;
       }
-      let storedRequests: SupervisorRequestV1[];
+      let storedRequests: SupervisorRequest[];
       let storedReceipts: SupervisorDeliveryReceipt[];
       if (storage) {
         // 持久化模式：直接 read 唯一 DurableStorage 对应 root 的已存 state 并验证既有 schema/digest。
@@ -354,6 +457,8 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
         requestId: request.requestId, runId: request.runId, state: request.state,
         ownerGeneration: request.ownerGeneration, requestGeneration: request.requestGeneration,
         createdAt: request.createdAt, expiresAt: request.expiresAt,
+        ...(requestChild(request) === undefined ? {} : { childIndex: requestChild(request) }),
+        classification: (() => { const value = classifyRequest(request, storedReceipts, now()); return value.status === "classified" ? value.classification : "scope-unverified"; })(),
       }));
       const projectedReceipts: SupervisorReceiptDiagnosticV1[] = [];
       for (const receipt of storedReceipts.slice(0, DIAGNOSTICS_GROUP_LIMIT)) {
