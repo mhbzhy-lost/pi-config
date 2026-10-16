@@ -9,11 +9,14 @@ import { compileDispatchIR, isCodingDispatch, CodingDispatchContractError, rende
 import { createManagedWorkspaceRequestV2 } from "../workspace/contract.ts";
 import { findManagedWorkspaceService } from "../workspace/registry.ts";
 import { createSubagentWorkspaceTool } from "../workspace/tool.ts";
+import { createWorkspaceOperationTools } from "../workspace/operation-tools.ts";
 import { createTypedSubagentRpcClient, negotiateCapabilities } from "./rpc-client.ts";
 import { createHeadlessSubagentApi } from "./runtime-membrane.ts";
 import { buildWorkflowSpawn, createWorkflowChildStartCollector, childStartTimeoutMs } from "./workflow-spawn.ts";
 import { getTitleRegistry, normalizeSubagentTitle } from "./title-registry.ts";
 import { createSupervisorAdapter, createSupervisorTool } from "./supervisor-adapter.ts";
+import { createSubagentOperationTools } from "./operation-tools.ts";
+import { createSupervisorOperationTools } from "./supervisor-operation-tools.ts";
 import { supervisorCanonicalDigest, type SupervisorDiagnosticsRequestV1, type SupervisorDiagnosticsV1 } from "./supervisor-control-plane.ts";
 import { findGoalRunCoordinator } from "./root-broker-registry.ts";
 import { resolveModelCandidates, resolveModelSelection, type ModelSelectionWarning } from "./model-selection.ts";
@@ -1690,11 +1693,13 @@ function cleanupRegistry(cleanupStore) {
   return registry;
 }
 
-function deactivateSupervisorTool(pi) {
+// S4：未 bind 时同步停用三个 supervisor_request_* 模型工具，不留 active 声明；
+// gate 计划的 inspect/clear 仍由其自身可用性策略决定，本函数不代替它注册或停用。
+function deactivateSupervisorTool(pi, names: readonly string[]) {
   if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
   const activeTools = pi.getActiveTools();
-  if (!Array.isArray(activeTools) || !activeTools.includes("subagent_supervisor")) return;
-  pi.setActiveTools(activeTools.filter((name) => name !== "subagent_supervisor"));
+  if (!Array.isArray(activeTools) || !activeTools.some((name) => names.includes(name))) return;
+  pi.setActiveTools(activeTools.filter((name) => !names.includes(name)));
 }
 
 export function createSupervisorRequestMailbox(route, { limit = 1024 } = {}) {
@@ -1961,23 +1966,52 @@ export function createTypedSubagentExtension(
       }
     },
   };
-  const workspaceTool = createSubagentWorkspaceTool({
+  const workspaceToolOptions = {
     service: (ownerScope) => requireWorkspaceService(pi, workspaceService, ownerScope.rootSessionId),
     resolveRootSessionId: resolveRootSessionId ?? (() => { throw Object.assign(new Error("WORKSPACE_SESSION_ID_UNAVAILABLE"), { code: "WORKSPACE_SESSION_ID_UNAVAILABLE" }); }),
+  };
+  // 旧 union 定义保留但不注册（计划 §2.2 硬切换）：它们只是兼容入口与内部 execute
+  // 闭包的宿主，不形成第二执行权威；新工具的执行回调就是同一批闭包。
+  const workspaceTool = createSubagentWorkspaceTool({
+    ...workspaceToolOptions,
     renderCall: renderWorkspaceCall,
     renderResult: renderWorkspaceResult,
   });
+  // Host 的 render context 不含工具名（pi tool-execution.js getRenderContext），而新工具
+  // 不再携带 args.action；因此注册时按工具名把提示注入已有 renderer 闭包。
+  // 只改显示层入参，不改 args/result/details，也不在 headless runtime 里引入 TUI 实现。
+  const withToolRendererHint = (definition, renderCall, renderResult) => Object.freeze({
+    ...definition,
+    ...(typeof renderCall === "function"
+      ? { renderCall: (args: unknown, theme: unknown, context: any) => renderCall(args, theme, { ...context, tool: definition.name }) } : {}),
+    ...(typeof renderResult === "function"
+      ? { renderResult: (result: unknown, options: unknown, theme: unknown, context: any) => renderResult(result, options, theme, { ...context, tool: definition.name }) } : {}),
+  });
+  // 唯一模型注册面：14 个每操作独立工具（无 gate inspect/clear，它们仍 blocked）。
+  // start/roster/run_* 全部委托 tool.execute 同一闭包：factory 已剥除 action 并注入固定
+  // action，因此 coding/generic 路由、owner/CAS、gate 与 isError 失败语义全部沿用。
+  const subagentOperationTools = createSubagentOperationTools({
+    executeStart: (toolCallId, input, signal, onUpdate, ctx) => tool.execute(toolCallId, input, signal, onUpdate, ctx),
+    executeControl: (toolCallId, input, signal, onUpdate, ctx) => tool.execute(toolCallId, input, signal, onUpdate, ctx),
+  }).map((definition) => withToolRendererHint(definition, renderSubagentCall, renderSubagentResult));
+  const workspaceOperationTools = createWorkspaceOperationTools(workspaceToolOptions)
+    .map((definition) => withToolRendererHint(definition, renderWorkspaceCall, renderWorkspaceResult));
   const registrationFailures = new Map<string, string>();
   const controlledSupervisorAdapter = supervisorAdapter ? createControlledSupervisorAdapter(supervisorAdapter, supervisorControlPlane, registrationFailures, resolveRootSessionId, diagnosticSink) : undefined;
   const supervisorTool = controlledSupervisorAdapter ? createSupervisorTool(controlledSupervisorAdapter, {
     renderCall: renderSupervisorCall,
     renderResult: renderSupervisorResult,
   }) : undefined;
+  const supervisorOperationTools = controlledSupervisorAdapter
+    ? createSupervisorOperationTools(controlledSupervisorAdapter)
+      .map((definition) => withToolRendererHint(definition, renderSupervisorCall, renderSupervisorResult))
+    : [];
+  const supervisorOperationToolNames = Object.freeze(supervisorOperationTools.map((definition) => definition.name));
   let requiredChildExtensionsRegistration;
   let ready;
   try {
-    pi.registerTool(tool);
-    pi.registerTool(workspaceTool);
+    for (const definition of subagentOperationTools) pi.registerTool(definition);
+    for (const definition of workspaceOperationTools) pi.registerTool(definition);
 
     if (typeof onSupervisorRequest === "function" || supervisorControlPlane) {
       pi.on("message_end", async (event, ctx) => {
@@ -2009,7 +2043,7 @@ export function createTypedSubagentExtension(
       });
     }
 
-    if (supervisorTool) pi.registerTool(supervisorTool);
+    for (const definition of supervisorOperationTools) pi.registerTool(definition);
 
     shutdownDebt = { attempted: false, completed: false, inFlight: undefined, run: undefined, event: undefined, ctx: undefined };
     shutdownDebt.run = async (event, ctx, force = false) => {
@@ -2085,12 +2119,12 @@ export function createTypedSubagentExtension(
       await ready(event, ctx);
     });
     pi.on("session_shutdown", shutdownDebt.run);
-    if (supervisorTool) {
+    if (supervisorOperationTools.length > 0) {
       pi.on("session_start", async (event, ctx) => {
         if (registry.get(pi)?.token !== token) return;
         await ready(event, ctx);
         if (registry.get(pi)?.token !== token || supervisorAdapter.isBound()) return;
-        deactivateSupervisorTool(pi);
+        deactivateSupervisorTool(pi, supervisorOperationToolNames);
         const error = new Error("SUPERVISOR_TARGET_UNAVAILABLE");
         error.code = "SUPERVISOR_TARGET_UNAVAILABLE";
         throw error;

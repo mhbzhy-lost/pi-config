@@ -169,7 +169,7 @@ export class AcceptanceRpcHost {
           this.phase = "first-tool";
           this.firstToolTimeout = setTimeout(() => this.fail(acceptanceError("FIRST_TOOL_TIMEOUT", "acceptance RPC host first-tool timed out")), this.firstToolTimeoutMs);
         }
-        if (record.type === "tool_execution_start" && record.toolName === "subagent") {
+        if (record.type === "tool_execution_start" && record.toolName === "subagent_start") {
           this.phase = "settlement";
           clearTimeout(this.firstToolTimeout);
         }
@@ -405,7 +405,7 @@ export function collectPublicDispatchBindings(hosts, audit) {
   };
   for (const host of hosts) {
     for (const record of host.records) {
-      if (record.type !== "tool_execution_end" || record.toolName !== "subagent" || record.result?.isError === true) continue;
+      if (record.type !== "tool_execution_end" || record.toolName !== "subagent_start" || record.result?.isError === true) continue;
       const details = record.result?.details;
       if (!details?.taskId) continue;
       if (typeof details.runId !== "string" || !details.runId) throw new Error("host dispatch binding is missing public runId");

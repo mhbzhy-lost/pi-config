@@ -151,6 +151,13 @@ function codingContract(overrides = {}) {
   };
 }
 
+// S4：按工具名解析注册面，不以 tools 数组位置为权威。
+function startTool(host) {
+  const found = (host.tools ?? []).find((tool) => tool?.name === "subagent_start");
+  if (!found) throw new Error("subagent_start must be registered");
+  return found;
+}
+
 function install(pi, options = {}) {
   createTypedSubagentExtension(pi, {
     cleanupStore: {},
@@ -158,7 +165,7 @@ function install(pi, options = {}) {
     discoverAgents: async () => ({ agents: [{ name: "executor" }] }),
     ...options,
   });
-  return pi.tools[0];
+  return startTool(pi);
 }
 
 function execute(tool, input, ctx = { cwd: CANARY_ROOT }) {

@@ -8,6 +8,13 @@ import { createSubagentDispatchTraceFileSink, createTypedSubagentExtension } fro
 import { projectRpcNegotiation } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/diagnostics.ts";
 import { readBoundedDispatchTrace } from "../scripts/probes/subagent-dispatch-startup.ts";
 
+// S4：按工具名解析注册面，不以 tools 数组位置为权威。
+function startTool(host) {
+  const found = (host.tools ?? []).find((tool) => tool?.name === "subagent_start");
+  if (!found) throw new Error("subagent_start must be registered");
+  return found;
+}
+
 function createPi() {
   const tools = [];
   const listeners = new Map();
@@ -57,7 +64,7 @@ test("records correlated dispatch phases without retaining task content", async 
     discoverAgents: async () => ({ agents: [{ name: "executor" }] }),
   });
 
-  const result = await pi.tools[0].execute("tool-1", {
+  const result = await startTool(pi).execute("tool-1", {
     agent: "executor", title: "Trace", task: "secret task body",
   }, undefined, undefined, { cwd: "/repo" });
 

@@ -9,6 +9,13 @@ import { createTypedSubagentExtension } from "../packages/pi-subagents-enhanced/
 // 失败注入 code 用 authority_store_unavailable（修复面②引入的 authority_lock_contention
 // 重试后仍失败的场景在语义上等价于这里的最终失败）。
 
+// S4：按工具名解析注册面，不以 tools 数组位置为权威。
+function startTool(host) {
+  const found = (host.tools ?? []).find((tool) => tool?.name === "subagent_start");
+  if (!found) throw new Error("subagent_start must be registered");
+  return found;
+}
+
 function createPi() {
   const tools = [];
   const handlers = new Map();
@@ -155,7 +162,7 @@ test("generic dispatch：spawn 成功后注册失败对已 spawn 的 root/leaf �
     async registerAuthorizedRun() { throw authorityStoreUnavailable(); },
   });
 
-  const result = await execute(pi.tools[0], {
+  const result = await execute(startTool(pi), {
     agent: "executor",
     title: "Rollback probe",
     task: "Probe the spawn failure rollback.",
@@ -194,7 +201,7 @@ test("尽力语义：stop 失败仅记日志，不影响原失败错误上抛", 
   console.error = (...args) => { logged.push(args.map((value) => String(value)).join(" ")); };
   let result;
   try {
-    result = await execute(pi.tools[0], {
+    result = await execute(startTool(pi), {
       agent: "executor",
       title: "Best-effort probe",
       task: "Probe that stop failure never masks the dispatch error.",
@@ -225,7 +232,7 @@ test("generic dispatch：onBinding 同步抛错时对已 spawn 的 root/leaf 发
     registerAuthorizedRun() { throw authorityStoreUnavailable(); },
   });
 
-  const result = await execute(pi.tools[0], {
+  const result = await execute(startTool(pi), {
     agent: "executor",
     title: "Sync throw probe",
     task: "Probe the synchronous onBinding failure rollback.",
@@ -252,7 +259,7 @@ test("leaf 启动等待超时时对已 spawn 的 workflow root 发起尽力 stop
     registerAuthorizedRun() {},
   });
 
-  const result = await execute(pi.tools[0], {
+  const result = await execute(startTool(pi), {
     agent: "executor",
     title: "Timeout rollback probe",
     task: "Probe the leaf-wait timeout rollback.",
@@ -289,7 +296,7 @@ test("coding managed workspace：注册失败回滚已 spawn 的 root/leaf，原
   });
 
   const result = await execute(
-    pi.tools[0],
+    startTool(pi),
     codingContract({ worktree: true }),
     { cwd: "/repo", sessionManager: {} },
   );
@@ -310,7 +317,7 @@ test("成功路径零行为变化：注册成功后不发起任何 stop", async 
     async registerAuthorizedRun(authorization) { registered.push(authorization); },
   });
 
-  const result = await execute(pi.tools[0], {
+  const result = await execute(startTool(pi), {
     agent: "executor",
     title: "Success path probe",
     task: "Probe that successful dispatches never stop their runs.",

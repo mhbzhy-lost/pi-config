@@ -45,7 +45,7 @@ test('真实runtime startup失败不得泄漏已注册ceiling或开放typed spaw
  assert.ok(h.errors.length>0,'真实startup必须失败');
  const identity=h.session.sessionManager.getSessionFile() ?? h.session.sessionId;
  assert.equal(ceiling.resolveCurrentSubagentCapabilityCeiling(identity),undefined,'startup失败回滚ceiling');
- const result=await h.invoke('subagent',{agent:'executor',task:'不允许副作用',title:'startup failure'});
+ const result=await h.invoke('subagent_start',{agent:'executor',task:'不允许副作用',title:'startup failure'});
  assert.equal(result.isError,true);
 });
 

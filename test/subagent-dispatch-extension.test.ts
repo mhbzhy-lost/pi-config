@@ -46,6 +46,23 @@ function setup({ sessionId = "s" }: { sessionId?: string } = {}) {
   return { pi, rpc, calls, tools };
 }
 
+// S4：注册面为每操作独立工具；按名解析，不以 tools 数组位置为权威。
+const CONTROL_TOOL_BY_ACTION: Record<string, string> = {
+  list: "subagent_roster", status: "subagent_run_status", steer: "subagent_run_steer",
+  interrupt: "subagent_run_interrupt", resume: "subagent_run_resume", stop: "subagent_run_stop",
+};
+function toolByName(tools: any[], name: string) {
+  const found = tools.find((tool: any) => tool?.name === name);
+  assert.ok(found, `${name} must be registered`);
+  return found;
+}
+function startTool(tools: any[]) {
+  return toolByName(tools, "subagent_start");
+}
+function controlTool(tools: any[], action: string) {
+  return toolByName(tools, CONTROL_TOOL_BY_ACTION[action]);
+}
+
 function workflowLeaf(params: any) {
   const match = String(params.script).match(/runs\.run\("[^"]+", (.*)\);/);
   assert.ok(match?.[1]);
@@ -135,8 +152,9 @@ test("T7 follow-up receipt becomes delivered only after child consumption", asyn
   } as const;
   await plane.commitDelivery({ intent: replyIntent, consumed: true });
   const intent = {
-    schemaVersion: "supervisor-control-intent.v1", intentId: "intent-1", runId: "run-1", rootSessionId: "root-1",
-    ownerGeneration: 1, kind: "steer", payloadDigest: `sha256:${"a".repeat(64)}`, liveRunEpoch: 2,
+    // G2 合同：steer 必须显式携带 childIndex（v2），缺 index 一律拒绝而不猜 0/不广播。
+    schemaVersion: "supervisor-control-intent.v2", intentId: "intent-1", runId: "run-1", rootSessionId: "root-1",
+    ownerGeneration: 1, kind: "steer", childIndex: 0, payloadDigest: `sha256:${"a".repeat(64)}`, liveRunEpoch: 2,
   } as const;
   const queued = await plane.commitDelivery({ intent, consumed: false });
   assert.equal(queued.receipt.status, "queued");
@@ -186,13 +204,15 @@ async function assertCallerTimeoutRejected(name: string, input: any) {
     workspaceService: { ensureAllocated() { allocations += 1; throw new Error("workspace must not be reached"); } },
   });
 
-  const result = await tools[0].execute(`caller-timeout-${name}`, input, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+  const result = await startTool(tools).execute(`caller-timeout-${name}`, input, undefined, undefined, { cwd: "/repo", sessionManager: {} });
   assert.equal(discoveries, 0, `${name}: discovery`);
   assert.equal(allocations, 0, `${name}: workspace allocation`);
   assert.equal(rpcCalls, 0, `${name}: RPC`);
   assert.equal(calls.length, 0, `${name}: spawn`);
   assert.equal(result.isError, true, name);
-  assert.equal(result.details.code, "INVALID_CONTRACT", name);
+  // 新工具边界：timeoutMs 不在 schema，也不透传，直接在操作工具 fail closed（不再触达编译器/RPC）。
+  assert.equal(result.details.code, "INVALID_DISPATCH", name);
+  assert.equal(result.details.keypath, "$.timeoutMs", name);
 }
 
 test("coding object timeout is rejected before discovery, workspace allocation, and RPC", async () => {
@@ -229,11 +249,11 @@ test("caller timeout is rejected even with an active coordinator that issues no 
     },
   });
 
-  const result = await tools[0].execute("caller-timeout-no-ticket", { ...contract, timeoutMs: 1_000, worktree: true }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+  const result = await startTool(tools).execute("caller-timeout-no-ticket", { ...contract, timeoutMs: 1_000, worktree: true }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
 
   assert.equal(result.isError, true);
-  assert.equal(result.details.code, "INVALID_CONTRACT");
-  assert.equal(result.details.keypath, "timeoutMs");
+  assert.equal(result.details.code, "INVALID_DISPATCH");
+  assert.equal(result.details.keypath, "$.timeoutMs");
   assert.equal(prepareSpawnCalls, 0, "invalid caller timeout must fail before coordinator preflight");
 
   assert.equal(discoveries, 0, "discovery");
@@ -262,7 +282,7 @@ test("Host 的 coding child 覆盖上游 30 分钟默认值且不超过 timer �
   const { pi, rpc, calls, tools } = setup();
   createTestExtension(pi, { rpc, cleanupStore: {} });
 
-  const coding = await tools[0].execute("host-coding-timeout", {
+  const coding = await startTool(tools).execute("host-coding-timeout", {
     ...contract,
     cwd: "/repo",
   }, undefined, undefined, { cwd: "/repo" });
@@ -276,7 +296,7 @@ test("Host 的 coding child 覆盖上游 30 分钟默认值且不超过 timer �
 test("generic child 显式覆盖上游 30 分钟默认值且 collector 仍有界", async () => {
   const { pi, rpc, calls, tools } = setup();
   createTestExtension(pi, { rpc, cleanupStore: {} });
-  const generic = await tools[0].execute("host-generic-timeout", {
+  const generic = await startTool(tools).execute("host-generic-timeout", {
     agent: "reviewer", title: "Review", task: "Inspect.",
   }, undefined, undefined, { cwd: "/repo" });
 
@@ -290,7 +310,7 @@ test("generic child 使用长 execution deadline，child-start collector 仍为 
   const { pi, rpc, calls, tools } = setup();
   createTestExtension(pi, { rpc, cleanupStore: {} });
 
-  const result = await tools[0].execute("generic-collector-default", {
+  const result = await startTool(tools).execute("generic-collector-default", {
     agent: "reviewer", title: "Review", task: "Inspect.",
   }, undefined, undefined, { cwd: "/repo" });
 
@@ -338,7 +358,7 @@ test("coding spawn binds the Goal coordinator through a same-root different-Exte
   bindGoalRunCoordinatorSession(goalPi, "root-shared", coordinator);
   try {
     createTestExtension(pi, { rpc, cleanupStore: {}, workspaceService, resolveRootSessionId() { return "root-shared"; } });
-    const result = await tools[0].execute("goal-wrapper-bridge", { ...contract, worktree: true }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+    const result = await startTool(tools).execute("goal-wrapper-bridge", { ...contract, worktree: true }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
     assert.equal(result.isError, false, result.content[0]?.text);
     assert.equal(bindings.length, 1);
     assert.equal(bindings[0].ticket.ticketId, "a".repeat(64));
@@ -379,7 +399,7 @@ test("Goal trusted contract keeps a non-default caller timeout and canonical has
     workspaceService,
   });
 
-  const result = await tools[0].execute("goal-trusted-timeout", goalInput, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+  const result = await startTool(tools).execute("goal-trusted-timeout", goalInput, undefined, undefined, { cwd: "/repo", sessionManager: {} });
 
   assert.equal(result.isError, false, result.content[0]?.text);
   assert.equal(result.details.contractHash, expectedHash);
@@ -427,7 +447,7 @@ test("Goal coding spawn allocates through the shared service in the exact four-s
     async prepareCodingSpawn() { order.push("prepareCodingSpawn"); },
   });
 
-  const result = await tools[0].execute("goal-unified", {
+  const result = await startTool(tools).execute("goal-unified", {
     ...contract,
     worktree: true,
   }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
@@ -490,7 +510,7 @@ test("standalone coding worktree uses the same service and binds without Goal re
     },
   });
 
-  const result = await tools[0].execute("standalone-call", {
+  const result = await startTool(tools).execute("standalone-call", {
     ...contract,
     worktree: true,
   }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
@@ -514,7 +534,7 @@ test("generic shared run registers owner authority without a managed worktree", 
   const { pi, rpc, tools } = setup({ sessionId: "root-generic-no-worktree" });
   const registered: any[] = [];
   createTestExtension(pi, { rpc, cleanupStore: {}, registerAuthorizedRun: (authorization: any) => registered.push(authorization) });
-  const result = await tools[0].execute("generic-no-worktree", { agent: "reviewer", title: "Review", task: "Inspect the shared workspace." }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+  const result = await startTool(tools).execute("generic-no-worktree", { agent: "reviewer", title: "Review", task: "Inspect the shared workspace." }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
   assert.equal(result.isError, false, result.content[0]?.text);
   assert.deepEqual(registered[0], {
     version: "subagent-run-authorization.v1",
@@ -552,7 +572,7 @@ test("generic worktree uses the unified service without enabling upstream worktr
     registerAuthorizedRun(authorization: any) { strictAuthorizationRegistrar("generic", registered)(authorization); },
   });
 
-  const result = await tools[0].execute("generic-call", {
+  const result = await startTool(tools).execute("generic-call", {
     agent: "reviewer",
     title: "Review",
     task: "Inspect the managed workspace.",
@@ -585,8 +605,8 @@ test("coding without a worktree does not register Goal ownership", async () => {
     registerAuthorizedRun(authorization: any) { registrations.push(authorization); },
   });
 
-  const coding = await tools[0].execute("plain-coding", contract, undefined, undefined, { cwd: "/repo" });
-  const generic = await tools[0].execute("plain-generic", { agent: "executor", title: "Review", task: "Inspect." }, undefined, undefined, { cwd: "/repo" });
+  const coding = await startTool(tools).execute("plain-coding", contract, undefined, undefined, { cwd: "/repo" });
+  const generic = await startTool(tools).execute("plain-generic", { agent: "executor", title: "Review", task: "Inspect." }, undefined, undefined, { cwd: "/repo" });
 
   assert.equal(coding.isError, false, coding.content[0]?.text);
   assert.equal(generic.isError, false, generic.content[0]?.text);
@@ -606,10 +626,10 @@ test("renamed standalone profiles do not acquire Goal authorization", async () =
   });
 
   for (const agent of ["coder-alpha", "coder-beta"]) {
-    const result = await tools[0].execute(`renamed-${agent}`, { ...contract, agent }, undefined, undefined, { cwd: "/repo" });
+    const result = await startTool(tools).execute(`renamed-${agent}`, { ...contract, agent }, undefined, undefined, { cwd: "/repo" });
     assert.equal(result.isError, false, result.content[0]?.text);
   }
-  const generic = await tools[0].execute("same-profile-generic", { agent: "coder-alpha", title: "Inspect", task: "Read only." }, undefined, undefined, { cwd: "/repo" });
+  const generic = await startTool(tools).execute("same-profile-generic", { agent: "coder-alpha", title: "Inspect", task: "Read only." }, undefined, undefined, { cwd: "/repo" });
 
   assert.equal(generic.isError, false, generic.content[0]?.text);
   assert.equal(registrations.length, 1);
@@ -641,7 +661,7 @@ test("Goal coding registers exact ticket authority before returning a handle", a
     registerAuthorizedRun(authorization: any) { registered.push(authorization); },
   });
 
-  const result = await tools[0].execute("goal-authority", { ...contract, agent: "coder-alpha", worktree: true }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+  const result = await startTool(tools).execute("goal-authority", { ...contract, agent: "coder-alpha", worktree: true }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
 
   assert.equal(result.isError, false, result.content[0]?.text);
   assert.deepEqual(registered[0], {
@@ -679,7 +699,7 @@ test("standalone coding rejects registration failure and preserves the active un
     registerAuthorizedRun() { throw Object.assign(new Error("broker unavailable"), { code: "BROKER_UNAVAILABLE" }); },
   });
 
-  const result = await tools[0].execute("registration-failure", { ...contract, agent: "coder-alpha", worktree: true }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+  const result = await startTool(tools).execute("registration-failure", { ...contract, agent: "coder-alpha", worktree: true }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
 
 
   assert.equal(result.isError, true);
@@ -698,7 +718,7 @@ test("standalone lifecycle session does not create Goal authorization", async ()
     registerAuthorizedRun(value: any) { strictAuthorizationRegistrar("coding", registrations)(value); },
   });
 
-  const result = await tools[0].execute("session-mismatch", { ...contract, agent: "coder-alpha" }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
+  const result = await startTool(tools).execute("session-mismatch", { ...contract, agent: "coder-alpha" }, undefined, undefined, { cwd: "/repo", sessionManager: {} });
 
   assert.equal(result.isError, false, result.content[0]?.text);
   assert.deepEqual(registrations, []);
@@ -713,7 +733,7 @@ test("unsafe lifecycle session does not matter without Goal authorization", asyn
     registerAuthorizedRun() { registrations += 1; },
   });
 
-  const result = await tools[0].execute("unsafe-session", { ...contract, agent: "coder-alpha" }, undefined, undefined, { cwd: "/repo" });
+  const result = await startTool(tools).execute("unsafe-session", { ...contract, agent: "coder-alpha" }, undefined, undefined, { cwd: "/repo" });
 
   assert.equal(result.isError, true);
   assert.equal(registrations, 0);
@@ -722,7 +742,7 @@ test("unsafe lifecycle session does not matter without Goal authorization", asyn
 test("coding spawn leaves executor model selection to ordered agent metadata", async () => {
   const { pi, rpc, calls, tools } = setup();
   createTestExtension(pi, { rpc, cleanupStore: {} });
-  const result = await tools[0].execute("ordered-models", contract, undefined, undefined, { cwd: "/repo" });
+  const result = await startTool(tools).execute("ordered-models", contract, undefined, undefined, { cwd: "/repo" });
   assert.equal(workflowLeaf(calls[0]?.params).agent, "executor");
   assert.equal(Object.hasOwn(workflowLeaf(calls[0]?.params), "model"), false);
   assert.deepEqual(result.details.modelSelection, { source: "default" });
@@ -739,7 +759,7 @@ test("coding spawn resolves the first available bare model from executor metadat
       return { agents: [{ name: "executor", models: ["codex-pool/gpt-5.6-luna", "openai-codex/gpt-5.6-luna"] }] };
     },
   });
-  const result = await tools[0].execute("model-luna", { ...contract, model: "gpt-5.6-luna" }, undefined, undefined, {
+  const result = await startTool(tools).execute("model-luna", { ...contract, model: "gpt-5.6-luna" }, undefined, undefined, {
     cwd: "/repo",
     modelRegistry: { getAvailable() { return [{ provider: "openai-codex", id: "gpt-5.6-luna", api: "openai-completions" }]; } },
   });
@@ -752,31 +772,34 @@ test("coding spawn resolves the first available bare model from executor metadat
 test("coding spawn resolves durable metadata exactly once", async () => {
   const { pi, rpc, calls, tools } = setup(); const resolved = [];
   createTestExtension(pi, { rpc, cleanupStore: {}, resolveCodingSpawnIdentity(value) { resolved.push(value); return { requestId: "durable-dispatch-1", spawnKey: "durable-dispatch-1" }; } });
-  const result = await tools[0].execute("tool-call-identity-1", contract, undefined, undefined, { cwd: "/repo" });
+  const result = await startTool(tools).execute("tool-call-identity-1", contract, undefined, undefined, { cwd: "/repo" });
   assert.equal(result.isError, false, result.content[0]?.text); assert.equal(resolved.length, 1); assert.equal(calls.length, 1);
   assert.equal(result.details.dispatchId, "durable-dispatch-1");
   assert.equal(result.details.runId, "leaf-1");
   assert.equal(result.details.asyncDir, "/tmp/leaf-1");
 });
 
-test("coding spawn resolver receives the raw contract", async () => {
+test("coding spawn resolver receives the caller contract content without control fields", async () => {
   const { pi, rpc, tools } = setup(); const resolved = [];
   createTestExtension(pi, { rpc, cleanupStore: {}, resolveCodingSpawnIdentity(value) { resolved.push(value); return { requestId: "durable-dispatch-2", spawnKey: "durable-dispatch-2" }; } });
-  await tools[0].execute("tool-call-identity-2", contract, undefined, undefined, { cwd: "/repo" });
-  assert.strictEqual(resolved[0]?.contract, contract);
+  await startTool(tools).execute("tool-call-identity-2", contract, undefined, undefined, { cwd: "/repo" });
+  // 新操作工具边界按白名单重建入参（不透传 action/未知字段），因此不再保持对象引用同一；
+  // 合同内容逐项等价，且 compiled hash 用例证明下游编译结果不变。
+  assert.deepEqual(resolved[0]?.contract, contract);
+  assert.equal(Object.hasOwn(resolved[0]?.contract ?? {}, "action"), false);
 });
 
 test("coding spawn resolver receives the tool call id", async () => {
   const { pi, rpc, tools } = setup(); const resolved = [];
   createTestExtension(pi, { rpc, cleanupStore: {}, resolveCodingSpawnIdentity(value) { resolved.push(value); return { requestId: "durable-dispatch-2", spawnKey: "durable-dispatch-2" }; } });
-  await tools[0].execute("tool-call-identity-2", contract, undefined, undefined, { cwd: "/repo" });
+  await startTool(tools).execute("tool-call-identity-2", contract, undefined, undefined, { cwd: "/repo" });
   assert.equal(resolved[0]?.toolCallId, "tool-call-identity-2");
 });
 
 test("coding spawn resolver receives the exact compiled hash", async () => {
   const { pi, rpc, tools } = setup(); const resolved = [];
   createTestExtension(pi, { rpc, cleanupStore: {}, resolveCodingSpawnIdentity(value) { resolved.push(value); return { requestId: "durable-dispatch-2", spawnKey: "durable-dispatch-2" }; } });
-  await tools[0].execute("tool-call-identity-2", contract, undefined, undefined, { cwd: "/repo" });
+  await startTool(tools).execute("tool-call-identity-2", contract, undefined, undefined, { cwd: "/repo" });
   assert.equal(resolved[0]?.contractHash, preparePublicCodingDispatch(contract, { cwd: "/repo", timeoutMs: 30 * 60_000 }).contractHash);
 
 });
@@ -785,7 +808,7 @@ test("coding spawn forwards resolver metadata raw as RPC options and excludes sp
   const { pi, rpc, calls, tools } = setup();
   const metadata = { requestId: "durable-dispatch-3", spawnKey: "durable-dispatch-3" };
   createTestExtension(pi, { rpc, cleanupStore: {}, resolveCodingSpawnIdentity() { return metadata; } });
-  await tools[0].execute("tool-call-identity-3", contract, undefined, undefined, { cwd: "/repo" });
+  await startTool(tools).execute("tool-call-identity-3", contract, undefined, undefined, { cwd: "/repo" });
   assert.equal(calls[0]?.options?.requestId, metadata.requestId);
   assert.equal(calls[0]?.options?.spawnKey, metadata.spawnKey);
   assert.equal(typeof calls[0]?.options?.diagnostic?.sink, "function");
@@ -795,12 +818,12 @@ test("coding spawn forwards resolver metadata raw as RPC options and excludes sp
 test("coding and generic spawns forward thinkingLevel to the child thinking override", async () => {
   const codingEnv = setup();
   createTestExtension(codingEnv.pi, { rpc: codingEnv.rpc, cleanupStore: {} });
-  await codingEnv.tools[0].execute("thinking-coding", { ...contract, thinkingLevel: "low" }, undefined, undefined, { cwd: "/repo" });
+  await startTool(codingEnv.tools).execute("thinking-coding", { ...contract, thinkingLevel: "low" }, undefined, undefined, { cwd: "/repo" });
   assert.equal(workflowLeaf(codingEnv.calls[0]?.params).thinking, "low");
 
   const genericEnv = setup();
   createTestExtension(genericEnv.pi, { rpc: genericEnv.rpc, cleanupStore: {} });
-  await genericEnv.tools[0].execute("thinking-generic", { agent: "executor", title: "低思考", task: "验证思考级别透传。", thinkingLevel: "low" }, undefined, undefined, { cwd: "/repo" });
+  await startTool(genericEnv.tools).execute("thinking-generic", { agent: "executor", title: "低思考", task: "验证思考级别透传。", thinkingLevel: "low" }, undefined, undefined, { cwd: "/repo" });
   assert.equal(workflowLeaf(genericEnv.calls[0]?.params).thinking, "low");
 });
 
@@ -810,7 +833,7 @@ test("coding prepare runs after ping and before spawn", async () => {
   const spawn = rpc.spawn;
   rpc.spawn = async (...args) => { order.push("spawn"); return spawn(...args); };
   createTestExtension(pi, { rpc, cleanupStore: {}, async prepareCodingSpawn() { order.push("prepare"); } });
-  await tools[0].execute("prepare-call", contract, undefined, undefined, { cwd: "/repo" });
+  await startTool(tools).execute("prepare-call", contract, undefined, undefined, { cwd: "/repo" });
   assert.deepEqual(order, ["ping", "prepare", "spawn"]);
 });
 
@@ -820,14 +843,14 @@ test("coding prepare runs before durable identity resolution", async () => {
   const spawn = rpc.spawn;
   rpc.spawn = async (...args) => { order.push("spawn"); return spawn(...args); };
   createTestExtension(pi, { rpc, cleanupStore: {}, async prepareCodingSpawn() { order.push("prepare"); }, resolveCodingSpawnIdentity() { order.push("resolveIdentity"); return { requestId: "x", spawnKey: "x" }; } });
-  await tools[0].execute("prepare-resolver-call", contract, undefined, undefined, { cwd: "/repo" });
+  await startTool(tools).execute("prepare-resolver-call", contract, undefined, undefined, { cwd: "/repo" });
   assert.deepEqual(order, ["ping", "prepare", "resolveIdentity", "spawn"]);
 });
 
 test("coding prepare failure prevents identity resolution and spawn", async () => {
   const { pi, rpc, calls, tools } = setup(); let resolved = 0;
   createTestExtension(pi, { rpc, cleanupStore: {}, async prepareCodingSpawn() { throw new Error("owner wrapper failed"); }, resolveCodingSpawnIdentity() { resolved += 1; return { requestId: "x", spawnKey: "x" }; } });
-  const result = await tools[0].execute("prepare-fail", contract, undefined, undefined, { cwd: "/repo" });
+  const result = await startTool(tools).execute("prepare-fail", contract, undefined, undefined, { cwd: "/repo" });
   assert.equal(result.isError, true); assert.match(result.content[0].text, /owner wrapper failed/);
   assert.equal(calls.length, 0); assert.equal(resolved, 0);
 });
@@ -835,15 +858,15 @@ test("coding prepare failure prevents identity resolution and spawn", async () =
 test("generic and control dispatches never prepare or resolve coding spawn identity", async () => {
   const { pi, rpc, tools } = setup(); let resolved = 0; let prepared = 0;
   createTestExtension(pi, { rpc, cleanupStore: {}, async prepareCodingSpawn() { prepared += 1; }, resolveCodingSpawnIdentity() { resolved += 1; return { requestId: "x", spawnKey: "x" }; } });
-  await tools[0].execute("generic-call", { agent: "reviewer", title: "Review", task: "Inspect." }, undefined, undefined, { cwd: "/repo" });
-  await tools[0].execute("control-call", { action: "status", id: "run-1" }, undefined, undefined, { cwd: "/repo" });
+  await startTool(tools).execute("generic-call", { agent: "reviewer", title: "Review", task: "Inspect." }, undefined, undefined, { cwd: "/repo" });
+  await controlTool(tools, "status").execute("control-call", { id: "run-1" }, undefined, undefined, { cwd: "/repo" });
   assert.equal(resolved, 0); assert.equal(prepared, 0);
 });
 
 test('省略model也校验profile virtual，RPC与workspace副作用为0', async () => {
   const { pi, rpc, calls, tools } = setup();
   createTestExtension(pi, { rpc, cleanupStore: {}, discoverAgents: () => ({ agents: [{ name: 'executor', models: ['fixture/virtual'] }] }) });
-  const result = await tools[0].execute('virtual-default', contract, undefined, undefined, {
+  const result = await startTool(tools).execute('virtual-default', contract, undefined, undefined, {
     cwd: '/repo', modelRegistry: { getAvailable: () => [{ provider: 'fixture', id: 'virtual', api: 'pi-virtual' }] },
   });
   assert.equal(result.isError, true);

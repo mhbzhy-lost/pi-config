@@ -367,7 +367,7 @@ test("probe maps typed dispatch receipts to run-named ready files without detail
   for (const [index, task] of ACCEPTANCE_TASKS.entries()) {
     const runId = `run-${task.name}`;
     const workspaceId = `workspace-${task.name}`;
-    records.push({ type: "tool_execution_end", toolName: "subagent", result: { isError: false, details: { taskId: `acceptance-${task.name}`, runId, workspace_id: workspaceId, lease_id: `lease-${task.name}` } } });
+    records.push({ type: "tool_execution_end", toolName: "subagent_start", result: { isError: false, details: { taskId: `acceptance-${task.name}`, runId, workspace_id: workspaceId, lease_id: `lease-${task.name}` } } });
     await writeFile(join(barrier, `${runId}.ready.json`), `${JSON.stringify({ schemaVersion: "repository-merge-queue-ready.v1", runId, worktree: `/tmp/worktree-${index}`, baseCommit: "a".repeat(40), pid: 100 + index })}\n`);
   }
   const children = await acceptanceProbe.collectAcceptanceReady(barrier, {
@@ -379,7 +379,7 @@ test("probe maps typed dispatch receipts to run-named ready files without detail
 
 test("public dispatch bindings normalize snake_case host identity against camelCase audit identity", () => {
   const host = {
-    records: [{ type: "tool_execution_end", toolName: "subagent", result: { details: {
+    records: [{ type: "tool_execution_end", toolName: "subagent_start", result: { details: {
       taskId: "acceptance-parse", runId: "run-parse", workspace_id: "workspace-parse", lease_id: "lease-parse",
     } } }],
   };
@@ -398,7 +398,7 @@ test("preallocated audit workspace remains unready until the host ends and audit
   const barrier = await mkdtemp(join(tmpdir(), "acceptance-transient-binding-"));
   t.after(() => rm(barrier, { recursive: true, force: true }));
   const host = {
-    records: [{ type: "tool_execution_start", toolName: "subagent", toolCallId: "acceptance-parse" }],
+    records: [{ type: "tool_execution_start", toolName: "subagent_start", toolCallId: "acceptance-parse" }],
     assertHealthy() {},
   };
   const preallocated = { inventory: { workspaces: [{ receipt: {
@@ -417,7 +417,7 @@ test("preallocated audit workspace remains unready until the host ends and audit
     readAudit: async () => {
       reads += 1;
       if (reads === 1) return preallocated;
-      host.records.push({ type: "tool_execution_end", toolName: "subagent", result: { isError: false, details: {
+      host.records.push({ type: "tool_execution_end", toolName: "subagent_start", result: { isError: false, details: {
         taskId: "acceptance-parse", runId: "run-parse", workspace_id: "workspace-parse", lease_id: "lease-parse",
       } } });
       return { inventory: { workspaces: [{ receipt: {
@@ -433,7 +433,7 @@ test("preallocated audit workspace remains unready until the host ends and audit
 });
 
 test("successful host end waits for a bounded audit run binding and reports it missing on timeout", async () => {
-  const host = { records: [{ type: "tool_execution_end", toolName: "subagent", result: { isError: false, details: {
+  const host = { records: [{ type: "tool_execution_end", toolName: "subagent_start", result: { isError: false, details: {
     taskId: "acceptance-parse", runId: "run-parse", workspace_id: "workspace-parse", lease_id: "lease-parse",
   } } }], assertHealthy() {} };
   const preallocated = { inventory: { workspaces: [{ receipt: {
@@ -453,18 +453,18 @@ test("public dispatch bindings fail closed for duplicate task identity mismatche
   for (const [field, value] of [["runId", "run-other"], ["workspace_id", "workspace-other"], ["lease_id", "lease-other"]]) {
     const changed = { ...base, [field]: value };
     assert.throws(() => acceptanceProbe.collectPublicDispatchBindings([
-      { records: [{ type: "tool_execution_end", toolName: "subagent", result: { details: base } }] },
-      { records: [{ type: "tool_execution_end", toolName: "subagent", result: { details: changed } }] },
+      { records: [{ type: "tool_execution_end", toolName: "subagent_start", result: { details: base } }] },
+      { records: [{ type: "tool_execution_end", toolName: "subagent_start", result: { details: changed } }] },
     ], {}), /duplicate dispatch binding mismatch/);
   }
   assert.throws(() => acceptanceProbe.collectPublicDispatchBindings([{
-    records: [{ type: "tool_execution_end", toolName: "subagent", result: { details: base } }],
+    records: [{ type: "tool_execution_end", toolName: "subagent_start", result: { details: base } }],
   }], { inventory: { workspaces: [{ receipt: {
     owner: { toolCallId: "acceptance-parse" }, run: { runId: "run-other" }, workspaceId: "workspace-parse", leaseId: "lease-parse",
   } }] } }), /public dispatch binding mismatch/);
   for (const [field, value] of [["workspaceId", "workspace-other"], ["leaseId", "lease-other"]]) {
     assert.throws(() => acceptanceProbe.collectPublicDispatchBindings([{
-      records: [{ type: "tool_execution_end", toolName: "subagent", result: { details: base } }],
+      records: [{ type: "tool_execution_end", toolName: "subagent_start", result: { details: base } }],
     }], { inventory: { workspaces: [{ receipt: {
       owner: { toolCallId: "acceptance-parse" }, run: null,
       workspaceId: "workspace-parse", leaseId: "lease-parse", [field]: value,
@@ -562,7 +562,7 @@ test("RPC hosts write one prompt, dispatch 3+2 calls, and remain alive until set
   await writeFile(fake, `
     import { stdin } from "node:process";
     let input = ""; stdin.setEncoding("utf8");
-    stdin.on("data", (chunk) => { input += chunk; if (!input.includes("\\n")) return; const request = JSON.parse(input.trim()); const count = Number(process.env.COUNT); process.stdout.write(JSON.stringify({ type: "prompt_received", message: request.message }) + "\\n"); for (let i = 0; i < count; i++) process.stdout.write(JSON.stringify({ type: "tool_execution_end", toolName: "subagent", result: { details: { task: "task-" + i } } }) + "\\n"); });
+    stdin.on("data", (chunk) => { input += chunk; if (!input.includes("\\n")) return; const request = JSON.parse(input.trim()); const count = Number(process.env.COUNT); process.stdout.write(JSON.stringify({ type: "prompt_received", message: request.message }) + "\\n"); for (let i = 0; i < count; i++) process.stdout.write(JSON.stringify({ type: "tool_execution_end", toolName: "subagent_start", result: { details: { task: "task-" + i } } }) + "\\n"); });
   `);
   t.after(() => rm(root, { recursive: true, force: true }));
   const plan = createAcceptanceDispatchPlan();
@@ -640,7 +640,7 @@ test("five failed subagent tool ends abort public audit settlement before its ti
   await writeFile(fake, `
     process.stdin.once("data", () => {
       for (let index = 0; index < 5; index++) process.stdout.write(JSON.stringify({
-        type: "tool_execution_end", toolName: "subagent", isError: true,
+        type: "tool_execution_end", toolName: "subagent_start", isError: true,
         result: { isError: true, error: { code: "CHILD_FAILED", message: "child " + index + " failed" }, details: { arguments: { apiKey: "credential" } } },
       }) + "\\n");
     });
@@ -660,7 +660,7 @@ test("five failed subagent tool ends abort public audit settlement before its ti
   const diagnostic = await readDiagnostic(join(diagnosticsDir, "diagnostic.json"));
   assert.equal(diagnostic.rootLabel, "root-b");
   assert.deepEqual(diagnostic.recentEvents.at(-1), {
-    type: "tool_execution_end", toolName: "subagent", isError: true,
+    type: "tool_execution_end", toolName: "subagent_start", isError: true,
     detailsCode: "CHILD_FAILED", errorCode: "CHILD_FAILED", errorText: "child 4 failed",
   });
   assert.ok(diagnostic.recentEvents.at(-1).errorText.length <= 500);
@@ -674,7 +674,7 @@ test("failed subagent tool diagnostics retain only nested safe RPC detail fields
   await writeFile(fake, `
     process.stdin.once("data", () => {
       process.stdout.write(JSON.stringify({
-        type: "tool_execution_end", toolName: "subagent", isError: true,
+        type: "tool_execution_end", toolName: "subagent_start", isError: true,
         result: { isError: true, details: {
           code: "SUBAGENT_RPC_FAILED",
           detail: {
@@ -695,7 +695,7 @@ test("failed subagent tool diagnostics retain only nested safe RPC detail fields
   await host.close();
   const diagnostic = await readDiagnostic(join(diagnosticsDir, "diagnostic.json"));
   assert.deepEqual(diagnostic.recentEvents.at(-1), {
-    type: "tool_execution_end", toolName: "subagent", isError: true,
+    type: "tool_execution_end", toolName: "subagent_start", isError: true,
     detailsCode: "SUBAGENT_RPC_FAILED",
     taskId: "task-rpc", toolCallId: "call-rpc", stage: "dispatch",
     rpcOperation: "start", causeCode: "ECONNRESET",

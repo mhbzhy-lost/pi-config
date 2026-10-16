@@ -4,6 +4,62 @@ import { getTitleRegistry } from "../subagent-dispatch/title-registry.ts";
 const NOTIFICATION_STATUS = /^(?:Background tasks?|Detached foreground task) (completed|failed|paused|stopped)\b/;
 const WORKFLOW_DISPATCH_COMPLETE = /\b(?:workflow\s+)?dispatch(?:ed)?\s+(?:is\s+)?complete\b/i;
 
+// S4：每操作独立工具注册后，模型 args 不再携带 action；显示层按工具名映射固定 operation。
+// 旧历史工具名（subagent/subagent_worktree/subagent_supervisor）不在表内，其历史 toolCall
+// 仍按 args.action 投影，因此旧 session 只用于渲染历史，不表示旧调用还能执行。
+export const SUBAGENT_OPERATION_BY_TOOL: Readonly<Record<string, string>> = Object.freeze({
+  subagent_roster: "list",
+  subagent_start: "start",
+  subagent_run_status: "status",
+  subagent_run_steer: "steer",
+  subagent_run_interrupt: "interrupt",
+  subagent_run_resume: "resume",
+  subagent_run_stop: "stop",
+});
+
+export const WORKSPACE_OPERATION_BY_TOOL: Readonly<Record<string, string>> = Object.freeze({
+  managed_workspace_list: "list",
+  managed_workspace_status: "status",
+  managed_workspace_dispose: "dispose",
+  managed_workspace_release: "release",
+});
+
+export const SUPERVISOR_OPERATION_BY_TOOL: Readonly<Record<string, string>> = Object.freeze({
+  supervisor_request_pending: "pending",
+  supervisor_request_status: "status",
+  supervisor_request_reply: "reply",
+});
+
+/** 旧 union 工具名：仅用于历史显示与校验失败文案识别，不再是可注册模型工具名。 */
+export const LEGACY_OPERATION_TOOL_NAMES: readonly string[] = Object.freeze([
+  "subagent",
+  "subagent_worktree",
+  "subagent_supervisor",
+]);
+
+// Host 校验失败文案形如 `Validation failed for tool "<name>":`（pi-ai validation.js），
+// 新旧工具名都要能识别，否则新名的校验失败会在工具卡里整段展开。
+const VALIDATION_FAILED_TOOL_NAMES: readonly string[] = Object.freeze([
+  ...Object.keys(SUBAGENT_OPERATION_BY_TOOL),
+  ...Object.keys(WORKSPACE_OPERATION_BY_TOOL),
+  ...Object.keys(SUPERVISOR_OPERATION_BY_TOOL),
+  ...LEGACY_OPERATION_TOOL_NAMES,
+]);
+const VALIDATION_FAILED_FIRST_LINE = new RegExp(
+  `^Validation failed for tool "(?:${VALIDATION_FAILED_TOOL_NAMES.join("|")})":\\s*$`,
+  "m",
+);
+
+/** 工具名优先，其次回落到历史 args.action；两者都缺时返回 undefined（按未知操作投影原文）。 */
+function resolveOperation(byTool: Readonly<Record<string, string>>, tool: unknown, input: Record<string, unknown> | undefined) {
+  if (typeof tool === "string" && typeof byTool[tool] === "string") return byTool[tool];
+  return input?.action;
+}
+
+function contextTool(context?: { tool?: unknown }): unknown {
+  return record(context as unknown)?.tool;
+}
+
 function record(value: unknown): Record<string, unknown> | undefined {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
@@ -201,11 +257,12 @@ export function formatCompactSupervisorReply(entry: unknown): string {
  * 非错误但缺结构化凭据的未知成功形状显示原回复正文并标注「回复状态未确认」，
  * 不伪成功/ACK。
  */
-export function formatCompactSupervisorToolResult(result: unknown, args: unknown, context?: { isError?: boolean }): string {
+export function formatCompactSupervisorToolResult(result: unknown, args: unknown, context?: { isError?: boolean; tool?: string }): string {
   const text = textContent(result);
   const input = record(args);
   const isError = record(result)?.isError === true || context?.isError === true;
-  if (input?.action !== "reply" || isError) return text;
+  // 新工具名 supervisor_request_reply 固定 operation=reply；旧历史调用仍读 args.action。
+  if (resolveOperation(SUPERVISOR_OPERATION_BY_TOOL, contextTool(context), input) !== "reply" || isError) return text;
   const details = record(record(result)?.details);
   const message = typeof input?.message === "string" ? input.message : "";
   if (typeof details?.replyTo === "string" && details.replyTo.trim()) {
@@ -261,11 +318,13 @@ function compactAgentRoster(result: unknown, text: string): string {
   return rows.map(({ name, description }) => `• ${name}${description ? `：${description}` : ""}`).join("\n");
 }
 
-export function formatCompactSubagentToolResult(result: unknown, args: unknown, context?: { isError?: boolean }) {
+export function formatCompactSubagentToolResult(result: unknown, args: unknown, context?: { isError?: boolean; tool?: string }) {
   const text = textContent(result);
   const input = record(args);
   const isError = record(result)?.isError === true || context?.isError === true;
-  const action = input?.action;
+  // 新工具名固定 operation（roster=list、start=spawn、run_*=对应控制动作）；
+  // 旧历史调用继续按 args.action 投影，raw/details 一律不改写。
+  const action = resolveOperation(SUBAGENT_OPERATION_BY_TOOL, contextTool(context), input);
   if (action === "steer") return formatCompactSubagentSteerResult(result, args, { isError });
   if (isError) return text;
   // list 成功回执只投影 name+description 简名册（见 compactAgentRoster）；错误在
@@ -290,7 +349,7 @@ export function formatCompactSubagentToolResult(result: unknown, args: unknown, 
     return `▶ ${target} · resumed`;
   }
   if (action !== "status") {
-    if (/^Validation failed for tool "subagent":\s*$/m.test(text.split(/\r?\n/, 1)[0] ?? "")) {
+    if (VALIDATION_FAILED_FIRST_LINE.test(text.split(/\r?\n/, 1)[0] ?? "")) {
       return text.split(/^Received arguments:\s*$/m, 1)[0].trimEnd();
     }
     return text;

@@ -27,6 +27,38 @@ import {
 } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
 
 const repoRoot = resolve(import.meta.dirname, "..");
+
+// S4：模型注册面已切换为每操作独立工具；测试一律按工具名解析，不以 tools 数组位置为权威。
+const SUBAGENT_TOOL_BY_ACTION = Object.freeze({
+  list: "subagent_roster",
+  status: "subagent_run_status",
+  steer: "subagent_run_steer",
+  interrupt: "subagent_run_interrupt",
+  resume: "subagent_run_resume",
+  stop: "subagent_run_stop",
+});
+const SUPERVISOR_TOOL_BY_ACTION = Object.freeze({
+  pending: "supervisor_request_pending",
+  status: "supervisor_request_status",
+  reply: "supervisor_request_reply",
+});
+const REGISTERED_OPERATION_TOOL_NAMES = Object.freeze([
+  "subagent_roster", "subagent_start", "subagent_run_status", "subagent_run_steer",
+  "subagent_run_interrupt", "subagent_run_resume", "subagent_run_stop",
+  "managed_workspace_list", "managed_workspace_status", "managed_workspace_dispose", "managed_workspace_release",
+  "supervisor_request_pending", "supervisor_request_status", "supervisor_request_reply",
+]);
+const LEGACY_UNION_TOOL_NAMES = Object.freeze(["subagent", "subagent_worktree", "subagent_supervisor"]);
+function toolByName(host, name) {
+  const found = (host.tools ?? []).find((tool) => tool?.name === name);
+  assert.ok(found, `expected the registered operation tool ${name}`);
+  return found;
+}
+function assertRegisteredOperationTools(host) {
+  const names = host.tools.map((tool) => tool.name);
+  assert.deepEqual([...names].sort(), [...REGISTERED_OPERATION_TOOL_NAMES].sort(), "registered model tool set");
+  assert.deepEqual(names.filter((name) => LEGACY_UNION_TOOL_NAMES.includes(name)), [], "legacy union tools must not be registered");
+}
 const enhancedPackageRoot = join(repoRoot, "packages/pi-subagents-enhanced");
 
 function createTypedSubagentExtension(pi, options = {}) {
@@ -192,7 +224,7 @@ test("v2 routing selects coding by writePaths and rejects legacy version inputs"
 
   };
   createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, randomUUID: () => "v2-routing" });
-  const result = await execute(pi.tools[0], {
+  const result = await execute(toolByName(pi, "subagent_start"), {
     agent: "executor",
     task: "Implement the feature",
     title: "Feature",
@@ -204,9 +236,13 @@ test("v2 routing selects coding by writePaths and rejects legacy version inputs"
   assert.ok(spawnCall, "spawn was not called");
   const leafAgent = JSON.parse(spawnCall.params.script.match(/runs\.run\([^,]+, (.*)\);$/s)[1]).agent;
   assert.equal(leafAgent, "executor");
-  const deprecated = await execute(pi.tools[0], { ...codingContract(), version: "dispatch-ir.v1" });
+  const spawnCount = rpc.calls.filter((call) => call.method === "spawn").length;
+  const deprecated = await execute(toolByName(pi, "subagent_start"), { ...codingContract(), version: "dispatch-ir.v1" });
   assert.equal(deprecated.isError, true);
-  assert.equal(deprecated.details.code, "DEPRECATED_SCHEMA");
+  // 旧 union 字段既不写进新 schema，也在操作工具边界 fail closed，不再触达 typed 编译器/RPC。
+  assert.equal(deprecated.details.code, "INVALID_DISPATCH");
+  assert.equal(deprecated.details.keypath, "$.version");
+  assert.equal(rpc.calls.filter((call) => call.method === "spawn").length, spawnCount, "legacy fields must not spawn");
 });
 
 function v2Contract(overrides = {}) {
@@ -608,10 +644,14 @@ test("the headless membrane denies registration APIs by default and preserves ru
   assert.deepEqual(pi.eventListeners, [{ name: "subagents:rpc:v1:request", handler: eventHandler }]);
 });
 
-test("project subagent tool retains injected display-only call and result renderers", () => {
+test("project operation tools retain injected display-only renderers with a per-tool name hint", () => {
   const pi = createPi();
-  const renderSubagentCall = () => undefined;
-  const renderSubagentResult = () => undefined;
+  const callHints = [];
+  const resultHints = [];
+  // Host 的 render context 不带工具名，新工具也不再携带 args.action；
+  // 注册侧按工具名注入提示，renderer 本体仍是注入的只读显示回调。
+  const renderSubagentCall = (_args, _theme, context) => { callHints.push(context?.tool); return undefined; };
+  const renderSubagentResult = (_result, _options, _theme, context) => { resultHints.push(context?.tool); return undefined; };
 
   createTypedSubagentExtension(pi, {
     rpc: createRpc(),
@@ -620,9 +660,18 @@ test("project subagent tool retains injected display-only call and result render
     renderSubagentResult,
   });
 
-  assert.equal(pi.tools[0].name, "subagent");
-  assert.equal(pi.tools[0].renderCall, renderSubagentCall);
-  assert.equal(pi.tools[0].renderResult, renderSubagentResult);
+  const expected = ["subagent_roster", "subagent_start", "subagent_run_status", "subagent_run_steer", "subagent_run_interrupt", "subagent_run_resume", "subagent_run_stop"];
+  for (const name of expected) {
+    const tool = toolByName(pi, name);
+    assert.equal(typeof tool.renderCall, "function", `${name} keeps an injected display-only renderCall`);
+    assert.equal(typeof tool.renderResult, "function", `${name} keeps an injected display-only renderResult`);
+    tool.renderCall({}, {}, { state: {} });
+    tool.renderResult({ content: [] }, {}, {}, { args: {}, state: {} });
+  }
+  assert.deepEqual(callHints, expected);
+  assert.deepEqual(resultHints, expected);
+  // 旧 union 定义不再注册为模型工具（硬切换，无双入口/alias）。
+  assert.deepEqual(pi.tools.map((tool) => tool.name).filter((name) => LEGACY_UNION_TOOL_NAMES.includes(name)), []);
 });
 
 test("supervisor request renderer compacts inbound progress without mutating the message", () => {
@@ -665,7 +714,7 @@ test("spawn rendering keeps the complete execute result while showing one statef
   };
   const renderers = createSubagentToolRenderers();
   createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, randomUUID: () => "dispatch-1", ...renderers });
-  const result = await execute(pi.tools[0], codingContract());
+  const result = await execute(toolByName(pi, "subagent_start"), codingContract());
   const theme = { fg: (_color, text) => text };
   const context = { args: codingContract(), state: {} };
 
@@ -907,7 +956,7 @@ test("retain-on-beforeDispose-failure retries cleanup before disposing RPC", asy
   assert.equal(rpc.disposed(), 1);
 });
 
-test("project subagent schema exposes an object root to OpenAI-compatible providers", () => {
+test("every registered operation schema exposes an object root to OpenAI-compatible providers", () => {
   const pi = createPi();
 
   createTypedSubagentExtension(pi, {
@@ -917,16 +966,22 @@ test("project subagent schema exposes an object root to OpenAI-compatible provid
 
   // 根节点必须是显式单一 object：deepseek 要求顶层 type:object（历史 bug），
   // glm 对顶层联合组合子生成空 arguments（docs/bugs/2026-09-14-glm-empty-tool-args-from-root-union-schema.md）。
-  // 分支字段以字段级联合形态内联在 properties 中。
-  const schema = pi.tools[0].parameters;
-  assert.equal(schema.type, "object");
-  for (const combinator of ["anyOf", "oneOf", "allOf"]) {
-    assert.equal(schema[combinator], undefined, `root must not use ${combinator}`);
+  // 无 supervisorAdapter 时只注册 7 subagent + 4 workspace 操作工具。
+  assert.equal(pi.tools.length, 11, "registered operation tool count without a supervisor adapter");
+  for (const tool of pi.tools) {
+    const schema = tool.parameters;
+    assert.equal(schema.type, "object", `${tool.name} root must be a single object`);
+    for (const combinator of ["anyOf", "oneOf", "allOf"]) {
+      assert.equal(schema[combinator], undefined, `${tool.name} root must not use ${combinator}`);
+    }
+    assert.equal(schema.additionalProperties, false, `${tool.name} must reject unknown fields`);
+    assert.equal(schema.properties.action, undefined, `${tool.name} must not expose a caller-controlled action`);
   }
-  for (const field of ["agent", "task", "writePaths", "acceptance", "action", "worktree"]) {
-
-    assert.ok(schema.properties[field], `flattened root must keep the ${field} field for its branch`);
+  const start = toolByName(pi, "subagent_start").parameters;
+  for (const field of ["agent", "task", "writePaths", "acceptance", "worktree"]) {
+    assert.ok(start.properties[field], `subagent_start must keep the ${field} field for its branch`);
   }
+  assert.deepEqual(start.required, ["agent", "task"]);
 });
 
 test("headless runtime installation exposes only project-owned subagent tools", () => {
@@ -953,29 +1008,26 @@ test("headless runtime installation exposes only project-owned subagent tools", 
   });
 
   assert.notEqual(upstreamApi, pi);
-  assert.deepEqual(pi.tools.map((tool) => tool.name), ["subagent", "subagent_worktree", "subagent_supervisor"]);
+  assertRegisteredOperationTools(pi);
   assert.equal(pi.tools.some((tool) => tool.name === "subagent_workspace"), false);
   assert.equal(pi.commands.length, 0);
-  assert.equal(pi.tools[0].description, TYPED_SUBAGENT_DESCRIPTION);
-  assert.match(TYPED_SUBAGENT_DESCRIPTION, /writePaths/);
-  assert.match(TYPED_SUBAGENT_DESCRIPTION, /worktree 隔离通过顶层 worktree 与 cwd 字段声明/);
-  assert.match(TYPED_SUBAGENT_DESCRIPTION, /worktree=true 时响应携带 workspace_id/);
-  assert.match(TYPED_SUBAGENT_DESCRIPTION, /CHILD_OWNS_INTEGRATION/);
-  assert.match(TYPED_SUBAGENT_DESCRIPTION, /已 released 的工作区无需额外处置/);
-  // M05B：单工具提示可见性正确且不扩大权限；model-only 保持。
-  assert.equal(pi.tools[0].exposure, "model-only");
-  assert.match(pi.tools[0].promptSnippet, /委派/);
-  assert.match(pi.tools[0].promptGuidelines.join("\n"), /完整任务合同/);
-  assert.equal(pi.tools[0].promptGuidelines.length, 3);
-  assert.equal(pi.tools[1].exposure, "model-only");
-  assert.match(pi.tools[1].promptSnippet, /status/);
-  assert.match(pi.tools[1].promptGuidelines.join("\n"), /CHILD_OWNS_INTEGRATION/);
-  assert.equal(pi.tools[2].exposure, "model-only");
-  assert.match(pi.tools[2].promptSnippet, /pending/);
-  assert.match(pi.tools[2].promptGuidelines.join("\n"), /writeReply/);
-  assert.equal(pi.tools[2].promptGuidelines.length, 2);
-  assert.doesNotMatch(pi.tools[0].description, /proactive skill methodology/i);
-  assert.doesNotMatch(pi.tools[1].description, /pi-subagents|upstream/i);
+  // 唯一注册面已硬切换：旧 union 描述不再作为任何模型工具描述注册。
+  assert.equal(pi.tools.some((tool) => tool.description === TYPED_SUBAGENT_DESCRIPTION), false);
+  assert.equal(pi.tools.some((tool) => tool.description === upstreamMethodologyDescription), false);
+  const start = toolByName(pi, "subagent_start");
+  assert.match(start.description, /writePaths/);
+  assert.match(start.description, /acceptance/);
+  // M05B：逐工具提示可见性正确且不扩大权限；model-only 保持。
+  for (const tool of pi.tools) {
+    assert.equal(tool.exposure, "model-only", `${tool.name} stays model-only`);
+    assert.ok(typeof tool.promptSnippet === "string" && tool.promptSnippet.length > 0, `${tool.name} keeps a prompt snippet`);
+    assert.ok(Array.isArray(tool.promptGuidelines) && tool.promptGuidelines.length > 0, `${tool.name} keeps prompt guidelines`);
+    assert.doesNotMatch(tool.description, /proactive skill methodology/i);
+    assert.doesNotMatch(tool.description, /pi-subagents|upstream/i);
+  }
+  assert.match(toolByName(pi, "managed_workspace_dispose").description, /CHILD_OWNS_INTEGRATION/);
+  assert.match(toolByName(pi, "supervisor_request_reply").promptGuidelines.join("\n"), /writeReply/);
+  assert.match(toolByName(pi, "supervisor_request_pending").description, /pending/);
 });
 
 test("headless installation wires the completion notifier to session lifecycle", async () => {
@@ -1148,7 +1200,7 @@ test("confirmed facade workflow success is filtered before the completion notifi
     await handler({}, { sessionManager: { id: "session-1", getSessionId: () => "session-1" } });
   }
 
-  const started = await execute(pi.tools.find((tool) => tool.name === "subagent"), {
+  const started = await execute(toolByName(pi, "subagent_start"), {
     agent: "reviewer", title: "真实业务", task: "交付业务摘要",
   });
   assert.equal(started.isError, false);
@@ -1182,7 +1234,7 @@ test("generic dispatch validates required fields without using profile names as 
   const pi = createPi();
   const rpc = createRpc();
   createTypedSubagentExtension(pi, { rpc, cleanupStore: {} });
-  const tool = pi.tools[0];
+  const tool = toolByName(pi, "subagent_start");
 
   // v2: title is optional; only agent and task are required
   const missingTask = await execute(tool, { agent: "executor" });
@@ -1216,7 +1268,7 @@ test("compiles a coding contract into one workflow root and returns its correlat
     randomUUID: () => "dispatch-1",
   });
 
-  const result = await execute(pi.tools[0], codingContract());
+  const result = await execute(toolByName(pi, "subagent_start"), codingContract());
   const spawn = rpc.calls.find((call) => call.method === "spawn");
 
   assert.equal(result.isError, false);
@@ -1279,7 +1331,7 @@ test("coding cwd never infers ownership from a legacy workspace-shaped path", as
     workspaceService: new Proxy({}, { get(_target, property) { return () => workspaceCalls.push(property); } }),
   });
 
-  const result = await execute(pi.tools[0], codingContract({
+  const result = await execute(toolByName(pi, "subagent_start"), codingContract({
     cwd: "/repo/.state/subagent-dispatch/worktrees/workspace-1/sub",
     worktree: false,
 
@@ -1311,12 +1363,11 @@ test("generic dispatch compiles a non-coding agent prompt into the unified dispa
     agent: "reviewer",
     title: "Review the diff",
     task,
-    context: "fresh",
     cwd: "/repo",
     output: false,
   };
 
-  const result = await execute(pi.tools[0], params);
+  const result = await execute(toolByName(pi, "subagent_start"), params);
   const spawn = rpc.calls.find((call) => call.method === "spawn");
 
   assert.equal(result.isError, false);
@@ -1362,7 +1413,7 @@ test("generic worktree spawn result explains workspace disposition without expos
     inspectWorkspaceSource: async () => ({ originRef: "refs/heads/main", baseCommit: "b".repeat(40) }),
     registerAuthorizedRun() {},
   });
-  const result = await execute(pi.tools[0], { agent: "reviewer", title: "Review", task: "Review it", writePaths: ["README.md"], acceptance: { criteria: ["review complete"] }, worktree: true }, { cwd: "/repo", sessionManager: {} });
+  const result = await execute(toolByName(pi, "subagent_start"), { agent: "reviewer", title: "Review", task: "Review it", writePaths: ["README.md"], acceptance: { criteria: ["review complete"] }, worktree: true }, { cwd: "/repo", sessionManager: {} });
   assert.equal(result.isError, false, result.content[0]?.text);
   assert.match(result.content[0].text, /Workspace generic-workspace allocated \(state: active\)/);
   assert.match(result.content[0].text, /integrate or discard to finish, or preserve temporarily and later release/);
@@ -1382,7 +1433,7 @@ test("uses a bounded fallback while waiting for a generic leaf without input tim
   };
   createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, randomUUID: () => "fallback-1" });
 
-  const result = await execute(pi.tools[0], { agent: "reviewer", title: "Review fallback", task: "Review." });
+  const result = await execute(toolByName(pi, "subagent_start"), { agent: "reviewer", title: "Review fallback", task: "Review." });
 
   assert.equal(result.isError, false);
   assert.equal(rpc.calls.find((call) => call.method === "spawn").params.timeoutMs, undefined);
@@ -1394,10 +1445,10 @@ test("requires a safe generic title before RPC", async () => {
   createTypedSubagentExtension(pi, { rpc, cleanupStore: {} });
 
   // v2: title is optional; only invalid title (newline) is rejected
-  const noTask = await execute(pi.tools[0], { agent: "delegate" });
+  const noTask = await execute(toolByName(pi, "subagent_start"), { agent: "delegate" });
   assert.equal(noTask.isError, true);
   assert.equal(noTask.details.code, "INVALID_GENERIC_DISPATCH");
-  const badTitle = await execute(pi.tools[0], { agent: "delegate", task: "Inspect", title: "line\nbreak" });
+  const badTitle = await execute(toolByName(pi, "subagent_start"), { agent: "delegate", task: "Inspect", title: "line\nbreak" });
   assert.equal(badTitle.isError, true);
   assert.equal(badTitle.details.code, "INVALID_TITLE");
   assert.deepEqual(rpc.calls, []);
@@ -1407,23 +1458,22 @@ test("maps approved control actions to RPC and requires a resume instruction", a
   const pi = createPi();
   const rpc = createRpc();
   createTypedSubagentExtension(pi, { rpc, cleanupStore: {} });
-  const tool = pi.tools[0];
 
   for (const [action, params, expected] of [
-    ["status", { action: "status", id: "run-1" }, { id: "run-1" }],
-    ["steer", { action: "steer", index: 0, runId: "run-1", message: "Continue." }, { index: 0, runId: "run-1", message: "Continue." }],
-    ["interrupt", { action: "interrupt", dir: "/tmp/run-1" }, { dir: "/tmp/run-1" }],
-    ["resume", { action: "resume", id: "run-1", runId: "run-1", dir: "/tmp/run-1", index: 2, message: "Continue with the new instruction." }, { id: "run-1", runId: "run-1", dir: "/tmp/run-1", index: 2, message: "Continue with the new instruction." }],
-    ["stop", { action: "stop", id: "run-1" }, { id: "run-1" }],
+    ["status", { id: "run-1" }, { id: "run-1" }],
+    ["steer", { index: 0, runId: "run-1", message: "Continue." }, { index: 0, runId: "run-1", message: "Continue." }],
+    ["interrupt", { dir: "/tmp/run-1" }, { dir: "/tmp/run-1" }],
+    ["resume", { id: "run-1", runId: "run-1", dir: "/tmp/run-1", index: 2, message: "Continue with the new instruction." }, { id: "run-1", runId: "run-1", dir: "/tmp/run-1", index: 2, message: "Continue with the new instruction." }],
+    ["stop", { id: "run-1" }, { id: "run-1" }],
   ]) {
-    const result = await execute(tool, params);
+    const result = await execute(toolByName(pi, SUBAGENT_TOOL_BY_ACTION[action]), params);
     assert.equal(result.isError, false);
     assert.deepEqual(rpc.calls.at(-1), { method: action, params: expected });
   }
 
   const callCount = rpc.calls.length;
   for (const message of [undefined, ""]) {
-    const rejected = await execute(tool, { action: "resume", id: "run-1", ...(message === undefined ? {} : { message }) });
+    const rejected = await execute(toolByName(pi, "subagent_run_resume"), { id: "run-1", ...(message === undefined ? {} : { message }) });
     assert.equal(rejected.isError, true);
     assert.equal(rejected.details.code, "INVALID_RESUME_MESSAGE");
   }
@@ -1455,7 +1505,7 @@ test("subagent_worktree status exposes action token and blocked reasons", async 
     rpc: createRpc(), cleanupStore: {}, workspaceService, resolveRootSessionId: () => "root-1",
   });
 
-  const result = await execute(pi.tools[1], { action: "status", workspace_id: "workspace-1" });
+  const result = await execute(toolByName(pi, "managed_workspace_status"), { workspace_id: "workspace-1" });
 
   assert.equal(result.isError, false);
   assert.match(result.content[0].text, /"workspace_id":"workspace-1"/);
@@ -1478,11 +1528,14 @@ test("subagent_worktree release accepts only the scoped service path", async () 
   createTypedSubagentExtension(pi, {
     rpc: createRpc(), cleanupStore: {}, workspaceService, resolveRootSessionId: () => "root-1",
   });
-  const tool = pi.tools[1];
-  const releaseSchema = tool.parameters.anyOf.find((branch) => branch.properties?.action?.const === "release");
-
-  assert.ok(releaseSchema);
-  const result = await execute(tool, { action: "release", workspace_id: "workspace-1" });
+  const tool = toolByName(pi, "managed_workspace_release");
+  // 每操作独立工具：release 是单 object schema，无顶层 anyOf 分支，也不暴露 action。
+  assert.equal(tool.parameters.type, "object");
+  assert.equal(tool.parameters.anyOf, undefined);
+  assert.equal(tool.parameters.additionalProperties, false);
+  assert.deepEqual(tool.parameters.required, ["workspace_id"]);
+  assert.deepEqual(Object.keys(tool.parameters.properties), ["workspace_id"]);
+  const result = await execute(tool, { workspace_id: "workspace-1" });
 
   assert.equal(result.isError, false);
   assert.equal(result.details.state, "released");
@@ -1506,7 +1559,7 @@ test("uses persistent sessionFile identity for workflow leaf correlation and fal
   createTypedSubagentExtension(persistentPi, {
     rpc: persistentRpc, cleanupStore: {}, randomUUID: () => "persistent-1", workflowChildStartTimeoutMs: 10,
   });
-  const persistent = await execute(persistentPi.tools[0], codingContract());
+  const persistent = await execute(toolByName(persistentPi, "subagent_start"), codingContract());
   assert.equal(persistent.isError, false);
   assert.equal(persistent.details.runId, "persistent-leaf");
 
@@ -1526,7 +1579,7 @@ test("uses persistent sessionFile identity for workflow leaf correlation and fal
   createTypedSubagentExtension(noSessionPi, {
     rpc: noSessionRpc, cleanupStore: {}, randomUUID: () => "no-session-1", workflowChildStartTimeoutMs: 10,
   });
-  const noSession = await execute(noSessionPi.tools[0], codingContract());
+  const noSession = await execute(toolByName(noSessionPi, "subagent_start"), codingContract());
   assert.equal(noSession.isError, false);
   assert.equal(noSession.details.runId, "no-session-leaf");
 });
@@ -1540,7 +1593,7 @@ test("fails closed when RPC capabilities or spawn identity are incomplete", asyn
   ]) {
     const pi = createPi();
     createTypedSubagentExtension(pi, { rpc, cleanupStore: {} });
-    const result = await execute(pi.tools[0], codingContract());
+    const result = await execute(toolByName(pi, "subagent_start"), codingContract());
     assert.equal(result.isError, true);
     assert.match(result.details.code, /CAPABILITY_NEGOTIATION_FAILED|CAPABILITY_MISMATCH|SPAWN_REPLY_INVALID/);
   }
@@ -1569,7 +1622,7 @@ test("coding spawn uses the Host collector deadline for a delayed leaf", async (
     randomUUID: () => "delayed-1",
   });
 
-  const result = await execute(pi.tools[0], codingContract());
+  const result = await execute(toolByName(pi, "subagent_start"), codingContract());
 
   assert.equal(result.isError, false);
   assert.equal(result.details.runId, "delayed-leaf-1");
@@ -1635,7 +1688,7 @@ test("does not bind a Goal executor ticket when the workflow root has no matchin
     },
   });
 
-  const result = await execute(pi.tools[0], codingContract({ worktree: true }));
+  const result = await execute(toolByName(pi, "subagent_start"), codingContract({ worktree: true }));
 
   assert.equal(result.isError, true);
   assert.equal(result.details.code, "WORKFLOW_CHILD_START_TIMEOUT");
@@ -1670,7 +1723,7 @@ test("standalone managed coding registers minimal Host authority before binding 
     diagnosticSink(entry) { diagnostics.push(entry); },
   });
 
-  const result = await execute(pi.tools[0], codingContract({ worktree: true }), { cwd: "/repo", sessionManager: {} });
+  const result = await execute(toolByName(pi, "subagent_start"), codingContract({ worktree: true }), { cwd: "/repo", sessionManager: {} });
 
   assert.equal(result.isError, false, result.content[0]?.text);
 
@@ -1713,7 +1766,7 @@ test("standalone grant failure rejects dispatch, preserves the allocated workspa
     diagnosticSink(entry) { diagnostics.push(entry); },
   });
 
-  const result = await execute(pi.tools[0], codingContract({ worktree: true }), { cwd: "/repo", sessionManager: {} });
+  const result = await execute(toolByName(pi, "subagent_start"), codingContract({ worktree: true }), { cwd: "/repo", sessionManager: {} });
 
 
   assert.equal(result.isError, true);
@@ -1780,7 +1833,7 @@ test("routes native Supervisor messages through the Root ingress callback", asyn
     rpc: createRpc(), cleanupStore: {},
   });
 
-  assert.deepEqual(pi.tools.map((tool) => tool.name), ["subagent", "subagent_worktree", "subagent_supervisor"]);
+  assertRegisteredOperationTools(pi);
   for (const handler of pi.handlers.get("message_end") ?? []) await handler({ message: ignoredMessage }, ignoredContext);
   assert.deepEqual(calls, [], "unrelated native messages must be ignored");
   for (const handler of pi.handlers.get("message_end") ?? []) await handler({ message: supervisorMessage }, supervisorContext);
@@ -1804,18 +1857,18 @@ test("configured supervisor control plane fences reply and steer delivery withou
   const ingress = pi.handlers.get("message_end")[0];
   await ingress({ message: { customType: "subagent_supervisor_request", details: { id: "request-1", runId: "run-1", correlation: { asyncDir: "/fixture/async", pid: 7, lifecycleSessionId: "fixture-session", processBirth: "fixture-birth", sessionFile: "/fixture/session", childSessionId: "child", toolCallId: "tool", agent: "executor", childIndex: 0, reason: "need_decision", requestBodyDigest: supervisorCanonicalDigest("body") }, reason: "needs approval" } } }, ctx);
 
-  const blockedSteer = await pi.tools[0].execute("steer-1", { action: "steer", index: 0, runId: "run-1", message: "approve" }, signal, undefined, ctx);
+  const blockedSteer = await toolByName(pi, "subagent_run_steer").execute("steer-1", { index: 0, runId: "run-1", message: "approve" }, signal, undefined, ctx);
   assert.equal(blockedSteer.details.code, "SUPERVISOR_REPLY_REQUIRED");
-  const absentReply = await pi.tools[2].execute("reply-absent", { action: "reply", replyTo: "missing", message: "approve" }, signal, undefined, ctx);
+  const absentReply = await toolByName(pi, "supervisor_request_reply").execute("reply-absent", { replyTo: "missing", message: "approve" }, signal, undefined, ctx);
   assert.equal(absentReply.details.code, "SUPERVISOR_REQUEST_NOT_PENDING");
 
-  const reply = await pi.tools[2].execute("reply-1", { action: "reply", replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
+  const reply = await toolByName(pi, "supervisor_request_reply").execute("reply-1", { replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
   assert.equal(reply.isError, undefined);
   assert.equal(nativeCalls, 1);
-  const repeated = await pi.tools[2].execute("reply-1", { action: "reply", replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
+  const repeated = await toolByName(pi, "supervisor_request_reply").execute("reply-1", { replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
   assert.equal(repeated.details.receiptId, "receipt-receipt-1");
   assert.equal(nativeCalls, 1);
-  const duplicateSteer = await pi.tools[0].execute("steer-2", { action: "steer", index: 0, runId: "run-1", message: "approve" }, signal, undefined, ctx);
+  const duplicateSteer = await toolByName(pi, "subagent_run_steer").execute("steer-2", { index: 0, runId: "run-1", message: "approve" }, signal, undefined, ctx);
   assert.equal(duplicateSteer.details.code, "STEER_DUPLICATES_REPLY");
   assert.equal(rpc.calls.filter((call) => call.method === "steer").length, 0);
 });
@@ -1839,15 +1892,15 @@ test("worktree:false unowned contact_supervisor ask registers and reply commits 
     reason: "need decision", expectsReply: true, correlation: { asyncDir: "/fixture/async", pid: 7, lifecycleSessionId: "fixture-session", processBirth: "fixture-birth", sessionFile: "/fixture/session", childSessionId: "child", toolCallId: "tool", agent: "executor", childIndex: 0, reason: "need_decision", requestBodyDigest: supervisorCanonicalDigest("body") } }; // worktree:false is proven by broker unknown_run, not native message metadata
   await pi.handlers.get("message_end")[0]({ message: { customType: "subagent_supervisor_request", details: native } }, host);
   assert.equal(plane.listPending().length, 1, "ingress must register before reply");
-  const blockedSteer = await pi.tools[0].execute("steer-while-pending", { action: "steer", index: 0, runId: native.runId, message: "approved" }, signal, undefined, host);
+  const blockedSteer = await toolByName(pi, "subagent_run_steer").execute("steer-while-pending", { index: 0, runId: native.runId, message: "approved" }, signal, undefined, host);
   assert.equal(blockedSteer.details.code, "SUPERVISOR_REPLY_REQUIRED");
-  const reply = await pi.tools[2].execute("reply-unowned-1", { action: "reply", replyTo: native.id, message: "approved" }, signal, undefined, host);
+  const reply = await toolByName(pi, "supervisor_request_reply").execute("reply-unowned-1", { replyTo: native.id, message: "approved" }, signal, undefined, host);
   assert.equal(reply.isError, undefined, `registration=${JSON.stringify(pi.messages.at(-1)?.details)}, reply=${JSON.stringify(reply.details)}`);
   assert.equal(plane.listPending().length, 1, "the native pending ask must register locally");
   assert.equal(pi.messages.some((message) => message.customType === "subagent_supervisor_registration_failed"), false);
   assert.equal(nativeCalls, 1);
   assert.equal(plane.snapshot().requests[0].state, "pending", "unconsumed delivery stays pending");
-  const replay = await pi.tools[2].execute("reply-unowned-1", { action: "reply", replyTo: native.id, message: "approved" }, signal, undefined, host);
+  const replay = await toolByName(pi, "supervisor_request_reply").execute("reply-unowned-1", { replyTo: native.id, message: "approved" }, signal, undefined, host);
   assert.equal(replay.details.code, "SUPERVISOR_DELIVERY_IDEMPOTENT");
   assert.equal(replay.details.receiptId, "receipt-unowned-receipt");
   assert.equal(nativeCalls, 1);
@@ -1860,12 +1913,12 @@ test("worktree:false unowned contact_supervisor ask registers and reply commits 
   assert.equal(consumed.receipt.receiptId, replay.details.receiptId);
   assert.equal(plane.listPending().length, 0);
   assert.equal(plane.snapshot().requests[0].state, "replied");
-  const duplicateSteer = await pi.tools[0].execute("steer-duplicate-unowned", { action: "steer", index: 0, runId: native.runId, message: "approved" }, signal, undefined, host);
+  const duplicateSteer = await toolByName(pi, "subagent_run_steer").execute("steer-duplicate-unowned", { index: 0, runId: native.runId, message: "approved" }, signal, undefined, host);
   assert.equal(duplicateSteer.details?.code, "STEER_DUPLICATES_REPLY", JSON.stringify(duplicateSteer));
   const redundant = await plane.resolveSupervisorControl(intent, "host-root-1");
   assert.equal(redundant.status, "idempotent");
   assert.equal(redundant.receipt.receiptId, replay.details.receiptId);
-  const absent = await pi.tools[2].execute("reply-unknown", { action: "reply", replyTo: "unknown-request", message: "approved" }, signal, undefined, host);
+  const absent = await toolByName(pi, "supervisor_request_reply").execute("reply-unknown", { replyTo: "unknown-request", message: "approved" }, signal, undefined, host);
   assert.equal(absent.details.code, "SUPERVISOR_REQUEST_NOT_PENDING");
 });
 
@@ -2011,7 +2064,7 @@ for (const scenario of [
     const ingress = pi.handlers.get("message_end")[0];
     await ingress({ message: { customType: "subagent_supervisor_request", details: scenario.details } }, ctx);
     assert.deepEqual(realPlane.snapshot().requests, []);
-    const reply = await pi.tools[2].execute("reply-failed", { action: "reply", replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
+    const reply = await toolByName(pi, "supervisor_request_reply").execute("reply-failed", { replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
     assert.equal(reply.isError, true);
     assert.equal(reply.details.code, "SUPERVISOR_REQUEST_REGISTRATION_FAILED", `native-visible ask cannot reply; actual=${reply.details.code}, diagnostics=${diagnostics.length}, messages=${pi.messages.length}`);
     assert.equal(reply.details.registrationCode, scenario.code);
@@ -2065,7 +2118,7 @@ test("supervisor delivery compensation preserves the primary error and diagnoses
   const ctxWithSession = { ...ctx, sessionManager: { getSessionId: () => "root-1" } };
   await pi.handlers.get("message_end")[0]({ message: { customType: "subagent_supervisor_request", details: { id: "compensation-request", runId: "run-compensation", reason: "approve" } } }, ctxWithSession);
   await assert.rejects(
-    () => pi.tools[2].execute("reply-compensation", { action: "reply", replyTo: "compensation-request", message: "approved" }, signal, undefined, ctxWithSession),
+    () => toolByName(pi, "supervisor_request_reply").execute("reply-compensation", { replyTo: "compensation-request", message: "approved" }, signal, undefined, ctxWithSession),
     (error) => error instanceof AggregateError && error.cause === primary && error.errors.includes(primary) && error.errors.includes(compensation),
   );
   const diagnostic = diagnostics.find((entry) => entry.phase === "supervisor-delivery-compensation-failed");
@@ -2092,22 +2145,22 @@ test("supervisor control plane fails closed for stale owners, expired requests, 
   let owner = { rootSessionId: "root-1", ownerGeneration: 1 };
   const staleOwner = await createScenario({ readOwnerReceipt: async (runId) => ({ runId, ...owner }) });
   owner = { rootSessionId: "root-2", ownerGeneration: 2 };
-  const staleReply = await staleOwner.pi.tools[2].execute("stale-owner", { action: "reply", replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
+  const staleReply = await toolByName(staleOwner.pi, "supervisor_request_reply").execute("stale-owner", { replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
   assert.equal(staleReply.details.code, "SUPERVISOR_STALE_OWNER");
 
   let clock = 1_000;
   const expired = await createScenario({ now: () => clock });
   clock += 21 * 60 * 1000;
-  const expiredReply = await expired.pi.tools[2].execute("expired", { action: "reply", replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
+  const expiredReply = await toolByName(expired.pi, "supervisor_request_reply").execute("expired", { replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
   assert.equal(expiredReply.details.code, "SUPERVISOR_REQUEST_EXPIRED");
 
   const notRunning = await createScenario({ readRuntime: async (runId) => ({ runId, ownerGeneration: 1, liveRunEpoch: 4, running: false, steerable: true }) });
-  await notRunning.pi.tools[2].execute("consume-request", { action: "reply", replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
-  const blockedSteer = await notRunning.pi.tools[0].execute("not-running", { action: "steer", index: 0, runId: "run-1", message: "follow up" }, signal, undefined, ctx);
+  await toolByName(notRunning.pi, "supervisor_request_reply").execute("consume-request", { replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
+  const blockedSteer = await toolByName(notRunning.pi, "subagent_run_steer").execute("not-running", { index: 0, runId: "run-1", message: "follow up" }, signal, undefined, ctx);
   assert.equal(blockedSteer.details.code, "SUPERVISOR_STEER_NOT_ALLOWED");
 
   const runtimeOwnerMismatch = await createScenario({ readRuntime: async (runId) => ({ runId, ownerGeneration: 2, liveRunEpoch: 4, running: true, steerable: true }) });
-  const mismatchReply = await runtimeOwnerMismatch.pi.tools[2].execute("runtime-owner-mismatch", { action: "reply", replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
+  const mismatchReply = await toolByName(runtimeOwnerMismatch.pi, "supervisor_request_reply").execute("runtime-owner-mismatch", { replyTo: "request-1", message: "approve" }, signal, undefined, ctx);
   assert.equal(mismatchReply.details.code, "SUPERVISOR_STALE_OWNER");
 });
 
@@ -2123,7 +2176,7 @@ test("steer on a run without a broker owner receipt bypasses the control plane a
     randomId: () => "receipt-1",
   });
   createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, supervisorControlPlane: controlPlane });
-  const result = await pi.tools[0].execute("steer-no-owner", { action: "steer", index: 0, runId: "run-1", message: "Continue please." }, signal, undefined, ctx);
+  const result = await toolByName(pi, "subagent_run_steer").execute("steer-no-owner", { index: 0, runId: "run-1", message: "Continue please." }, signal, undefined, ctx);
   assert.equal(result.isError, false, JSON.stringify(result));
   assert.notEqual(result.details?.code, "SUPERVISOR_INTENT_INVALID", JSON.stringify(result));
   assert.deepEqual(rpc.calls.filter((call) => call.method === "steer"), [{ method: "steer", params: { index: 0, runId: "run-1", message: "Continue please." } }]);
@@ -2448,14 +2501,14 @@ test("steer 拒绝 id 与 runId 冲突的别名目标，不得按其中一个放
   const { pi, rpc } = createSteerScenario({
     readOwnerReceipt: async (runId) => (runId === FULL_RUN_ID ? { runId, rootSessionId: "root-1", ownerGeneration: 1 } : undefined),
   });
-  const result = await pi.tools[0].execute("steer-conflict", { action: "steer", index: 0, id: FULL_RUN_ID, runId: OTHER_FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
+  const result = await toolByName(pi, "subagent_run_steer").execute("steer-conflict", { index: 0, id: FULL_RUN_ID, runId: OTHER_FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
   assert.equal(result.details.code, "SUPERVISOR_STEER_TARGET_CONFLICT", JSON.stringify(result));
   assert.deepEqual(steerCalls(rpc), [], "冲突目标绝不得投递");
 });
 
 test("steer 拒绝 dir 别名目标，避免绕过 owner 判定", async () => {
   const { pi, rpc } = createSteerScenario({ readOwnerReceipt: async (runId) => ({ runId, rootSessionId: "root-1", ownerGeneration: 1 }) });
-  const result = await pi.tools[0].execute("steer-dir", { action: "steer", index: 0, dir: `/tmp/async/${FULL_RUN_ID}`, message: "hi" }, signal, undefined, ctx);
+  const result = await toolByName(pi, "subagent_run_steer").execute("steer-dir", { index: 0, dir: `/tmp/async/${FULL_RUN_ID}`, message: "hi" }, signal, undefined, ctx);
   assert.equal(result.details.code, "SUPERVISOR_STEER_TARGET_ALIAS", JSON.stringify(result));
   assert.deepEqual(steerCalls(rpc), []);
 });
@@ -2464,35 +2517,35 @@ test("steer 拒绝前缀形态 runId，避免授权目标与上游扫描解析�
   const { pi, rpc } = createSteerScenario({
     readOwnerReceipt: async (runId) => (runId === FULL_RUN_ID ? { runId, rootSessionId: "root-1", ownerGeneration: 1 } : undefined),
   });
-  const result = await pi.tools[0].execute("steer-prefix", { action: "steer", index: 0, runId: FULL_RUN_PREFIX, message: "hi" }, signal, undefined, ctx);
+  const result = await toolByName(pi, "subagent_run_steer").execute("steer-prefix", { index: 0, runId: FULL_RUN_PREFIX, message: "hi" }, signal, undefined, ctx);
   assert.equal(result.details.code, "SUPERVISOR_STEER_TARGET_AMBIGUOUS", JSON.stringify(result));
   assert.deepEqual(steerCalls(rpc), []);
 });
 
 test("owner 查询抛异常时 steer 必须 fail-closed，不得当作非受管放行", async () => {
   const { pi, rpc } = createSteerScenario({ readOwnerReceipt: async () => { throw new Error("ROOT_BROKER_UNAVAILABLE"); } });
-  const result = await pi.tools[0].execute("steer-owner-error", { action: "steer", index: 0, runId: FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
+  const result = await toolByName(pi, "subagent_run_steer").execute("steer-owner-error", { index: 0, runId: FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
   assert.equal(result.details.code, "SUPERVISOR_OWNER_UNAVAILABLE", JSON.stringify(result));
   assert.deepEqual(steerCalls(rpc), []);
 });
 
 test("未接线 owner 读取依赖时 steer 必须 fail-closed", async () => {
   const { pi, rpc } = createSteerScenario({ withOwnerDep: false });
-  const result = await pi.tools[0].execute("steer-no-dep", { action: "steer", index: 0, runId: FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
+  const result = await toolByName(pi, "subagent_run_steer").execute("steer-no-dep", { index: 0, runId: FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
   assert.equal(result.details.code, "SUPERVISOR_OWNER_UNAVAILABLE", JSON.stringify(result));
   assert.deepEqual(steerCalls(rpc), []);
 });
 
 test("明确非受管的精确 runId 仍可 steer 透传（原缺陷修复不得回归）", async () => {
   const { pi, rpc } = createSteerScenario({ readOwnerReceipt: async () => undefined });
-  const result = await pi.tools[0].execute("steer-unowned", { action: "steer", index: 0, runId: FULL_RUN_ID, message: "Continue please." }, signal, undefined, ctx);
+  const result = await toolByName(pi, "subagent_run_steer").execute("steer-unowned", { index: 0, runId: FULL_RUN_ID, message: "Continue please." }, signal, undefined, ctx);
   assert.equal(result.isError, false, JSON.stringify(result));
   assert.deepEqual(steerCalls(rpc), [{ method: "steer", params: { index: 0, runId: FULL_RUN_ID, message: "Continue please." } }]);
 });
 
 test("受管精确 runId 在 id 与 runId 同值时仍走控制面并成功投递", async () => {
   const { pi, rpc } = createSteerScenario({ readOwnerReceipt: async (runId) => ({ runId, rootSessionId: "root-1", ownerGeneration: 1 }) });
-  const result = await pi.tools[0].execute("steer-managed", { action: "steer", index: 0, id: FULL_RUN_ID, runId: FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
+  const result = await toolByName(pi, "subagent_run_steer").execute("steer-managed", { index: 0, id: FULL_RUN_ID, runId: FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
   assert.equal(result.isError, false, JSON.stringify(result));
   assert.equal(steerCalls(rpc).length, 1, "受管 run 经控制面放行后应投递一次");
 });
@@ -2503,7 +2556,7 @@ test("broker 抛 unknown_run 时判定为明确非受管并透传 steer", async 
   const { pi, rpc } = createSteerScenario({
     readOwnerReceipt: async () => { throw Object.assign(new Error("Owner is no longer current"), { code: "unknown_run" }); },
   });
-  const result = await pi.tools[0].execute("steer-unknown-run", { action: "steer", index: 0, runId: FULL_RUN_ID, message: "Continue please." }, signal, undefined, ctx);
+  const result = await toolByName(pi, "subagent_run_steer").execute("steer-unknown-run", { index: 0, runId: FULL_RUN_ID, message: "Continue please." }, signal, undefined, ctx);
   assert.equal(result.isError, false, JSON.stringify(result));
   assert.equal(steerCalls(rpc).length, 1, "unknown_run 是权威的非受管信号，应透传投递");
 });
@@ -2511,7 +2564,7 @@ test("broker 抛 unknown_run 时判定为明确非受管并透传 steer", async 
 test("broker 存储类错误一律 fail-closed，不得当作非受管放行", async () => {
   for (const code of ["authority_store_unavailable", "authority_lock_contention", "cas_conflict", "revoked", "unsupported_layout"]) {
     const { pi, rpc } = createSteerScenario({ readOwnerReceipt: async () => { throw Object.assign(new Error(code), { code }); } });
-    const result = await pi.tools[0].execute(`steer-${code}`, { action: "steer", index: 0, runId: FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
+    const result = await toolByName(pi, "subagent_run_steer").execute(`steer-${code}`, { index: 0, runId: FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
     assert.equal(result.details.code, "SUPERVISOR_OWNER_UNAVAILABLE", `${code} 必须 fail-closed，实际 ${JSON.stringify(result)}`);
     assert.deepEqual(steerCalls(rpc), [], `${code} 绝不得投递`);
   }
@@ -2693,7 +2746,10 @@ function createSupervisorScenario({ plane, native, rootSessionId = "diag-root-1"
   });
   const host = { cwd: "/repo", sessionManager: { getSessionId: () => rootSessionId } };
   const ingress = async (details) => pi.handlers.get("message_end")[0]({ message: { customType: "subagent_supervisor_request", details } }, host);
-  const supervisor = (params) => pi.tools[2].execute("supervisor-tool-call", params, signal, undefined, host);
+  const supervisor = (params) => {
+    const { action, ...rest } = params;
+    return toolByName(pi, SUPERVISOR_TOOL_BY_ACTION[action]).execute("supervisor-tool-call", rest, signal, undefined, host);
+  };
   const count = (action) => nativeActions.filter((entry) => entry === action).length;
   return { pi, host, ingress, supervisor, count, nativeActions };
 }
@@ -2974,4 +3030,29 @@ test("真实 extension/replay producer 经文件 sink 落盘 registration/compen
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+// S4：上游 subagent_supervisor 未 bind 时，session_start 必须停用三个新 supervisor_request_*
+// 模型工具（不留 active 声明），并保持既有 SUPERVISOR_TARGET_UNAVAILABLE 失败语义。
+test("unbound supervisor target deactivates the three supervisor_request_* operation tools", async () => {
+  const pi = createPi();
+  let active = ["subagent_start", "read", ...Object.values(SUPERVISOR_TOOL_BY_ACTION)];
+  pi.getActiveTools = () => [...active];
+  pi.setActiveTools = (names) => { active = [...names]; };
+  // bootstrap 不注册上游 subagent_supervisor → membrane 无 execute 可 bind。
+  installHeadlessTypedSubagentRuntime(pi, {
+    bootstrap() {},
+    rpc: createRpc(),
+    cleanupStore: {},
+  });
+  assertRegisteredOperationTools(pi);
+  const sessionId = `deactivate-${randomUUID()}`;
+  const errors = [];
+  for (const handler of pi.handlers.get("session_start") ?? []) {
+    try { await handler({}, { sessionManager: { getSessionId: () => sessionId } }); } catch (error) { errors.push(error?.code ?? error?.message); }
+  }
+  // 只有 supervisor 那个 session_start handler 抛错；ready handler 正常完成。
+  assert.deepEqual(errors, ["SUPERVISOR_TARGET_UNAVAILABLE"]);
+  assert.deepEqual(active, ["subagent_start", "read"], "三个 supervisor_request_* 必须从未 bind 的 active 集合中停用");
+  assert.deepEqual(active.filter((name) => name.startsWith("supervisor_request_")), []);
 });

@@ -886,8 +886,19 @@ test("x toggles native tool result visibility while consuming browser input", as
   const preview = createChildConversationRenderers("/repo");
   assert.equal(preview.resolveToolRenderer("third-party"), undefined);
   assert.deepEqual(Object.keys(preview.resolveToolRenderer("read")).sort(), ["renderCall", "renderResult", "renderShell"]);
+  // 旧历史工具名仍可解析（只用于渲染历史），新每操作工具名同样可解析。
   assert.equal(typeof preview.resolveToolRenderer("subagent").renderCall, "function");
   assert.equal(typeof preview.resolveToolRenderer("subagent_supervisor").renderResult, "function");
+  for (const name of ["subagent_roster", "subagent_start", "subagent_run_status", "subagent_run_steer", "subagent_run_interrupt", "subagent_run_resume", "subagent_run_stop"]) {
+    assert.equal(typeof preview.resolveToolRenderer(name).renderCall, "function", `${name} renderCall`);
+    assert.equal(typeof preview.resolveToolRenderer(name).renderResult, "function", `${name} renderResult`);
+  }
+  for (const name of ["supervisor_request_pending", "supervisor_request_status", "supervisor_request_reply"]) {
+    assert.equal(typeof preview.resolveToolRenderer(name).renderResult, "function", `${name} renderResult`);
+  }
+  // workspace 四工具本 package 无自有 renderer，仍由 Host fallback 渲染（不伪造投影）。
+  assert.equal(preview.resolveToolRenderer("managed_workspace_status"), undefined);
+  assert.equal(preview.resolveToolRenderer("subagent_worktree"), undefined);
   const subject = runtimeFixture();
   subject.ctx.sessionManager.getSessionFile = () => parent.getSessionFile();
   t.after(() => { subject.shutdown(); subject.restore(); fs.rmSync(sessions, { recursive: true, force: true }); });

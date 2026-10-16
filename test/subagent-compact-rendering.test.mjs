@@ -465,3 +465,83 @@ test("compact list errors pass through unchanged and nearby actions keep their p
   );
   assert.deepEqual(interrupt, beforeInterrupt);
 });
+
+// S4：新每操作独立工具的 args 不再携带 action，显示层必须按工具名映射固定 operation；
+// 旧历史工具名（无 context.tool 提示或提示为旧名）继续按 args.action 投影。
+test("compact rendering routes new operation tools by tool name without args.action", () => {
+  const statusResult = { content: [{ type: "text", text: "State: running\nRun: run-1" }], details: { runId: "run-1" } };
+  assert.equal(
+    formatCompactSubagentToolResult(statusResult, { id: "run-1" }, { tool: "subagent_run_status" }),
+    "Status: running · run: run-1",
+  );
+  // 同一 result/args 在无工具名提示时不冒充 status 投影（旧路径按 args.action 判定）。
+  assert.equal(
+    formatCompactSubagentToolResult(statusResult, { id: "run-1" }),
+    "State: running\nRun: run-1",
+  );
+  assert.equal(
+    formatCompactSubagentToolResult(
+      { content: [{ type: "text", text: "Interrupt requested for async run run-9." }] },
+      { id: "run-9" },
+      { tool: "subagent_run_interrupt" },
+    ),
+    "已中断 · run-9",
+  );
+  const steerArgs = { runId: "run-steer", message: "继续检查失败路径" };
+  const beforeSteer = clone(steerArgs);
+  const steered = formatCompactSubagentToolResult(
+    { content: [{ type: "text", text: "Steered." }], details: { runId: "run-steer" } },
+    steerArgs,
+    { tool: "subagent_run_steer" },
+  );
+  // title registry 是模块级单例，具体标题/agent 由其他用例登记；本用例只验证按工具名进入 steer 投影。
+  assert.match(steered, /^→ \[steer\] /);
+  assert.match(steered, /\n继续检查失败路径$/);
+  assert.deepEqual(steerArgs, beforeSteer, "显示层不得改写原 args");
+  // roster 与 legacy action:"list" 共用名册投影。
+  const roster = { content: [{ type: "text", text: JSON.stringify([{ name: "executor", frontmatter: { description: "执行" } }]) }], details: { agents: [{ name: "executor", description: "执行" }] } };
+  assert.equal(formatCompactSubagentToolResult(roster, {}, { tool: "subagent_roster" }), "• executor：执行");
+  assert.equal(formatCompactSubagentToolResult(roster, { action: "list" }), "• executor：执行");
+  // 新工具名的 Host 校验失败文案：isError 权威时原文完整保留（不折叠错误事实）；
+  // Host 只透传 {content, details} 时同样只保首行摘要，不展开 Received arguments。
+  const validation = {
+    isError: true,
+    content: [{ type: "text", text: ['Validation failed for tool "subagent_start":', "  - $.agent: expected string", "", "Received arguments:", JSON.stringify({ agent: 1 })].join("\n") }],
+  };
+  const renderedValidation = formatCompactSubagentToolResult(validation, { agent: 1 }, { isError: true, tool: "subagent_start" });
+  assert.match(renderedValidation, /Validation failed for tool "subagent_start":/);
+  assert.match(renderedValidation, /Received arguments/);
+  const trimmed = formatCompactSubagentToolResult({ content: validation.content }, { agent: 1 }, { tool: "subagent_start" });
+  assert.match(trimmed, /Validation failed for tool "subagent_start":/);
+  assert.doesNotMatch(trimmed, /Received arguments/);
+});
+
+test("compact supervisor rendering routes reply by tool name and keeps legacy args.action history", () => {
+  const { formatCompactSupervisorToolResult } = compactRendering;
+  const result = { content: [{ type: "text", text: "Reply recorded." }], details: { replyTo: "request-1", runId: "run-1", agent: "executor" } };
+  const args = { replyTo: "request-1", message: "按方案 A 执行" };
+  const expected = "→ [reply] (executor)\nRun: run-1\nReply to: request-1\n\n按方案 A 执行";
+  assert.equal(formatCompactSupervisorToolResult(result, args, { tool: "supervisor_request_reply" }), expected);
+  assert.equal(formatCompactSupervisorToolResult(result, { ...args, action: "reply" }), expected);
+  // pending/status 只读工具不得复用 reply 正文投影。
+  assert.equal(
+    formatCompactSupervisorToolResult({ content: [{ type: "text", text: "no pending requests" }] }, {}, { tool: "supervisor_request_pending" }),
+    "no pending requests",
+  );
+  assert.deepEqual(args, { replyTo: "request-1", message: "按方案 A 执行" }, "显示层不得改写原 args");
+});
+
+test("operation-by-tool maps cover exactly the registered operation tool names", () => {
+  const { SUBAGENT_OPERATION_BY_TOOL, SUPERVISOR_OPERATION_BY_TOOL, WORKSPACE_OPERATION_BY_TOOL, LEGACY_OPERATION_TOOL_NAMES } = compactRendering;
+  assert.deepEqual(Object.keys(SUBAGENT_OPERATION_BY_TOOL), [
+    "subagent_roster", "subagent_start", "subagent_run_status", "subagent_run_steer",
+    "subagent_run_interrupt", "subagent_run_resume", "subagent_run_stop",
+  ]);
+  assert.deepEqual(Object.keys(WORKSPACE_OPERATION_BY_TOOL), [
+    "managed_workspace_list", "managed_workspace_status", "managed_workspace_dispose", "managed_workspace_release",
+  ]);
+  assert.deepEqual(Object.keys(SUPERVISOR_OPERATION_BY_TOOL), [
+    "supervisor_request_pending", "supervisor_request_status", "supervisor_request_reply",
+  ]);
+  assert.deepEqual([...LEGACY_OPERATION_TOOL_NAMES], ["subagent", "subagent_worktree", "subagent_supervisor"]);
+});
