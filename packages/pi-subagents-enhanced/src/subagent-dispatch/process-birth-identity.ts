@@ -14,7 +14,7 @@ async function defaultExecFile(file: string, args: string[]) {
 }
 
 function unavailableError(cause?: unknown) {
-  const error = new Error("Process birth identity is unavailable");
+  const error = new Error("Process birth identity is unavailable") as Error & { code: "PROCESS_BIRTH_IDENTITY_UNAVAILABLE" };
   error.code = "PROCESS_BIRTH_IDENTITY_UNAVAILABLE";
   if (cause !== undefined) error.cause = cause;
   return error;
@@ -25,7 +25,7 @@ export function assertProcessBirthOutput(bytes: Buffer): void {
   const english = /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}\s+\S[^\r\n]*(?:\r?\n)?$/;
   const localized = /^\S+\s+\S+\/\s*\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}\s+\S[^\r\n]*(?:\r?\n)?$/;
   if (!english.test(text) && !localized.test(text)) {
-    const error = new Error("Process birth identity ps output is malformed");
+    const error = new Error("Process birth identity ps output is malformed") as Error & { code: "PROCESS_BIRTH_IDENTITY_OUTPUT_INVALID" };
     error.code = "PROCESS_BIRTH_IDENTITY_OUTPUT_INVALID";
     throw error;
   }
@@ -36,7 +36,7 @@ export async function captureProcessBirthIdentity(
   { execFile = defaultExecFile }: { execFile?: ExecFile } = {},
 ) {
   if (!Number.isSafeInteger(pid) || pid <= 0) {
-    const error = new Error("Process birth identity PID must be a positive safe integer");
+    const error = new Error("Process birth identity PID must be a positive safe integer") as Error & { code: "PROCESS_BIRTH_IDENTITY_INVALID" };
     error.code = "PROCESS_BIRTH_IDENTITY_INVALID";
     throw error;
   }
