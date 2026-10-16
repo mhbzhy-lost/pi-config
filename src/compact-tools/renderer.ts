@@ -121,7 +121,7 @@ export function installCompactSkillRenderer({ SkillInvocationMessageComponent, T
   };
 }
 
-export function createCompactToolRenderers({ Text, Container, visibleWidth, sliceByColumn, truncateToWidth }) {
+export function createCompactToolRenderers({ Text, Container, visibleWidth, sliceByColumn, truncateToWidth, nativeEditRenderers = undefined as { current?: import("@earendil-works/pi-coding-agent").ToolRenderers } | undefined }) {
   const summarySuffix = (theme, context) => {
     const summary = !context?.expanded ? context?.state?.[COMPACT_SUMMARY_KEY] : undefined;
     return summary ? theme.fg("dim", ` · ${summary}`) : "";
@@ -155,6 +155,26 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
     },
     invalidate() {},
   });
+
+  // edit 的既有 compact result 渲染：折叠单行摘要、失败组件与展开文本块全部保留。
+  const editCompactResultRenderer = resultRenderer({ Text, Container, truncateToWidth, summary: () => "done", maxLines: 30 });
+  // 展开成功非 partial 且 resolver 注入了原生 edit renderResult 时委托原生（原生消费 details.diff 渲染 +/- diff，
+  // 不自造 diff/parser/ANSI）；失败、partial、折叠或 native 缺失时保持 compact 语义，错误原因仍由失败组件可见。
+  // 委托时浅拷贝 context 并置空 lastComponent：compact 上一帧组件可能是无 clear() 的 Text/普通对象，
+  // 而原生会对其调用 component.clear()；不修改调用方 context 对象，也不触碰 raw result/details。
+  const editRenderResult = (result, options, theme, context) => {
+    const failed = context?.isError === true || result?.isError === true;
+    const native = nativeEditRenderers?.current;
+    if (
+      options?.expanded === true
+      && !failed
+      && options?.isPartial !== true
+      && typeof native?.renderResult === "function"
+    ) {
+      return native.renderResult(result, options, theme, { ...context, lastComponent: undefined });
+    }
+    return editCompactResultRenderer(result, options, theme, context);
+  };
 
   const renderers = {
     read: {
@@ -235,7 +255,7 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
           context,
         );
       },
-      renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: () => "done", maxLines: 30 }),
+      renderResult: editRenderResult,
     },
     write: {
       renderCall(args, theme, context) {

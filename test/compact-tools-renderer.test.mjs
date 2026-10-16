@@ -1,7 +1,22 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
+import { stripVTControlCharacters } from "node:util";
+import { loadPiTestRuntime } from "./helpers/pi-runtime.mjs";
 
 const rendererModule = await import("../src/compact-tools/renderer.ts").catch(() => undefined);
+const resolverModule = await import("../src/compact-tools/index.ts").catch(() => undefined);
+
+const previousExperimental = process.env.PI_EXPERIMENTAL;
+process.env.PI_EXPERIMENTAL = "1";
+after(() => {
+  if (previousExperimental === undefined) delete process.env.PI_EXPERIMENTAL;
+  else process.env.PI_EXPERIMENTAL = previousExperimental;
+});
+
+// 原生 edit renderer 来自公开 SDK factory（createEditToolDefinition），验证 resolver next() 委托契约；
+// 不深引 dist、不 import 上游私有路径、不替换原生 resolver，也不自造 diff 算法。
+const { codingAgent: sdk, piTui: tui } = await loadPiTestRuntime(import.meta.url);
+sdk.initTheme("dark", false);
 
 class FakeText {
   constructor(text = "") {
@@ -431,4 +446,162 @@ test("apply_patch 渲染冻结的原始 args/result 后内容保持不变", () =
       .render(120);
   }
   assert.deepEqual({ args, result }, before);
+});
+
+// ---- edit 展开委托原生 details.diff 渲染（resolver next() DI 契约）----
+
+const passthroughTheme = { bold: (text) => text, fg: (_color, text) => text };
+const editArgs = { path: "/tmp/fixture.txt", edits: [{ oldText: "old line", newText: "new line" }] };
+
+function editContext(overrides = {}) {
+  return {
+    args: editArgs,
+    state: {},
+    isError: false,
+    expanded: false,
+    isPartial: false,
+    toolCallId: "fixture-edit",
+    cwd: "/tmp",
+    executionStarted: true,
+    argsComplete: true,
+    showImages: false,
+    lastComponent: undefined,
+    invalidate() {},
+    ...overrides,
+  };
+}
+
+function assertReferencesUnchanged(access, references) {
+  access.forEach((value, index) => assert.equal(value, references[index]));
+}
+
+test("edit展开成功经resolver next()委托原生renderResult渲染details.diff，raw前后一致", () => {
+  // 公开 SDK factory 构造真实原生 edit renderer；原生 renderResult 消费 details.diff 经上游 renderDiff 输出 +/- 行。
+  assert.ok(resolverModule, "compact tools resolver module should exist");
+  const nativeEdit = sdk.createEditToolDefinition(process.cwd());
+  const resolve = resolverModule.createCompactToolRendererResolver(tui);
+  const edit = resolve("edit", () => nativeEdit);
+  const diff = "-1 old line\n+1 new line\n 2 保留的上下文";
+  const result = {
+    content: [{ type: "text", text: "Updated fixture.txt with 1 edit" }],
+    details: {
+      diff,
+      patch: "--- a/fixture.txt\n+++ b/fixture.txt\n@@ -1 +1 @@\n-old line\n+new line",
+      firstChangedLine: 1,
+    },
+    isError: false,
+  };
+  const before = structuredClone(result);
+  const references = [result.content, result.details, result.content[0]];
+  const ctx = editContext({ expanded: true });
+  const state = ctx.state;
+  const ctxSnapshot = { ...ctx };
+  const output = edit.renderResult(result, { expanded: true, isPartial: false }, passthroughTheme, ctx);
+  assert.ok(output, "expanded edit should delegate to the native renderer");
+  const visible = stripVTControlCharacters(output.render(120).join("\n"));
+  assert.match(visible, /-1 old line/);
+  assert.match(visible, /\+1 new line/);
+  assert.match(visible, /保留的上下文/);
+  // 原生展开渲染 diff（与原生 Pi 一致），不以 compact 文本块替代，也不丢失 content 之外的新增语义。
+  assert.doesNotMatch(visible, /Updated fixture\.txt/);
+  assert.deepEqual(result, before);
+  assertReferencesUnchanged([result.content, result.details, result.content[0]], references);
+  // 原 context/state/result/details 不被修改：lastComponent 置空只发生在传给原生的浅拷贝上。
+  assert.equal(ctx.state, state);
+  assert.deepEqual(ctx.state, {});
+  assert.deepEqual({ ...ctx }, ctxSnapshot);
+});
+
+test("edit折叠即使next()提供native也保持单行摘要且不显示diff，raw不变", () => {
+  const nativeEdit = sdk.createEditToolDefinition(process.cwd());
+  const resolve = resolverModule.createCompactToolRendererResolver(tui);
+  const edit = resolve("edit", () => nativeEdit);
+  const result = {
+    content: [{ type: "text", text: "Updated" }],
+    details: { diff: "-1 old line\n+1 new line" },
+    isError: false,
+  };
+  const before = structuredClone(result);
+  const references = [result.content, result.details];
+  const ctx = editContext();
+  const call = edit.renderCall(editArgs, passthroughTheme, ctx);
+  const output = edit.renderResult(result, { expanded: false, isPartial: false }, passthroughTheme, ctx);
+  const lines = [...call.render(120), ...output.render(120)].filter((line) => line.trim());
+  assert.equal(lines.length, 1, JSON.stringify(lines));
+  assert.match(lines[0], /· done$/);
+  assert.doesNotMatch(lines.join("\n"), /old line|new line/);
+  assert.deepEqual(result, before);
+  assertReferencesUnchanged([result.content, result.details], references);
+});
+
+test("edit失败展开显示错误、partial与折叠不委托native（spy经next注入）", () => {
+  let nativeCalls = 0;
+  const resolve = resolverModule.createCompactToolRendererResolver({
+    Text: FakeText,
+    Container: FakeContainer,
+    visibleWidth: plainVisibleWidth,
+    sliceByColumn: plainSliceByColumn,
+    truncateToWidth: plainTruncateToWidth,
+  });
+  const edit = resolve("edit", () => ({
+    renderResult(...callArgs) {
+      nativeCalls += 1;
+      return new FakeText("native-diff-不应出现");
+    },
+  }));
+  const success = {
+    content: [{ type: "text", text: "first line\nsecond line" }],
+    details: { diff: "-1 old line\n+1 new line" },
+  };
+  // 失败展开：错误可见，不调用 native。
+  const failure = {
+    content: [{ type: "text", text: "edit conflict：oldText 未匹配" }],
+    details: { diff: "-1 old line\n+1 new line" },
+    isError: true,
+  };
+  const failureBefore = structuredClone(failure);
+  const failureReferences = [failure.content, failure.details];
+  const failed = edit.renderResult(failure, { expanded: true, isPartial: false }, passthroughTheme, editContext({ isError: true, expanded: true }));
+  const failedVisible = failed.render(100).join("\n");
+  // 既有 compact 展开态显示完整错误原文；✗ 是折叠失败组件的标记，不强加到展开合同。
+  assert.match(failedVisible, /edit conflict：oldText 未匹配/);
+  assert.doesNotMatch(failedVisible, /old line|new line|native-diff/);
+  assert.equal(nativeCalls, 0);
+  assert.deepEqual(failure, failureBefore);
+  assertReferencesUnchanged([failure.content, failure.details], failureReferences);
+
+  // partial 展开：不委托 native，回落 compact 文本块。
+  const partial = edit.renderResult(success, { expanded: true, isPartial: true }, passthroughTheme, editContext({ expanded: true, isPartial: true }));
+  const partialVisible = partial.render(120).join("\n");
+  assert.match(partialVisible, /first line/);
+  assert.doesNotMatch(partialVisible, /old line|new line|native-diff/);
+  assert.equal(nativeCalls, 0);
+
+  // 折叠成功：单行摘要，不委托 native。
+  const ctx = editContext();
+  const collapsedCall = edit.renderCall(editArgs, passthroughTheme, ctx);
+  const collapsedOutput = edit.renderResult(success, { expanded: false, isPartial: false }, passthroughTheme, ctx);
+  const collapsedLines = [...collapsedCall.render(120), ...collapsedOutput.render(120)].filter((line) => line.trim());
+  assert.equal(collapsedLines.length, 1, JSON.stringify(collapsedLines));
+  assert.doesNotMatch(collapsedLines.join("\n"), /old line|new line|native-diff/);
+  assert.equal(nativeCalls, 0);
+});
+
+test("next()为空时edit展开回落compact文本块且不崩、raw不变，重解析不残留stale native", () => {
+  const nativeEdit = sdk.createEditToolDefinition(process.cwd());
+  const resolve = resolverModule.createCompactToolRendererResolver(tui);
+  const editWithNative = resolve("edit", () => nativeEdit);
+  const editWithoutNative = resolve("edit", () => undefined);
+  // 同一 owner renderer（函数身份稳定），槽位随最新 resolve 更新。
+  assert.equal(editWithoutNative.renderResult, editWithNative.renderResult);
+  const result = { content: [{ type: "text", text: "first line\nsecond line" }], details: undefined };
+  const before = structuredClone(result);
+  const references = [result.content];
+  const output = editWithoutNative.renderResult(result, { expanded: true, isPartial: false }, passthroughTheme, editContext({ expanded: true }));
+  const visible = stripVTControlCharacters(output.render(120).join("\n"));
+  assert.match(visible, /first line/);
+  assert.match(visible, /second line/);
+  assert.doesNotMatch(visible, /native-diff/);
+  assert.deepEqual(result, before);
+  assertReferencesUnchanged([result.content], references);
 });
