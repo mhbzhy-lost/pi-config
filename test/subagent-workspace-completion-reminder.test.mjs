@@ -44,8 +44,15 @@ test("workspace reminder queues one standalone terminal completion before its no
   assert.equal(messages.length, 1);
   assert.equal(messages[0].message.customType, "subagent-workspace-reminder");
   assert.match(messages[0].message.content, /workspace-a/);
-  assert.match(messages[0].message.content, /subagent_worktree\(\{action:"status",workspace_id:"workspace-a"\}\)/);
-  assert.match(messages[0].message.content, /then integrate or discard to finish, or preserve temporarily and later release\./);
+  // S5：reminder 只指向实时状态权威，不再无条件建议 integrate/discard；
+  // details 字段与发送/去重合同保持逐字不变（下方 deepEqual 仍成立）。
+  assert.match(messages[0].message.content, /managed_workspace_status\(\{workspace_id:"workspace-a"\}\)/);
+  assert.match(messages[0].message.content, /act only on the allowed_dispositions and one-time token that call returns for the current state/);
+  assert.match(messages[0].message.content, /do not assume integrate or discard\./);
+  assert.match(messages[0].message.content, /CHILD_OWNS_INTEGRATION/);
+  assert.match(messages[0].message.content, /a released workspace needs no further action/);
+  assert.doesNotMatch(messages[0].message.content, /subagent_worktree/);
+  assert.doesNotMatch(messages[0].message.content, /then integrate or discard to finish/);
   assert.deepEqual(messages[0].message.details, {
     schemaVersion: "subagent-workspace-reminder.v1", rootSessionId: "root-session", runId: "leaf-run", workspaceId: "workspace-a", workspaceState: "active", mode: "standalone-subagent",
   });

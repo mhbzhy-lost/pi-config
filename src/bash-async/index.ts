@@ -56,7 +56,9 @@ export function createBashAsyncExtension(pi: ExtensionAPI, options: Parameters<t
       '启动成功只代表接受任务；以 bash-async-complete 的 outcome/exitCode 判断执行结果。',
       '接受回执后立即继续其他无冲突工作；没有独立工作就结束当前回合，完成时自动投 followUp 唤醒。正例：启动 e2e 测试后转去处理无关文件或直接结束回合；反例：bash_async 启动构建后紧跟 bash "sleep 60" 干等、反复轮询任务状态、或另起阻塞命令纯粹等结果。同 cwd 并发写入并未隔离。',
       '不得用后台任务绕过命令门禁、凭据、网络或提交授权；不要用于自建 daemon，也不要用 bash_async 跑 sleep/wait 循环变相等待或当延时器。例外边界：真实命令内部的 retry/backoff、测试自身的模拟延迟、用户任务里明确要求的 delay 都按任务照常执行，不属于禁止项；用户提出的未来某时刻或重复执行的任务用 scheduler_create，不得自行提交定时器。',
-      'print/json 不支持；tree/独立 compaction/reload/switch/退出可能取消任务。clear_queue 可清除已提交的回执且不自动重发。',
+      // S5：只限定 clear_queue 的主体——它是 Host/RPC 控制面操作，不是本工具可传参数；
+      // 其余 Host/RPC 事实与 sleep 合法载荷（retry/backoff/测试模拟延迟/用户 delay）例外合同逐字保留。
+      'print/json 不支持；tree/独立 compaction/reload/switch/退出可能取消任务。clear_queue 是 Host/RPC 侧操作、不是本工具参数，可清除已提交的回执且不自动重发。',
     ],
     async execute(toolCallId, request, signal, _onUpdate, ctx) {
       const receipt = await controller.launch(toolCallId, request as BashAsyncRequest, ctx, signal);

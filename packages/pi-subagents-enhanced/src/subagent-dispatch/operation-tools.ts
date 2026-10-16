@@ -203,7 +203,7 @@ const DESCRIPTORS: readonly OperationToolDescriptor[] = Object.freeze([
   {
     name: "subagent_start",
     label: "Subagent Start",
-    description: "启动一个新的 subagent run：agent、task 必填。writePaths 存在时为 coding 派发，acceptance.criteria 必填，该条件必填由运行时 typed 编译器裁决。本工具不含任何控制 action 字段，也不负责 run 的后续 status/steer/interrupt/resume/stop。",
+    description: "启动一个新的 subagent run：agent、task 必填。writePaths 存在时为 coding 派发，acceptance.criteria 必填，该条件必填由运行时 typed 编译器裁决。worktree:true 时回执携带 workspace_id，其处置一律以本次 managed_workspace_status 实时返回的 allowed_dispositions 与一次性 token 为权威，不在此预判 integrate 或 discard；coding 工作区的集成由子代理 integration queue 自主拥有。本工具不含任何控制 action 字段，也不负责 run 的后续 status/steer/interrupt/resume/stop；启动成功只代表已开始，不是 terminal proof。",
     promptSnippet: "用 subagent_start 携带完整合同（agent、task，coding 另加 writePaths 与 acceptance.criteria）启动子代理。",
     promptGuidelines: [
       "派发必须一次携带完整任务合同，不要靠追问补齐关键上下文；启动成功只代表子代理已开始执行，完成以子代理完成通知为准。",
@@ -223,7 +223,7 @@ const DESCRIPTORS: readonly OperationToolDescriptor[] = Object.freeze([
   {
     name: "subagent_run_status",
     label: "Subagent Run Status",
-    description: "查询一个 subagent run 的状态。定位字段 id/runId/dir/index 均可选；status 仅用于用户明确要求、需要干预或诊断，完成通知会自动送达，不要轮询等待。",
+    description: "查询一个 subagent run 的状态：定位字段 id/runId/dir/index 均可选。状态回执只报告 runtime 事实，不代替自动送达的完成通知，也不构成 workspace 处置权威（处置一律以 managed_workspace_status 实时返回为准）；完成通知自动送达，不要轮询等待，status 仅用于用户明确要求、需要干预或诊断。",
     promptSnippet: "用 subagent_run_status 查询 run 状态；不要用它轮询等待完成。",
     promptGuidelines: [
       "完成通知自动送达，仅在用户明确要求、需要干预或诊断时调用 status。",

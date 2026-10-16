@@ -332,8 +332,11 @@ test('引导合同：guidelines 保留第1条结果判定，第2/3条含正反�
     assert.ok(third.includes('scheduler_create'), `第3条缺少未来定时意图入口：${third}`);
     assert.ok(third.includes('不得自行提交定时器'), `第3条未限定 scheduler 仅用于用户未来任务：${third}`);
     assert.ok(third.includes('绕过命令门禁') && third.includes('自建 daemon'), `第3条原有门禁约束不得丢失：${third}`);
-    // 第4条（clear_queue 等 Host/RPC 控制面事实）保持原合同，本任务不改
-    assert.equal(fourth, 'print/json 不支持；tree/独立 compaction/reload/switch/退出可能取消任务。clear_queue 可清除已提交的回执且不自动重发。');
+    // 第4条（clear_queue 等 Host/RPC 控制面事实）：S5 只补「Host/RPC 侧操作、非本工具参数」限定，
+    // 其余 Host/RPC 事实逐字保留；不得新增命令拦截。
+    assert.equal(fourth, 'print/json 不支持；tree/独立 compaction/reload/switch/退出可能取消任务。clear_queue 是 Host/RPC 侧操作、不是本工具参数，可清除已提交的回执且不自动重发。');
+    assert.ok(fourth.includes('不是本工具参数'), `第4条未限定 clear_queue 非本工具参数：${fourth}`);
+    assert.ok(!/不接受|拒绝执行|会被拦/.test(fourth), `第4条不得写成硬拒措辞：${fourth}`);
   } finally { await c.shutdown('quit'); await rm(root, { recursive: true, force: true }); }
 });
 

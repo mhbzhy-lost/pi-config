@@ -99,13 +99,13 @@ export const SUPERVISOR_REQUEST_REPLY_PARAMETERS = Object.freeze({
 });
 
 export const SUPERVISOR_REQUEST_PENDING_DESCRIPTION =
-  "列出当前会话下待主代理决策的子代理请求（pending）。无参数；只读，不消费请求、不投递任何内容。";
+  "列出当前会话下待主代理决策的子代理请求（pending）：无参数，只接受空对象。只读，不消费请求、不投递任何内容；待决列表不证明投递成功，也不代表 child 已消费。";
 
 export const SUPERVISOR_REQUEST_STATUS_DESCRIPTION =
-  "查询子代理请求投递状态（status），可选 replyTo 按 requestId 精确过滤；结果附带只读 supervisorDiagnostic 诊断投影。只读，不消费请求。";
+  "查询子代理请求投递状态（status）：无必填参数，可选 replyTo 按 requestId 精确过滤；结果附带只读 supervisorDiagnostic 诊断投影。只读，不消费请求；投影只报告本侧投递事实，queued 不等于 child 已收到或已消费。";
 
 export const SUPERVISOR_REQUEST_REPLY_DESCRIPTION =
-  "针对具体待决请求回复决策（reply）：replyTo 与 message 必填；to 仅在无控制面或控制面停用路径生效，受控路径以 replyTo 为唯一权威。本侧提交只代表提交已记录，不代表子代理已收到或已消费。";
+  "针对具体待决请求回复决策（reply）：replyTo 与 message 均必填非空；to 为可选，仅在无控制面或控制面停用路径由 native 兜底解析，受控路径以 replyTo 为唯一权威。本工具不代表任何 run 操作。本侧提交只代表提交已记录，不代表子代理已收到、已消费或已理解；投递与消费事实以独立诊断与 child 产出为准。";
 
 export function createSupervisorOperationTools(adapter, { renderCall, renderResult }: {
   renderCall?: unknown;

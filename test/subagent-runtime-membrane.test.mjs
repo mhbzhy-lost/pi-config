@@ -1416,7 +1416,13 @@ test("generic worktree spawn result explains workspace disposition without expos
   const result = await execute(toolByName(pi, "subagent_start"), { agent: "reviewer", title: "Review", task: "Review it", writePaths: ["README.md"], acceptance: { criteria: ["review complete"] }, worktree: true }, { cwd: "/repo", sessionManager: {} });
   assert.equal(result.isError, false, result.content[0]?.text);
   assert.match(result.content[0].text, /Workspace generic-workspace allocated \(state: active\)/);
-  assert.match(result.content[0].text, /integrate or discard to finish, or preserve temporarily and later release/);
+  // S5 引导迁移（经父层授权只改这一条陈旧断言）：本仓自有 workspaceNotice 不再无条件建议
+  // integrate/discard，而是指向 managed_workspace_status 实时权威与 coding child-owned 集成边界。
+  assert.match(
+    result.content[0].text,
+    /call managed_workspace_status\(\{workspace_id:"generic-workspace"\}\).*do not assume integrate or discard.*integrated by the child itself.*CHILD_OWNS_INTEGRATION/s,
+  );
+  assert.doesNotMatch(result.content[0].text, /then integrate or discard to finish/);
   assert.doesNotMatch(result.content[0].text, /action_token|lease[_-]id|\/Users\//i);
 });
 

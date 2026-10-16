@@ -52,7 +52,10 @@ export function createWorkspaceCompletionReminder({ events, sendMessage, getCont
     try {
       await sendMessage({
         customType: "subagent-workspace-reminder",
-        content: `Subagent workspace awaiting disposition: ${receipt.workspaceId}. Call subagent_worktree({action:"status",workspace_id:"${receipt.workspaceId}"}), then integrate or discard to finish, or preserve temporarily and later release.`,
+        // S5 引导迁移：本仓自有 reminder 不再无条件建议 integrate/discard；
+        // 处置动作一律以本次 managed_workspace_status 实时返回为权威，coding 集成由 child 自主拥有。
+        // 只改本文案：customType/details 字段、发送与去重行为均不变。
+        content: `Subagent workspace awaiting disposition: ${receipt.workspaceId}. Call managed_workspace_status({workspace_id:"${receipt.workspaceId}"}) and act only on the allowed_dispositions and one-time token that call returns for the current state; do not assume integrate or discard. A coding workspace whose publication is allowed is integrated by the child itself (a parent-side managed_workspace_dispose(integrate) returns CHILD_OWNS_INTEGRATION); a released workspace needs no further action.`,
         display: true,
         details: {
           schemaVersion: "subagent-workspace-reminder.v1",

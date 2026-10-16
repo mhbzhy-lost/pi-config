@@ -1228,7 +1228,10 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
     ...(workspace ? workspacePublic(workspace) : {}),
   };
   const workspaceNotice = workspace
-    ? ` Workspace ${workspace.workspaceId} allocated (state: ${workspace.state}). After the run completes: subagent_worktree({action:"status",workspace_id:"${workspace.workspaceId}"}) to check dispositions; then integrate or discard to finish, or preserve temporarily and later release.`
+    // S5 引导迁移：回执不再无条件建议 integrate/discard，处置动作一律以本次
+    // managed_workspace_status 实时返回为权威；publication=allowed 的 coding 工作区
+    // 集成由 child 自主拥有。只改本仓自有 receipt 文案，不动 details 字段。
+    ? ` Workspace ${workspace.workspaceId} allocated (state: ${workspace.state}). After the run completes, call managed_workspace_status({workspace_id:"${workspace.workspaceId}"}) and act only on the allowed_dispositions and one-time token that call returns for the current state; do not assume integrate or discard. A coding workspace whose publication is allowed is integrated by the child itself (a parent-side integrate returns CHILD_OWNS_INTEGRATION); a released workspace needs no further action.`
     : "";
   return {
     content: [{ type: "text", text: `Started ${handle.agent}: ${handle.title} (${handle.runId}).${modelSelectionWarningText(selection)} ${ASYNC_SPAWN_GUIDANCE}${workspaceNotice}` }],
@@ -1366,7 +1369,9 @@ async function executeGeneric(pi, toolCallId, input, ctx, rpc, createId, titleRe
   }
   titleRegistry.remember(binding.runId, title);
   const workspaceNotice = workspace
-    ? ` Workspace ${workspace.workspaceId} allocated (state: ${workspace.state}). After the run completes: subagent_worktree({action:"status",workspace_id:"${workspace.workspaceId}"}) to check dispositions; then integrate or discard to finish, or preserve temporarily and later release.`
+    // S5 引导迁移：同 coding 分支，generic 工作区也只做「查状态、按实时允许动作处置」，
+    // 不无条件建议 integrate/discard；details 字段与发送/去重逻辑不变。
+    ? ` Workspace ${workspace.workspaceId} allocated (state: ${workspace.state}). After the run completes, call managed_workspace_status({workspace_id:"${workspace.workspaceId}"}) and act only on the allowed_dispositions and one-time token that call returns for the current state; do not assume integrate or discard. A coding workspace whose publication is allowed is integrated by the child itself (a parent-side integrate returns CHILD_OWNS_INTEGRATION); a released workspace needs no further action.`
     : "";
   return {
     content: [{ type: "text", text: `Started ${normalizedInput.agent}: ${title} (${binding.runId}).${modelSelectionWarningText(selection)} ${ASYNC_SPAWN_GUIDANCE}${workspaceNotice}` }],

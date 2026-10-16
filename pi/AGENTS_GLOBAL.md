@@ -47,12 +47,14 @@ DAG 用于描述各子任务之间的依赖关系，当某个子任务的前置�
 
 每次派发到结果处置按固定顺序推进，细节以对应小节为准，不复制工具参数手册：
 
-1. `list` 查看当前可用 agent 与档位；
+1. `subagent_roster` 查看当前可用 agent 与档位；
 2. 角色选择：review 用 `reviewer`，复杂开发用 `delegate`，确定性执行用 `executor`（见「模型分级」）；
-3. 按「派发格式」派发 subagent，任务附完整合同、WritePaths、验收标准与停止条件；
-4. 处理 child 的 reply 与 steer：需要时补充指导或纠偏，不代写 child 结论；
-5. 按任务验收标准核对结果；spawn/completion/status 回执都不等于 terminal proof；
-6. coding 任务按「Workspace 处置」以当次 `status` 返回的 `state` 为权威处置受管 workspace。
+3. 按「派发格式」用 `subagent_start` 派发 subagent，任务附完整合同、WritePaths、验收标准与停止条件；
+4. 处理 child 的 reply 与 steer：需要决策时用 `supervisor_request_pending`/`supervisor_request_reply`，需要纠偏时用 `subagent_run_steer`；只补充指导，不代写 child 结论；
+5. 按任务验收标准核对结果；spawn/completion/status 回执都不等于 terminal proof；run 状态查 `subagent_run_status`；
+6. coding 任务按「Workspace 处置」以当次 `managed_workspace_status` 返回的 `state` 为权威处置受管 workspace。
+
+每个操作的参数与前提以工具自身的 description/schema 为准，本文件不复制参数手册；旧→新工具名映射见「工具名索引」。
 
 角色方法论在各 agent profile 正文，作为 child system 的一部分；单次任务合同通过 dispatch task 进入 child user 输入。主会话治理与组合流程归本文件，共同规范归 `pi/AGENTS_SHARED.md`，SHARED 不收纳多工具流程。首轮计划 reviewer 自动唯一一次、后续每轮用户授权、无固定次数上限，规则见「Reviewer 授权与次数」。
 
@@ -63,10 +65,21 @@ generic（纯文本/调研）：`{agent, task}` 必填，`{title, model}` 可选
 
 ```js
 // coding
-subagent({ agent: "executor", task: "修复登录 bug", writePaths: ["src/auth/**"], acceptance: { criteria: ["测试通过"] }, worktree: true });
+subagent_start({ agent: "executor", task: "修复登录 bug", writePaths: ["src/auth/**"], acceptance: { criteria: ["测试通过"] }, worktree: true });
 // generic
-subagent({ agent: "reviewer", task: "审阅当前 diff 并报告风险" });
+subagent_start({ agent: "reviewer", task: "审阅当前 diff 并报告风险" });
 ```
+
+### 工具名索引
+
+当前模型注册面是「每操作一个工具」，不存在旧的单工具 union 入口：
+
+- 启动与名册：`subagent_roster`、`subagent_start`；
+- run 操作：`subagent_run_status`、`subagent_run_steer`、`subagent_run_interrupt`、`subagent_run_resume`、`subagent_run_stop`；
+- 受管 workspace：`managed_workspace_list`、`managed_workspace_status`、`managed_workspace_dispose`、`managed_workspace_release`；
+- 主管请求：`supervisor_request_pending`、`supervisor_request_status`、`supervisor_request_reply`。
+
+旧名一次性映射（仅供识别历史文本与上游通知里的旧示例）：`subagent` 的 `{action:"list"}`→`subagent_roster`，无 `action` 的派发→`subagent_start`，`{action:"status|steer|interrupt|resume|stop"}`→对应 `subagent_run_*`；`subagent_worktree` 的 `{action:"list|status|dispose|release"}`→对应 `managed_workspace_*`；`subagent_supervisor` 的 `{action:"pending|status|reply"}`→对应 `supervisor_request_*`。上游 completion/决策通知仍可能带旧调用示例：那是历史 raw 文本，不构成新工具的 schema，也不表示旧调用还能执行。本仓自有的 spawn/reminder 回执已改用新工具名。
 
 ### 派发适合性
 
@@ -86,7 +99,9 @@ subagent({ agent: "reviewer", task: "审阅当前 diff 并报告风险" });
 
 ### 派发停止条件（Escalation）
 
-每次派发必须在 task 中包含停止条件：列出发现什么情况时应停下通过 contact_supervisor 询问而不是继续执行。对所有 agent 生效的通用停止条件见 `pi/AGENTS_SHARED.md`；child 上报后由本会话决策或交用户排除。
+每次派发必须在 task 中包含停止条件：列出发现什么情况时应停下报告而不是继续执行。对所有 agent 生效的通用停止条件见 `pi/AGENTS_SHARED.md`；child 上报后由本会话决策或交用户排除。
+
+child 边界文字按保守措辞写入 task：`contact_supervisor` 在该 child 实际可用时，用它上报并等待决定；不可用时不得指示 child 调用不存在的工具，而是要求在输出中列出阻塞事实后结束任务。某 agent 能否调用 `contact_supervisor` 以其 profile 的 `tools` 白名单为事实（例如 `reviewer` 未列入该工具，`executor`/`delegate` 已列入）；不得为绕过这一点给 reviewer 追加工具权限，也不得在派发时假设工具一定可用。runtime 注入的 child 边界块目前仍是无条件的 `contact_supervisor` 指令，与该条件化文字的刻意差异及同步责任归 `src/agents-shared/index.ts` 的 owner，本文件不代替它，也不改 `pi/AGENTS_SHARED.md` 的政策。
 
 ### 模型分级
 
@@ -97,40 +112,40 @@ subagent({ agent: "reviewer", task: "审阅当前 diff 并报告风险" });
 
 ### 模型不可用紧急补救
 
-subagent 模型不可用时，qualified 补救仍先走常规档位候选校验（runtime 先解析 profile 档位候选，再处理显式 model）：经非敏感模型目录或 typed 工具的可用性信息确认后，在本次 dispatch 中显式写明 qualified `provider/model` 字段重新派发。显式 model 不能绕过校验：qualified 必须精确匹配当前可用模型目录并通过 API guard，与档位候选同一门槛；候选全部不可用或候选 API guard 失败时，显式 model 同样不得强行通过，应停止派发并报告。不得直接读取凭据或凭据文件内容，不得把 provider 请求失败当作自动换模的触发条件。
+subagent 模型不可用时，qualified 补救仍先走常规档位候选校验（runtime 先解析 profile 档位候选，再处理显式 model）：经非敏感模型目录或 typed 工具的可用性信息确认后，在本次 `subagent_start` 中显式写明 qualified `provider/model` 字段重新派发。显式 model 不能绕过校验：qualified 必须精确匹配当前可用模型目录并通过 API guard，与档位候选同一门槛；候选全部不可用或候选 API guard 失败时，显式 model 同样不得强行通过，应停止派发并报告。不得直接读取凭据或凭据文件内容，不得把 provider 请求失败当作自动换模的触发条件。
 
 qualified 显式选用与常规选择的区别：常规选择用裸 model-id 交由 runtime 解析档位与候选；紧急补救是候选校验确认后的显式 `provider/model` 指定，仅用于恢复当次派发，不改变模型选择逻辑，也不构成裸名解析失败或 provider 失败时的运行时 fallback——裸名解析失败仍按上条停止派发并报告。
 
 ### Worktree 选择
 
-- 并发写入同一仓库优先 `worktree: true`（隔离基线 + Auto Integration 串行 publish）。
+- 并发写入同一仓库优先 `subagent_start({ worktree: true })`（隔离基线 + Auto Integration 串行 publish）。
 - 只读任务、写路径互不重叠、或单 child 任务不需要 worktree。
 - 用户明确禁止 worktree 时不得使用。
 - `writePaths` 文法：仓库相对 POSIX 路径，精确路径（`src/a.ts`）或末尾 `/**` 的递归目录（`src/**`）；不允许尾随 `/`、glob 通配符、`.`/`..`、绝对路径。
 
 ### Workspace 处置
 
-`worktree: true` 的 dispatch 返回 `workspace_id`。完成后先 `status`，以返回的 `state`、`allowed_dispositions`、`action_token` 和 `integrate_blocked_reasons` 为权威；动作必须按状态处理，不能把 `allowed_dispositions` 当作覆盖所有状态动作的清单：
+`worktree: true` 的 `subagent_start` 返回 `workspace_id`。完成后先 `managed_workspace_status`，以本次返回的 `state`、`allowed_dispositions`、`action_token` 和 `integrate_blocked_reasons` 为权威；不能把 `allowed_dispositions` 当作覆盖所有状态动作的清单，也不因回执旧例无条件选择 integrate 或 discard：
 
 ```js
-const status = subagent_worktree({ action: "status", workspace_id: workspaceId })
+const status = managed_workspace_status({ workspace_id: workspaceId })
 
 // 互斥示例：active 仅在实际允许 preserve 时，使用本次 status 返回的 token：
 if (status.state === "active" && status.allowed_dispositions.includes("preserve")) {
-  subagent_worktree({
-    action: "dispose", workspace_id: workspaceId,
+  managed_workspace_dispose({
+    workspace_id: workspaceId,
     disposition: "preserve", action_token: status.action_token,
   })
 }
 
 // 另一条独立分支：只有 preserved 或 cleanup-debt 才 release；不是先处置再 release：
 if (status.state === "preserved" || status.state === "cleanup-debt") {
-  subagent_worktree({ action: "release", workspace_id: workspaceId })
+  managed_workspace_release({ workspace_id: workspaceId })
 }
 ```
 
 - `released` 是终态，无需任何操作。
-- `active` 需要处置时，只能选择该次 `status` 实际返回的 `allowed_dispositions`，并使用其 `action_token`；不要将 preserve/release 与 discard/integrate 串联。
+- `active` 需要处置时，只能选择该次 `managed_workspace_status` 实际返回的 `allowed_dispositions`，并使用其 `action_token`；不要将 preserve/release 与 discard/integrate 串联。
 - `coding` 的 publication 由 child integration queue 集成，父会话不可直接 `integrate`；若状态或阻塞原因显示 `CHILD_OWNS_INTEGRATION`，不得强行 dispose 或改用 raw git。
 - `reserved` 或 `allocating` 仅等待 runtime，不能强行 dispose；`disposing` 仅在实际允许的 `pendingdispose` 恢复动作下处理。
 - origin dirty 时不得自动 stash/reset/覆盖；向用户报告并等待决定。
@@ -139,19 +154,19 @@ if (status.state === "preserved" || status.state === "cleanup-debt") {
 ### 生命周期
 
 - dispatch 后不 sleep/poll；完成通知自动到达。
-- `status` 仅限用户要求、干预或诊断。
-- `resume` 必须携带非空新 message；暂停/完成/失败均有恢复路径，stopped 不可恢复。resume 不承诺原 live process 无条件续跑。
+- `subagent_run_status` 仅限用户要求、干预或诊断。
+- `subagent_run_resume` 必须携带非空新 message；暂停/完成/失败均有恢复路径，stopped 不可 resume。resume 以新 run 打开旧 child 持久化 session，不承诺原 live process 就地续跑。
 - spawn 回执、completion/status 都不等于 terminal proof。
 
 ### 主管恢复规则（偶发失败优先 resume）
 
 收到 subagent runtime-failed 时，先按错误信息与现场证据判断故障性质，再决定处理方式：
 
-- 判定为上游过载、暂时性流中断等偶发 provider/transport 故障，且原 child 持久化 session、身份与执行合同仍有效时，优先 `resume` 原 run：附非空新指导，继续既有 child 会话历史，不另起 fresh 派发。
+- 判定为上游过载、暂时性流中断等偶发 provider/transport 故障，且原 child 持久化 session、身份与执行合同仍有效时，优先 `subagent_run_resume` 原 run：附非空新指导，继续既有 child 会话历史，不另起 fresh 派发。
 - resume 前核对已完成改动、正在执行的工具或命令与剩余验收，不重放已完成步骤。没有工具副作用是最简单情形；已有合法写入不机械禁止 resume，但必须先核实并在新指导中明确从停点继续。
-- `resume` 以新 run 打开旧 child 持久化 session，不是原 live 进程原地继续，也不恢复父会话全部 history。
+- `subagent_run_resume` 以新 run 打开旧 child 持久化 session，不是原 live 进程原地继续，也不恢复父会话全部 history。
 - 不可恢复/stopped、权限或身份失败、来源不明的失败不属于偶发 provider 故障，不得按本规则 resume。无法证明安全续跑时报告阻塞：不自动 fresh 重派、不更换模型、不无限重试；同一故障的恢复再次失败时重新决策，不建立 daemon 式常驻重试。
-- 本规则只描述主管对既有 `resume` 能力的决策顺序，不授权绕过写路径、用户审批或 API guard。
+- 本规则只描述主管对既有 `subagent_run_resume` 能力的决策顺序，不授权绕过写路径、用户审批或 API guard。
 
 ### Reviewer 授权与次数
 
