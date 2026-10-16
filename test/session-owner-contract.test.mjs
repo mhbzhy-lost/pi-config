@@ -197,3 +197,55 @@ test("reads an existing path header before reserving it and rejects invalid iden
     assert.deepEqual(await api.resolveLaunchTarget({ argv: ["--session", session], cwd, intent: api.classifyPiLaunch(["--session", session]), sessionManager: { async list() { return []; } } }), { kind: "unavailable" });
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+// S1b 的运行期 switch 目标解析复用下面这个公开有界 reader（lifecycle 私有 parser 只消费它的首行），
+// 因此首行预算、LF 截止与不完整首行的语义必须在这里被固定，不能退化成全文件读取。
+test("bounded session header reader stops at the first LF and never reads the body", async () => {
+  const root = await mkdtemp(join(tmpdir(), "session-owner-bounded-header-"));
+  try {
+    assert.equal(api.MAX_SESSION_HEADER_BYTES, 16 * 1024);
+    const cwd = await realpath(root);
+    const bodyMarker = "BODY_MUST_NOT_BE_READ";
+    const session = join(root, "bounded.jsonl");
+    const header = `${JSON.stringify({ type: "session", id: "bounded-id", cwd })}\n`;
+    await writeFile(session, `${header}${bodyMarker.repeat(4000)}\n`);
+    const bytes = api.readSessionHeaderBytes(session);
+    assert.equal(bytes.toString("utf8"), header);
+    assert.equal(bytes.includes(Buffer.from(bodyMarker)), false);
+    assert.ok(bytes.length <= api.MAX_SESSION_HEADER_BYTES);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("bounded session header reader keeps CRLF and short EOF lines but cannot prove an oversize first line", async () => {
+  const root = await mkdtemp(join(tmpdir(), "session-owner-header-shapes-"));
+  try {
+    const cwd = await realpath(root);
+    const headerObject = { type: "session", id: "shape-id", cwd };
+    const crlf = join(root, "crlf.jsonl");
+    await writeFile(crlf, `${JSON.stringify(headerObject)}\r\n${JSON.stringify({ type: "message" })}\n`);
+    const crlfBytes = api.readSessionHeaderBytes(crlf);
+    assert.equal(crlfBytes.toString("utf8"), `${JSON.stringify(headerObject)}\r\n`);
+    assert.equal(JSON.parse(crlfBytes.subarray(0, crlfBytes.indexOf(10)).toString("utf8").replace(/\r$/, "")).id, "shape-id");
+
+    // 有 EOF 无 LF 的完整短首行是可接受的：长度严格小于预算且不含换行。
+    const noLf = join(root, "no-lf.jsonl");
+    await writeFile(noLf, JSON.stringify(headerObject));
+    const noLfBytes = api.readSessionHeaderBytes(noLf);
+    assert.equal(noLfBytes.toString("utf8"), JSON.stringify(headerObject));
+    assert.equal(noLfBytes.indexOf(10), -1);
+    assert.ok(noLfBytes.length < api.MAX_SESSION_HEADER_BYTES);
+
+    // 长度达到上限且无 LF：首行完整性不可证明，消费方必须拒绝而不是回退全文件读取。
+    const oversize = join(root, "oversize.jsonl");
+    await writeFile(oversize, `${"x".repeat(api.MAX_SESSION_HEADER_BYTES)}\n`);
+    const oversizeBytes = api.readSessionHeaderBytes(oversize);
+    assert.equal(oversizeBytes.length, api.MAX_SESSION_HEADER_BYTES);
+    assert.equal(oversizeBytes.indexOf(10), -1);
+
+    const empty = join(root, "empty.jsonl");
+    await writeFile(empty, "");
+    assert.equal(api.readSessionHeaderBytes(empty).length, 0);
+
+    assert.throws(() => api.readSessionHeaderBytes(join(root, "missing.jsonl")), { code: "ENOENT" });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

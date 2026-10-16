@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { format } from "node:util";
 import test from "node:test";
 import { createTestRuntime } from "./helpers/test-runtime.mjs";
+import { startControlledPty } from "./helpers/controlled-pty.mjs";
 
 import { createRegistryStore, listLiveRecords, prepareLaunch } from "../src/session-owner/registry.ts";
 import { installSessionOwnerExtension } from "../src/session-owner/extension.ts";
@@ -60,86 +61,57 @@ async function createRealRuntime(root, ownerId, { failReplacement = false, cance
 const launcher = join(repoRoot, "scripts", "pi-launcher.zsh");
 const provider = join(repoRoot, "test", "fixtures", "deterministic-provider.mjs");
 const repoLocalPi = join(repoRoot, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js");
-const piArgs = ["--offline", "--provider", "fake", "--model", "fake/deterministic", "-e", provider, "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files"];
+const piArgs = ["--offline", "--no-mcp", "--provider", "fake", "--model", "fake/deterministic", "-e", provider, "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files"];
 
 async function ptyFixture(t) {
-  const fixture = await createTestRuntime(t, "session-owner-pty-matrix-");
-  const root = await realpath(fixture.root);
-  const store = createRegistryStore(fixture.registryDir);
-  const cwd = fixture.cwd;
+  // 真实 Host 根不能沿用任何结局都 rm 的通用 fixture。
+  const root = await realpath(await mkdtemp(join(tmpdir(), "session-owner-controlled-")));
+  const fixture = { agentDir: join(root, "agent"), sessionDir: join(root, "sessions"), workspaceDir: join(root, "workspaces"), goalDir: join(root, "goals") };
+  const store = createRegistryStore(join(root, "registry"));
+  const cwd = join(root, "cwd");
   await Promise.all(["home", "agent", "sessions", "tmp", "registry", "cwd"].map((name) => mkdir(join(root, name), { recursive: true, mode: 0o700 })));
   const piBinary = process.env.T8_PI_REAL_BIN ?? repoLocalPi;
   const piVersion = spawnSync(piBinary, ["--version"], {
-    encoding: "utf8", env: { PATH: process.env.PATH ?? "", HOME: "/tmp", TMPDIR: "/tmp" },
+    encoding: "utf8", timeout: 10_000, env: { PATH: process.env.PATH ?? "", HOME: join(root, "home"), TMPDIR: join(root, "tmp") },
   });
   assert.equal(piVersion.status, 0, `PI_REAL_BIN must be executable: ${piBinary}\n${piVersion.stderr}`);
-  return { root, store, cwd, piBinary, piVersion: piVersion.stdout.trim(), env: {
+  const state = { root, store, cwd, piBinary, leases: [], piVersion: piVersion.stdout.trim(), env: {
     PATH: process.env.PATH ?? "", HOME: join(root, "home"), PI_CODING_AGENT_DIR: fixture.agentDir,
     PI_CODING_AGENT_SESSION_DIR: fixture.sessionDir, PI_SESSION_OWNER_REGISTRY: store.root,
     PI_CODING_WORKSPACE_DIR: fixture.workspaceDir, PI_CODING_GOAL_DIR: fixture.goalDir,
-    PI_HOST_NODE: process.execPath, PI_HOST_ROOT: process.env.PI_TEST_CODING_AGENT_ROOT, PI_PACKAGE_DIR: process.env.PI_TEST_CODING_AGENT_ROOT, PI_SKIP_VERSION_CHECK:"1", PI_TELEMETRY:"0", TMPDIR: join(root, "tmp"), PI_REAL_BIN: piBinary, T8_PI_VERSION: piVersion.stdout.trim(), LAUNCHER: launcher,
+    PI_HOST_NODE: process.execPath, PI_HOST_ROOT: dirname(dirname(repoLocalPi)), PI_PACKAGE_DIR: dirname(dirname(repoLocalPi)), PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK:"1", PI_TELEMETRY:"0", TMPDIR: join(root, "tmp"), PI_REAL_BIN: piBinary,
     PROVIDER: provider, TERM: "xterm-256color",
   } };
+  t.after(async () => {
+    for (const lease of state.leases) await stopPty(lease);
+    const ledger = state.leases.map((lease) => lease.snapshot());
+    const clean = ledger.every((entry) => entry.exit?.status >= 0 && entry.driverExited !== null && entry.residualPaths.length === 0);
+    console.log(`[owner-pty-ledger] ${JSON.stringify({ root, clean, leases: ledger.map(({ pid, driverPid, exit, driverExited, residualPaths }) => ({ pid, driverPid, exit, driverExited, residualPaths })) })}`);
+    if (clean) await rm(root, { recursive: true, force: true });
+    else await writeFile(join(root, "retained.json"), JSON.stringify(ledger, null, 2), { mode: 0o600 });
+  });
+  return state;
 }
 
-function startPty(state, args, marker = "PI_OWNER_READY", trace = undefined) {
-  const command = [...piArgs, "--session-dir", join(state.root, "sessions"), ...args].map((value) => JSON.stringify(value)).join(" ");
-  const expect = `set timeout 20
-spawn -noecho $env(LAUNCHER) ${command}
-expect {
-  -re {deterministic} { send_user "${marker}\\n" }
-  eof { exit 1 }
-  timeout { exit 1 }
-}
-expect_user -re {PI_OWNER_QUIT}
-send -- "\\004"
-expect {
-  eof { exit 0 }
-  timeout { exit 1 }
-}
-`;
-  const spawnedAt = Date.now();
-  const child = spawn("/usr/bin/expect", ["-c", expect], { cwd: state.cwd, env: state.env });
-  if (trace) {
-    trace.output = "";
-    child.stdout.on("data", (chunk) => { trace.output += chunk.toString(); });
-    child.stderr.on("data", (chunk) => { trace.output += chunk.toString(); });
-  }
-  trace?.events.push({ at: new Date().toISOString(), elapsedMs: Date.now() - spawnedAt, type: "wrapper-spawn", pid: child.pid });
-  child.once("exit", (code, signal) => trace?.events.push({ at: new Date().toISOString(), elapsedMs: Date.now() - spawnedAt, type: "wrapper-exit", pid: child.pid, code, signal }));
+async function startPty(state, args, _marker = "PI_OWNER_READY", trace = undefined) {
+  const child = await startControlledPty({
+    command: launcher, args: [...piArgs, "--session-dir", join(state.root, "sessions"), ...args],
+    cwd: state.cwd, env: state.env, cols: 100, rows: 30,
+    artifactDir: join(state.root, `pty-${state.leases.length}`), deadlineMs: 20_000,
+  });
+  state.leases.push(child);
+  trace?.events.push({ at: new Date().toISOString(), type: "controlled-child-start", pid: child.pid, driverPid: child.driverPid });
   return child;
 }
 
-function startPicker(state, readyPattern) {
-  const command = [...piArgs, "--session-dir", join(state.root, "sessions"), "-r"].map((value) => JSON.stringify(value)).join(" ");
-  const expect = `set timeout 20
-spawn -noecho $env(LAUNCHER) ${command}
-expect {
-  -re {${readyPattern}} { send_user "PI_PICKER_READY\\n" }
-  eof { exit 1 }
-  timeout { exit 1 }
-}
-expect_user -re {PI_PICKER_CANCEL}
-send -- "\\003"
-expect {
-  eof { exit 0 }
-  timeout { exit 1 }
-}
-`;
-  return spawn("/usr/bin/expect", ["-c", expect], { cwd: state.cwd, env: state.env });
+async function startPicker(state, readyPattern) {
+  const child = await startPty(state, ["-r"]);
+  await child.waitForText(readyPattern, 20_000);
+  return child;
 }
 
-function waitForOutput(child, pattern) {
-  return new Promise((resolveOutput, reject) => {
-    let captured = "";
-    child.stdout.on("data", (chunk) => {
-      captured += chunk;
-      if (pattern.test(captured)) resolveOutput(captured);
-    });
-    child.stderr.on("data", (chunk) => { captured += chunk; });
-    child.once("error", reject);
-    child.once("exit", (code) => reject(new Error(`Pi exited before ${pattern} (${code}): ${captured}`)));
-  });
+async function waitForOutput(child, pattern) {
+  return (await child.waitForText(pattern, 20_000)).output;
 }
 
 test("waitForRecord 在注册 watch 窗口内变 active 且无后续事件时仍返回记录", { timeout: 250 }, async (t) => {
@@ -237,45 +209,37 @@ async function waitForRecord(store, predicate, {
 
 async function readyPty(state, args, { trace = undefined } = {}) {
   const previous = new Set((await listLiveRecords(state.store)).map((record) => record.ownerId));
-  const child = startPty(state, args, "PI_OWNER_READY", trace);
-  await waitForOutput(child, /PI_OWNER_READY/);
+  const child = await startPty(state, args, "PI_OWNER_READY", trace);
+  await waitForOutput(child, /deterministic/i);
   trace?.events.push({ at: new Date().toISOString(), type: "wrapper-ready-marker", pid: child.pid });
   const record = await waitForRecord(state.store, (candidate) => !previous.has(candidate.ownerId) && candidate.state === "active" && candidate.sessionFile !== null, {
     onSample(records) { trace?.recordSamples.push({ at: new Date().toISOString(), records }); },
   });
   assert.ok(record, "ready Pi must commit a registry record");
+  assert.equal(record.pid, child.pid, "registry PID 必须是 driver 的直接 Pi child");
+  await child.sampleIdentity();
   trace?.events.push({ at: new Date().toISOString(), type: "record-ready", ownerId: record.ownerId, pid: record.pid, state: record.state, sessionFile: record.sessionFile });
   return { child, record };
 }
 
 async function quitPty(child) {
-  child.stdin.end("PI_OWNER_QUIT\n");
-  const code = await new Promise((resolveStatus, reject) => {
-    child.once("error", reject);
-    child.once("exit", resolveStatus);
-  });
-  assert.equal(code, 0);
-}
-
-async function killPty(child) {
-  if (!child) return;
-  if (child.exitCode !== null) return;
-  child.kill("SIGKILL");
-  await new Promise((resolveExit) => child.once("exit", resolveExit));
+  if (child.exit === null) await child.write('\x1b\x15');
+  const result = await child.close();
+  assert.equal(result.exited, true, JSON.stringify(result));
+  assert.equal(result.exit.code, 0);
 }
 
 async function stopPty(child) {
-  if (!child || child.exitCode !== null) return;
-  try { await quitPty(child); }
-  catch { await killPty(child); }
+  if (!child) return;
+  if (child.exit === null) await child.write('\x1b\x15').catch(() => {});
+  const result = await child.close();
+  assert.equal(result.exited, true, `保留未退出现场：${JSON.stringify(result)}`);
 }
 
 async function cancelPicker(child) {
-  child.stdin.end("PI_PICKER_CANCEL\n");
-  await new Promise((resolveExit, reject) => {
-    child.once("error", reject);
-    child.once("exit", resolveExit);
-  });
+  await child.write('\x03');
+  await child.waitForExit(20_000);
+  await child.close();
 }
 
 async function freeSession(state, prompt) {
@@ -287,13 +251,11 @@ async function freeSession(state, prompt) {
 }
 
 async function assertBlocked(state, args, records, sessions) {
-  const child = startPty(state, args);
+  const child = await startPty(state, args);
   const output = await waitForOutput(child, /Pi session 已阻断/);
-  const code = await new Promise((resolveStatus, reject) => {
-    child.once("error", reject);
-    child.once("exit", resolveStatus);
-  });
-  assert.equal(code, 1, output);
+  const exit = await child.waitForExit(20_000);
+  await child.close();
+  assert.equal(exit.code, 1, output);
   assert.equal((await listLiveRecords(state.store)).length, records, "blocked wrapper must not create a record");
   assert.deepEqual(await readdir(join(state.root, "sessions")), sessions, "blocked wrapper must not execute real Pi");
 }
@@ -341,8 +303,15 @@ test("real AgentSessionRuntime invokes new, resume, fork, import, reload, and fa
       usage: { input: 0, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 1, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
       stopReason: "stop", timestamp: Date.now(),
     });
+    const cancelBefore = (await listLiveRecords(cancelled.store))[0];
     assert.deepEqual(await cancelled.runtime.switchSession(cancelSource.getSessionFile()), { cancelled: true });
     assert.equal((await listLiveRecords(cancelled.store))[0].state, "active");
+    // 更晚 handler 取消：owner 已 reserve，SDK 无结果 hook → 旧 source 不动，target pending 保守保留。
+    const lateCancel = (await listLiveRecords(cancelled.store))[0];
+    assert.equal(lateCancel.pendingSessionFile, await realpath(cancelSource.getSessionFile()), "晚 cancel 必须保留 pending target");
+    assert.equal(lateCancel.switchReservation?.phase, "reserved", "晚 cancel 不得触发自动 abort");
+    assert.deepEqual([lateCancel.cwd, lateCancel.sessionId, lateCancel.sessionFile], [cancelBefore.cwd, cancelBefore.sessionId, cancelBefore.sessionFile], "cancel 后顶层仍是他自己的 source");
+    assert.deepEqual(lateCancel.switchReservation?.source, { cwd: cancelBefore.cwd, sessionId: cancelBefore.sessionId, sessionFile: cancelBefore.sessionFile }, "reserved receipt 的 source 就是当前顶层身份");
 
     failing = await createRealRuntime(join(root, "failing"), "owner-runtime-failure-012345678", { failReplacement: true });
     await assert.rejects(failing.runtime.newSession(), /replacement factory failed/);
@@ -355,71 +324,107 @@ test("real AgentSessionRuntime invokes new, resume, fork, import, reload, and fa
   }
 });
 
-test("真实 Pi Expect PTY 落盘 assistant 响应并在运行中保持 active owner", { timeout: 30_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "session-owner-pty-"));
-  const store = createRegistryStore(join(root, "registry"));
-  const cwd = join(root, "cwd");
-  let child;
+// ---- S1v：受控运行期事务的真实 SDK 证据（不依赖 PTY/真实用户 Host）----
+// 两个新场景只用公开 runtime API（switchSession/importFromJsonl）+ 自生成的合法 SessionManager 会话文件，
+// sessionDir/registry/agentDir 全部在本用例的临时根下，不读用户配置、不访问模型网络。
+async function onlyRecord(store, ownerId) {
+  const record = (await listLiveRecords(store)).find((candidate) => candidate.ownerId === ownerId);
+  assert.ok(record, `missing record for ${ownerId}`);
+  return record;
+}
+
+function conversationMessage(text) {
+  return {
+    role: "assistant", content: [{ type: "text", text }], api: "faux", provider: "faux", model: "faux",
+    usage: { input: 0, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 1, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: "stop", timestamp: Date.now(),
+  };
+}
+
+test("真实 SDK：外部 import 的 destination 在 before 时尚无 header → blocked-upstream 取消且不复制", async () => {
+  const root = await mkdtemp(join(tmpdir(), "session-owner-import-external-"));
+  const ownerId = "owner-import-external-0123456789";
+  let fixture;
   try {
-    await Promise.all(["home", "agent", "sessions", "tmp", "registry", "cwd"].map((name) => mkdir(join(root, name), { recursive: true, mode: 0o700 })));
-    const expect = `set timeout 20
-spawn -noecho $env(LAUNCHER) --offline --provider fake --model fake/deterministic -e $env(PROVIDER) --no-skills --no-prompt-templates --no-themes --no-context-files -- "real persistent owner"
-expect {
-  -re {real persistent owner} {}
-  eof { exit 1 }
-  timeout { exit 1 }
-}
-expect {
-  -re {deterministic} { send_user "PI_OWNER_READY\\n" }
-  eof { exit 1 }
-  timeout { exit 1 }
-}
-expect_user -re {PI_OWNER_QUIT}
-send -- "\\004"
-expect {
-  eof { exit 0 }
-  timeout { exit 1 }
-}
-`;
-    child = spawn("/usr/bin/expect", ["-c", expect], {
-      cwd,
-      env: {
-        PATH: process.env.PATH ?? "",
-        HOME: join(root, "home"), PI_CODING_AGENT_DIR: join(root, "agent"),
-        PI_CODING_AGENT_SESSION_DIR: join(root, "sessions"), PI_SESSION_OWNER_REGISTRY: store.root,
-        PI_HOST_NODE: process.execPath, PI_HOST_ROOT: process.env.PI_TEST_CODING_AGENT_ROOT, PI_PACKAGE_DIR: process.env.PI_TEST_CODING_AGENT_ROOT, PI_SKIP_VERSION_CHECK:"1", PI_TELEMETRY:"0", TMPDIR: join(root, "tmp"), PI_REAL_BIN: process.env.T8_PI_REAL_BIN ?? repoLocalPi,
-        LAUNCHER: join(repoRoot, "scripts", "pi-launcher.zsh"),
-        PROVIDER: join(repoRoot, "test", "fixtures", "deterministic-provider.mjs"), TERM: "xterm-256color",
-      },
-    });
-    const output = await new Promise((resolveOutput, reject) => {
-      let captured = "";
-      child.stdout.on("data", (chunk) => {
-        captured += chunk;
-        if (captured.includes("PI_OWNER_READY")) resolveOutput(captured);
-      });
-      child.once("error", reject);
-      child.once("exit", (code) => reject(new Error(`Pi exited before ready (${code}): ${captured}`)));
-    });
-    assert.match(output, /PI_OWNER_READY/);
-    const [record] = await listLiveRecords(store);
-    assert.equal(record.state, "active");
-    assert.equal(record.cwd, await realpath(cwd));
-    assert.ok(record.sessionFile?.startsWith(join(root, "sessions")));
-    const files = await readdir(join(root, "sessions"));
-    assert.equal(files.length, 1);
-    assert.match(await readFile(join(root, "sessions", files[0]), "utf8"), /deterministic/);
-    child.stdin.end("PI_OWNER_QUIT\n");
-    const status = await new Promise((resolveStatus, reject) => {
-      child.once("error", reject);
-      child.once("exit", (code) => resolveStatus(code));
-    });
-    assert.equal(status, 0);
-    assert.deepEqual(await listLiveRecords(store), []);
+    fixture = await createRealRuntime(root, ownerId);
+    // 输入在 sessionDir 之外：上游先算出尚未创建的 destination，再把该路径发给 session_before_switch。
+    const externalDir = join(root, "external");
+    await mkdir(externalDir, { recursive: true, mode: 0o700 });
+    const external = host.SessionManager.create(repoRoot, externalDir);
+    external.appendMessage(conversationMessage("external import input"));
+    const inputPath = external.getSessionFile();
+    assert.ok(inputPath, "真实 SessionManager 必须落盘导入源");
+
+    const before = await onlyRecord(fixture.store, ownerId);
+    const beforeFiles = await readdir(fixture.sessionDir);
+
+    assert.deepEqual(await fixture.runtime.importFromJsonl(inputPath), { cancelled: true });
+
+    const after = await onlyRecord(fixture.store, ownerId);
+    assert.equal(after.state, "active", "取消不得把旧 source 变成 transitioning");
+    assert.deepEqual([after.cwd, after.sessionId, after.sessionFile], [before.cwd, before.sessionId, before.sessionFile], "旧 source 身份不得被释放或改写");
+    assert.equal(after.pendingSessionFile, null, "身份不可验证的目标不得留下 pending claim");
+    assert.equal(after.switchReservation ?? null, null, "身份不可验证的目标不得新增 reservation");
+    assert.deepEqual(await readdir(fixture.sessionDir), beforeFiles, "取消后 sessionDir 不得出现被复制的 destination");
   } finally {
-    if (child && child.exitCode === null) child.kill("SIGKILL");
+    await fixture?.runtime.dispose();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("真实 SDK：两个 owner 竞争同一 resume 目标 → 胜者原子提交，败者取消且不动自己记录", async () => {
+  const root = await mkdtemp(join(tmpdir(), "session-owner-dual-resume-"));
+  const winnerId = "owner-dual-winner-0123456789";
+  const loserId = "owner-dual-loser-0123456789abc";
+  let winner;
+  let loser;
+  try {
+    // 同一 registry 根、同一 PID（同进程），只有 ownerId 不同：正是「同 PID 另一 owner 仍冲突」形状。
+    winner = await createRealRuntime(root, winnerId);
+    loser = await createRealRuntime(root, loserId);
+    const shared = host.SessionManager.create(repoRoot, winner.sessionDir);
+    shared.appendMessage(conversationMessage("contested target"));
+    // macOS 下 mkdtemp 根可能处于符号链（/var -> /private/var）之下：事务记录统一取 canonical 形式。
+    const targetFile = await realpath(shared.getSessionFile());
+    assert.ok(targetFile, "真实 SessionManager 必须落盘竞争目标");
+    const loserBefore = await onlyRecord(loser.store, loserId);
+
+    const winning = winner.runtime.switchSession(targetFile);
+    assert.deepEqual(await winning, { cancelled: false }, "先提交者必须完成受控事务");
+    const winnerRecord = await onlyRecord(winner.store, winnerId);
+    assert.equal(winnerRecord.state, "active");
+    assert.equal(winnerRecord.sessionFile, targetFile, "旧 source 释放与目标生效只在那一次原子 publish 同时发生");
+    assert.equal(winnerRecord.pendingSessionFile, null, "commit 后 pending 必须清除");
+    assert.equal(winnerRecord.switchReservation?.phase, "committed", "commit 后只留幂等 receipt");
+
+    assert.deepEqual(await loser.runtime.switchSession(targetFile), { cancelled: true }, "同目标竞争败者必须被取消");
+    assert.deepEqual(await onlyRecord(loser.store, loserId), loserBefore, "败者取消不得改动自己的记录");
+
+    // quit 只释放自身：同一个真实 SDK 进程里另一个仍存活的 owner 记录不得被动。
+    await loser.runtime.dispose();
+    const survivors = await listLiveRecords(loser.store);
+    assert.deepEqual(survivors.map((record) => record.ownerId), [winnerId], "quit 只释放自己，即使 PID 完全相同");
+  } finally {
+    // 上面已验证过 quit 只自身；重复 dispose 不得把已释放记录当失败。
+    await loser?.runtime.dispose().catch(() => {});
+    await winner?.runtime.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("真实 Pi Expect PTY 落盘 assistant 响应并在运行中保持 active owner", { timeout: 90_000 }, async (t) => {
+  const state = await ptyFixture(t);
+  const { child, record } = await readyPty(state, ["--", "real persistent owner"]);
+  await child.waitForText("deterministic", 20_000);
+  assert.equal(record.state, "active");
+  assert.equal(record.cwd, await realpath(state.cwd));
+  assert.ok(record.sessionFile?.startsWith(join(state.root, "sessions")));
+  const files = await readdir(join(state.root, "sessions"));
+  assert.equal(files.length, 1);
+  // 仅读取本用例自造的会话文件。
+  assert.match(await readFile(join(state.root, "sessions", files[0]), "utf8"), /deterministic/);
+  await quitPty(child);
+  assert.deepEqual(await listLiveRecords(state.store), []);
 });
 
 test("真实 Pi PTY: active recent blocks a second -c before real Pi exec", { timeout: 120_000 }, async (t) => {
@@ -432,7 +437,6 @@ test("真实 Pi PTY: active recent blocks a second -c before real Pi exec", { ti
     await assertBlocked(state, ["-c", "--", "blocked continuation"], 1, sessions);
   } finally {
     await stopPty(first?.child);
-    await rm(state.root, { recursive: true, force: true });
   }
 });
 
@@ -456,7 +460,6 @@ test("真实 Pi PTY: -c pins the exact free recent session while another old ses
   } finally {
     await stopPty(continued?.child);
     await stopPty(owner?.child);
-    await rm(state.root, { recursive: true, force: true });
   }
 });
 
@@ -471,7 +474,6 @@ test("真实 Pi PTY: --no-extensions cannot bypass an active owner", { timeout: 
     await assertBlocked(state, ["-c", "--", "no extension bypass blocked"], 1, sessions);
   } finally {
     await stopPty(first?.child);
-    await rm(state.root, { recursive: true, force: true });
   }
 });
 
@@ -480,8 +482,7 @@ test("真实 Pi PTY: selecting picker blocks -c and --session reuse before eithe
   let picker;
   try {
     const session = await freeSession(state, "picker free fixture");
-    picker = startPicker(state, "picker free fixture");
-    await waitForOutput(picker, /PI_PICKER_READY/);
+    picker = await startPicker(state, "picker free fixture");
     const selecting = await waitForRecord(state.store, (record) => record.state === "selecting");
     assert.equal(selecting.state, "selecting");
     const sessions = await readdir(join(state.root, "sessions"));
@@ -490,25 +491,29 @@ test("真实 Pi PTY: selecting picker blocks -c and --session reuse before eithe
     await cancelPicker(picker);
     picker = undefined;
   } finally {
-    await killPty(picker);
-    await rm(state.root, { recursive: true, force: true });
+    if (picker) await cancelPicker(picker);
   }
 });
 
 test("真实 Pi PTY: SIGKILL owner is cleaned by ESRCH before the next wrapper starts", { timeout: 120_000 }, async (t) => {
+  if (process.env.PI_TEST_OWNER_SIGKILL !== "1") { t.skip("fixture-sigkill 尚未授权"); return; }
   const state = await ptyFixture(t);
   const trace = { startedAt: new Date().toISOString(), piBinary: state.piBinary, piVersion: state.piVersion, events: [], recordSamples: [] };
   let first;
   let second;
   try {
     first = await readyPty(state, ["--", "killable owner"], { trace });
-    assert.notEqual(first.record.pid, first.child.pid, "registry PID must be the real spawned Pi process");
+    assert.equal(first.record.pid, first.child.pid, "registry PID 必须等于受控直接 Pi child");
     const killedPid = first.record.pid;
     const killAt = new Date().toISOString();
-    process.kill(killedPid, "SIGKILL");
+    const recheck = await first.child.sampleIdentity();
+    assert.equal(recheck.matches, true);
+    const killed = await first.child.signalFixtureKill({ explicitOneTimePermission: true, leaseId: first.child.leaseId, pid: killedPid });
+    assert.equal(killed.delivered, true);
     trace.events.push({ at: killAt, type: "owner-sigkill", pid: killedPid });
-    await new Promise((resolveExit) => first.child.once("exit", resolveExit));
-    trace.events.push({ at: new Date().toISOString(), type: "first-wrapper-exit-observed", pid: first.child.pid, code: first.child.exitCode, signal: first.child.signalCode });
+    await first.child.waitForExit(20_000);
+    await first.child.close();
+    trace.events.push({ at: new Date().toISOString(), type: "first-wrapper-exit-observed", pid: first.child.pid, code: first.child.exit.code, signal: first.child.exit.signal });
     // ESRCH 探针必须在 wrapper 退出之后：被 SIGKILL 的 pi 是 expect wrapper 的子进程，
     // wrapper 未退出前它是 zombie，而 kill(pid, 0) 对 zombie 会成功（PID 仍存在），
     // 因此在 wrapper 存活期间探针永远拿不到 ESRCH。生产语义也是「下一个 wrapper
@@ -535,8 +540,7 @@ test("真实 Pi PTY: SIGKILL owner is cleaned by ESRCH before the next wrapper s
     const traceFile = process.env.T8_TRACE_FILE;
     if (traceFile) await writeFile(traceFile, `${JSON.stringify(trace, null, 2)}\n`);
     await stopPty(second?.child);
-    await killPty(first?.child);
-    await rm(state.root, { recursive: true, force: true });
+    await stopPty(first?.child);
   }
 });
 
