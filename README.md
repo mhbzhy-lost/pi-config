@@ -95,6 +95,10 @@ Child browser 使用 focused overlay。`Ctrl+Shift+F` 保持官方语义，只�
 
 PowerShell 当前不启用，属于非目标；未来启用前必须覆盖 Security Gates 与 Goal mutation gate。
 
+## Subagent 独立操作工具
+
+fresh Host 的 main 模型工具按操作拆分为 `subagent_start`、`subagent_roster`、`subagent_run_status/steer/interrupt/resume/stop`、`managed_workspace_list/status/dispose/release` 与 `supervisor_request_pending/status/reply`。旧 union 工具名只保留历史记录显示，不在fresh Host注册；操作工具继续复用既有dispatcher、workspace service、supervisor adapter和权限/receipt门禁。clear/inspect分支因上游absence不可证保持blocked。详见 `docs/architecture/subagent-operation-tools.md`。
+
 ## 统一后台活动区（TUI footer）
 
 左下角是「一切后台活动任务」展示区，同时呈现 subagent（`●`）、bash_async（`⌘`）与 scheduler（`⏱`）三个 source：统一行结构、统一只读详情、图标只表类型而状态另列文字。架构与事实边界见 `docs/architecture/background-activity-display.md`。

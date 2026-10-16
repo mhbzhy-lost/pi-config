@@ -18,6 +18,10 @@
 
 外部消费者只使用 bare specifier `pi-subagents-enhanced/tui/background-activity`（解析到 `src/tui/index.ts`），不深引 `src/tui/*.ts`。`pi.extensions` 仍只声明 `extensions/subagent-runtime.ts` 与 `extensions/custom-footer.ts` 两项 Host 入口。Git mutation、owner token 与 durable ledger 的实现均只归 `src/workspace/` 所有。
 
+## Subagent 独立操作工具
+
+fresh Host 的模型工具按对象与操作拆分：`subagent_start`/`subagent_roster`/`subagent_run_*`、`managed_workspace_*` 与 `supervisor_request_*`。旧union名称只用于历史记录显示，不在fresh Host注册；所有新工具仍复用原typed dispatcher、workspace service、supervisor adapter、owner/CAS与terminal proof。workspace处置以实时status/action_token为权威，coding child-owned integration不会因工具拆分改变。
+
 ## Standalone subagent workspace management
 
 运行时公开的 `subagent_worktree` 只管理当前 root session 创建、owner 为 `standalone-subagent` 的 workspace；它不会列出或处置 Goal、validation、foreign-session 或 legacy workspace。subagent 完成时，原始主-agent上下文会收到 `subagent-workspace-reminder`；TUI 只渲染其摘要，不能改写该提醒或把 completion 文案当作 terminal proof。

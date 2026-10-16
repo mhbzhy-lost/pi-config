@@ -89,8 +89,10 @@ for (const kind of ['steer', 'reply']) for (const failure of ['isError', 'throw'
   let fails = true; const native = Object.freeze({ isError: true, content: Object.freeze([{ type: 'text', text: 'fixture rejected' }]), details: Object.freeze({ code: 'FIXTURE_REJECTED' }) });
   const run = async () => { if (fails) { if (failure === 'throw') throw new Error('fixture failure'); return native; } return { text: 'ok', content: [{ type: 'text', text: 'ok' }] }; };
   const h = harness(run, run); if (kind === 'reply') await ask(h.plane, 0);
-  const tool = h.tools.find(tool => tool.name === (kind === 'reply' ? 'subagent_supervisor' : 'subagent'));
-  const args = kind === 'reply' ? { action: 'reply', replyTo: 'ask-0', message: 'approved' } : { action: 'steer', runId: 'run', index: 0, message: 'continue' };
+  // S4后旧union不再注册；测试必须走当前公开独立操作入口，而非恢复旧alias。
+  const tool = h.tools.find(tool => tool.name === (kind === 'reply' ? 'supervisor_request_reply' : 'subagent_run_steer'));
+  assert.ok(tool, '当前独立工具必须已注册');
+  const args = kind === 'reply' ? { replyTo: 'ask-0', message: 'approved' } : { runId: 'run', index: 0, message: 'continue' };
   if (failure === 'throw' && kind === 'reply') await assert.rejects(tool.execute('first', args, undefined, undefined, h.ctx), /fixture failure/);
   else {
     // 原typed subagent工具将异常投影为失败结果；supervisor adapter则保留原异常。

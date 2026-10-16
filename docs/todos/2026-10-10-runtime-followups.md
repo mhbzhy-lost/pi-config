@@ -84,5 +84,6 @@
 - idle/resume(model)/triggerTurn继续原暂缓决定；每操作独立工具、MD/tool guidance迁移只有调研，尚未实施；不能当作本次closeout完成。
 - supervisor child级gate/inspect-clear仍是新计划，尚未实施，不把D3诊断当gate修复；部署必须fresh Host，不能热改当前控制状态。
 - 已完成代码正逐项commit，未push；不再沿用“HEAD a9875d6/dirty72/主代码未commit”的旧快照。
-- N1安装链失败已解决：根与enhanced安装根override官方pi-codemode1.0.4，官方online/offline各8/8、verify0；无上游patch、无真实node_modules改动。外部consumer需其Host安装根消费约束，当前物理Host未重装。closeout当前仅L3观感待用户，其他新gate/工具拆分不计入本批已完成。
+- N1安装链失败已解决：根与enhanced安装根override官方pi-codemode1.0.4，官方online/offline各8/8、verify0；无上游patch、无真实node_modules改动。外部consumer需其Host安装根消费约束，当前物理Host未重装。closeout已按用户裁决关闭，TUI后验问题另报新bug。
+- 独立操作工具计划：S1/S2/S3、G1/G2、S4、S5与S6已完成并提交；fresh Host工具面为14个独立model-only工具，clear C1/C2/C3仍blocked-upstream；未跑真实provider/CLI兼容，旧integration fixtures的旧工具名引用另列后续。
 - 最新总账：`docs/plans/records/2026-10-15-runtime-closeout/acceptance.md`。
