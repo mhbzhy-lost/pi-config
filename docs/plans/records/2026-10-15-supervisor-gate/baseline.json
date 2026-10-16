@@ -1,0 +1,194 @@
+{
+  "schemaVersion": "supervisor-gate-baseline.v1",
+  "task": "B",
+  "taskTitle": "保护基线（supervisor-gate-recovery）",
+  "plan": "docs/plans/2026-10-15-supervisor-gate-recovery.md",
+  "contract": {
+    "taskId": "dispatch-a00ef74f",
+    "sha256": "a00ef74f78697d1efcc394a34f23526c70ee309038ac788296bc3704ae58d9a7",
+    "agent": "executor"
+  },
+  "createdAtUtc": "2026-10-16T08:40:00Z",
+  "git": {
+    "head": "e0afc9da9020537887a2275474dac9267ce0ddae",
+    "headCommittedAt": "2026-10-16T16:30:10+08:00",
+    "headSubject": "docs(session): 记录受控SIGKILL验收通过",
+    "branch": "main",
+    "index": {
+      "stagedCount": 0,
+      "stagedPaths": [],
+      "command": "git diff --cached --name-only",
+      "note": "git diff --cached --name-only 输出为空；本任务未执行任何 stage/commit/push，父统一索引"
+    },
+    "dirty": {
+      "totalCount": 4,
+      "collectionCommand": "git status --porcelain=v1",
+      "note": "仅记录文件名与状态码，未读取任何 dirty 文件正文；外部备份仅列文件名不读/不删/stage。任务开始观测为 3 条，baseline 写入后复测新增 1 条父会话计划文档（parent-in-flight 证据），此处按写入时刻实际观测记录",
+      "protected": [
+        {
+          "code": "M",
+          "state": "existing-modified",
+          "path": "packages/pi-subagents-enhanced/src/subagent-dispatch/process-birth-identity.ts",
+          "diffstat": "1 file changed, 3 insertions(+), 3 deletions(-)",
+          "owner": "父会话类型尾项（dispatch 声明），本任务只读元数据不触碰",
+          "category": "package-production"
+        },
+        {
+          "code": "??",
+          "state": "untracked",
+          "path": "docs/plans/2026-10-16-subagent-operation-tools-guidance.md",
+          "owner": "父会话在写；任务开始观测时不存在，写入后复测新出现（parent-in-flight 证据）",
+          "category": "docs"
+        },
+        {
+          "code": "??",
+          "state": "untracked",
+          "path": "docs/plans/records/2026-10-15-runtime-closeout/heartbeat-types.md",
+          "owner": "父会话 closeout 文档收尾",
+          "category": "docs"
+        },
+        {
+          "code": "??",
+          "state": "untracked",
+          "path": "pi/models.json.bak-qoder-thinking-20261016161901",
+          "owner": "外部本机备份（models.json 已整体 gitignore，见根 AGENTS）",
+          "category": "pi-config-backup",
+          "policy": "只列文件名；不读取正文、不删除、不 stage"
+        }
+      ]
+    },
+    "dirtyPolicy": "以上 dirty 为受保护现场：不 stash/reset/clean、不覆盖、不代父提交；本任务只新增 baseline.json 本身"
+  },
+  "committedBaseline": {
+    "d0ToD3Commit": {
+      "sha": "af9713e6856efc55d67b7d5184dd4a9131040e5d",
+      "subject": "feat(supervisor): 增强RPC与消费诊断",
+      "committedAt": "2026-10-16T12:04:40+08:00",
+      "isAncestorOfHead": true,
+      "verification": "git merge-base --is-ancestor af9713e HEAD 退出码 0",
+      "note": "runtime-closeout D0–D3 已随本提交进入 HEAD；后续 G2/C2/C3 可依赖这些已提交 API，不再视其为 dirty"
+    },
+    "dApis": {
+      "D0": {
+        "file": "packages/pi-subagents-enhanced/src/subagent-dispatch/diagnostics.ts",
+        "exportsObserved": [
+          "projectRpcNegotiation(value, monotonic?) -> RpcNegotiationDiagnosticV1",
+          "projectSupervisorTrace(entry, monotonicMs) -> SafeSupervisorTraceV1 | undefined",
+          "projectSupervisorReceipt(receipt) -> SupervisorReceiptDiagnosticV1 | undefined",
+          "types: RpcNegotiationDispatchPath/Projection, SupervisorTracePhase, SupervisorReceiptStatus(queued|delivered|failed), SafeSupervisorTraceV1, SupervisorReceiptDiagnosticV1"
+        ]
+      },
+      "D1": {
+        "files": [
+          "packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts",
+          "scripts/probes/subagent-dispatch-startup.ts"
+        ],
+        "note": "RPC 准入失败安全回执与 trace 接线；记录文档 docs/plans/records/2026-10-15-runtime-closeout/rpc-diagnostics.md"
+      },
+      "D2": {
+        "file": "packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-control-plane.ts",
+        "observedSignature": "readDiagnostics(rootSessionId: string, filter?: { requestId?: string }): Promise<SupervisorDiagnosticsV1>（白名单投影行，绝不含 correlation/requestDigest 正文；统一 fail closed，无宽容分支）",
+        "note": "记录文档 docs/plans/records/2026-10-15-runtime-closeout/supervisor-diagnostics.md"
+      },
+      "D3": {
+        "file": "packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts",
+        "observedWiring": [
+          "extension.ts:206 固定 schemaVersion 与 unavailable code；safeSupervisorDiagnostics 对 readDiagnostics 输出再次白名单重建后才进工具 details（extension.ts:272/1521-1533）",
+          "supervisor-consumption.ts 存在于 HEAD（captureSupervisorCorrelation、reconcileSupervisorConsumption），af9713e 未改该文件，与本计划 C2 依赖声明一致"
+        ]
+      }
+    }
+  },
+  "currentToolsEntries": {
+    "note": "本计划开工前的当前 tools/source 入口事实（现场 grep 核对，均为已提交状态）",
+    "registered": [
+      {
+        "tool": "subagent",
+        "entry": "packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts:1861/1952-1953",
+        "controlActions": ["status", "steer", "interrupt", "resume", "stop", "list"],
+        "steerParams": "含 index: integer minimum 0（现仅用于 child 选择，gate 尚无 childIndex 过滤，见下 knownDefect）"
+      },
+      {
+        "tool": "subagent_supervisor",
+        "entry": "packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-adapter.ts:1-43（createSupervisorTool 默认 name=subagent_supervisor）；extension.ts:1944-1948 经 createControlledSupervisorAdapter 注册",
+        "nativeActions": ["reply", "pending", "status"],
+        "bind": "createSupervisorAdapter().bind(execute)，未绑定执行时 SUPERVISOR_TARGET_UNAVAILABLE，重复绑定 SUPERVISOR_TARGET_ALREADY_BOUND"
+      }
+    ],
+    "controlPlane": {
+      "file": "packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-control-plane.ts",
+      "publicApiObserved": [
+        "supervisorCanonicalDigest(value)",
+        "parseSupervisorRequestV1 / parseSupervisorControlIntentV1（严格字段校验，未知即 throw）",
+        "createSupervisorControlPlane(options): commitDelivery / markDeliveryConsumed / observeReplyConsumption / readDiagnostics / closeRootRequests / expireTerminalRequests / ready / findRequestAsync / identityForRun 等，均走同 root 事务队列"
+      ],
+      "requestSchema": "supervisor-request.v1，correlation 可选且含 childIndex（v1 已存在，G1 迁移依据）",
+      "knownDefectRef": "现 gate 查询 runId/rootSessionId/ownerGeneration 下任一 pending、缺 childIndex 过滤——见 docs/research/2026-10-15-supervisor-steer-block-diagnosis.md 与本计划 §1/§2.1"
+    },
+    "consumer": {
+      "file": "packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-consumption.ts",
+      "exports": ["captureSupervisorCorrelation(broker, native)", "reconcileSupervisorConsumption({broker, plane, runId, rootSessionId, diagnosticSink?})"]
+    },
+    "hostEntry": "packages/pi-subagents-enhanced/extensions/subagent-runtime.ts（主 Host 入口，注入 observer/root authority 的改动点在计划 §3，当前未改）",
+    "upstreamObserverTarget": {
+      "path": "packages/pi-subagents-enhanced/node_modules/pi-subagents/src/intercom/native-supervisor-channel.js",
+      "facts": [
+        "action enum 含 pending（行28）",
+        "refreshPendingRequests(pending, state, onLifecycle, runState) 存在（行411），生命周期非 pending 时 pending.delete（行417）——即计划所述上游既有清理副作用的真实所在",
+        "clearForegroundSupervisorAttention 存在（行349）",
+        "只作路径/符号存在性核对，未运行、未改 upstream；upstream 版本 pi-subagents 0.75.0，深层 import 唯一 owner 为 src/compat/pi-subagents-0.75.ts（package AGENTS 约束）"
+      ]
+    }
+  },
+  "schemaAndDeployment": {
+    "versionsInCode": ["supervisor-state.v1", "supervisor-request.v1", "supervisor-control-intent.v1", "supervisor-diagnostics.v1"],
+    "v2Status": "supervisor-state.v2 与 request v2（child identity、administrativeResolution、clearChallenges、clearAudits）仅是本计划 §2.4 的设计事实；代码中不存在 v2 parser，磁盘上也不存在 v2 数据",
+    "notLiveDataStatement": "计划授权不等于当前线上数据事实：当前 Host 仍运行 v1 语义，v2 尚未部署；本 baseline 未读取任何真实 state/authority/session 文件，不能也不需要断言任何具体历史 pending 内容",
+    "freshHostBoundary": [
+      "首次需要持久化 challenge/clear 的 inspect 才触发 v1→v2 迁移写盘；readDiagnostics 不自动迁移",
+      "未修改的旧 v1 Host 读取 v2 会按其原 parser 返回 CORRUPT（fail closed，不承诺版本不兼容码）；新 Host 对自身未知版本输出版本不兼容分类",
+      "同 root 禁止旧/新 Host 混用；执行 V/Z 需 fresh Host，当前回话不得在热 patch 中让 clear 直接改自己的控制状态",
+      "不实现降级回写；恢复路径是升级 fresh Host，不手工删文件"
+    ],
+    "hostPermissionNote": "计划文本授权是静态设计边界；当前真实 Host 是否已具备 fresh 重启/部署许可由父与用户另行确认，本 baseline 视其为未 clear"
+  },
+  "scopeNotStarted": {
+    "planCreateTargetsAbsent": [
+      "packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-gate-policy.ts",
+      "packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-upstream-observer.ts",
+      "packages/pi-subagents-enhanced/src/subagent-dispatch/supervisor-recovery-tools.ts",
+      "docs/bugs/2026-10-15-supervisor-gate-overconvergence.md",
+      "docs/plans/records/2026-10-15-supervisor-gate/contract.md"
+    ],
+    "verification": "ls 现场核对以上路径均不存在（G0 及之后未开始，符合本任务只写 baseline 的合同）",
+    "recordsDir": "docs/plans/records/2026-10-15-supervisor-gate/ 本次由任务 B 首次创建"
+  },
+  "g0InterfacesProvided": {
+    "note": "后续 G0（接口冻结）可直接消费的本 baseline 证据",
+    "gateTarget": "subagent 工具 index 参数已存在（extension.ts schema）；identityForRun/child correlation.childIndex 为 control-plane 已提交公开入口",
+    "absenceObserver": "原生通道符号位于 upstream native-supervisor-channel.js（action 'pending' 行28、refreshPendingRequests 行411-417、clearForegroundSupervisorAttention 行349）；G0 需现场核定 adapter.execute(...,{action:'pending'}) 的 bind/root 校验、刷新完整性与异常传播，不得由本仓直接读其私有文件",
+    "constraints": "G0 只读源码/公开 RPC 与 public 入口，不运行真实 adapter、不取用户 state 样本（计划 §5-B/§5-G0）"
+  },
+  "operations": {
+    "testsRun": false,
+    "tscRun": false,
+    "npmRun": false,
+    "nodeRun": false,
+    "hostStarted": false,
+    "networkUsed": false,
+    "processKill": false,
+    "stageCommitPush": false,
+    "stashResetClean": false,
+    "sensitiveReads": "未读取 settings/models/auth/credential/完整session/authority/state；未读取外部备份正文；未读取 dirty 文件正文（仅 git 元数据/diffstat）",
+    "resources": {
+      "used": ["static-evidence"],
+      "notClaimed": ["unit-runner", "npm-cache"],
+      "note": "unit/npm-cache 由 N1 占用，本任务未抢跑"
+    }
+  },
+  "verification": {
+    "jsonParse": { "result": "pass", "exitCode": 0, "method": "python3 -m json.tool 本文件解析通过；未启动 node/npm" },
+    "gitDiffCheck": { "result": "pass", "exitCode": 0, "command": "git diff --check", "note": "通过；未跟踪新文件不在其覆盖范围，JSON 有效性由上项独立验证" },
+    "indexAfterWrite": { "result": "pass", "command": "git diff --cached --name-only", "stagedCount": 0, "note": "写入后索引仍为空，本任务未 stage/commit/push" }
+  }
+}
