@@ -87,7 +87,7 @@ async function ptyFixture(t) {
     const ledger = state.leases.map((lease) => lease.snapshot());
     const clean = ledger.every((entry) => entry.exit?.status >= 0 && entry.driverExited !== null && entry.residualPaths.length === 0);
     console.log(`[owner-pty-ledger] ${JSON.stringify({ root, clean, leases: ledger.map(({ pid, driverPid, exit, driverExited, residualPaths }) => ({ pid, driverPid, exit, driverExited, residualPaths })) })}`);
-    if (clean) await rm(root, { recursive: true, force: true });
+    if (clean && t.passed) await rm(root, { recursive: true, force: true });
     else await writeFile(join(root, "retained.json"), JSON.stringify(ledger, null, 2), { mode: 0o600 });
   });
   return state;
@@ -218,6 +218,25 @@ async function readyPty(state, args, { trace = undefined } = {}) {
   assert.ok(record, "ready Pi must commit a registry record");
   assert.equal(record.pid, child.pid, "registry PID 必须是 driver 的直接 Pi child");
   await child.sampleIdentity();
+  // 页脚模型名在响应完成之前就可见；使用本用例合法落盘的 assistant entry 作完成屏障，
+  // 避免随后 utimes 与尚未完成的首轮 _persist 竞争，把 old session 意外变成最新。
+  if (args.includes('--')) {
+    await new Promise((resolveReady, reject) => {
+      let settled = false;
+      const finish = (error) => { if (settled) return; settled = true; clearTimeout(timer); watcher.close(); error ? reject(error) : resolveReady(); };
+      const check = async () => {
+        try {
+          const entries = (await readFile(record.sessionFile, 'utf8')).trim().split('\n').map(JSON.parse);
+          const prompt = args.slice(args.indexOf('--') + 1).join(' ');
+          const userIndex = entries.findLastIndex((entry) => entry.type === 'message' && entry.message?.role === 'user' && (typeof entry.message.content === 'string' ? entry.message.content : entry.message.content?.filter((block) => block.type === 'text').map((block) => block.text).join('\n')) === prompt);
+          if (userIndex >= 0 && entries.slice(userIndex + 1).some((entry) => entry.type === 'message' && entry.message?.role === 'assistant' && entry.message?.content?.some((block) => block.type === 'text' && block.text === 'deterministic'))) finish();
+        } catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) finish(error); }
+      };
+      const watcher = watch(dirname(record.sessionFile), () => { void check(); });
+      const timer = setTimeout(() => finish(new Error('fixture assistant 尚未真实落盘')), 20_000);
+      void check();
+    });
+  }
   trace?.events.push({ at: new Date().toISOString(), type: "record-ready", ownerId: record.ownerId, pid: record.pid, state: record.state, sessionFile: record.sessionFile });
   return { child, record };
 }
