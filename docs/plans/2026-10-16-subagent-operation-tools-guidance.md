@@ -34,7 +34,7 @@
 | subagent_run_status | 保留该操作当前支持的定位/输出字段 | 既有executeControl固定action=status |
 | subagent_run_steer | 目标定位、非空message、可选index | 既有executeControl固定action=steer，消费gate新合同 |
 | subagent_run_interrupt | 当前允许的目标定位、index | 同上interrupt |
-| subagent_run_resume | 当前允许的目标定位、index、非空message；model原行为不扩展 | 同上resume |
+| subagent_run_resume | 当前允许的目标定位、index、非空message、output（string或false）、outputMode（仅file-only）；不暴露model换模 | 同上resume |
 | subagent_run_stop | 当前允许的目标定位、index | 同上stop |
 | managed_workspace_list | {} | createSubagentWorkspaceTool唯一execute固定list |
 | managed_workspace_status | workspace_id | 同上status，保留实时token/allowed事实 |
@@ -104,7 +104,7 @@ Supervisor G2/C3发布前置条件 ────┘（目前未实现；发布后
 
 ### S1：start/roster/run七工具factory
 
-**Deps：** S0。**WritePaths：** `packages/pi-subagents-enhanced/src/subagent-dispatch/operation-tools.ts`、`test/subagent-operation-tools.test.mjs`。**Resources：** unit-runner仅验收。
+**Deps：** S0（已44806d1提交：start不暴露context，resume保留既有output/outputMode）。**WritePaths：** `packages/pi-subagents-enhanced/src/subagent-dispatch/operation-tools.ts`、`test/subagent-operation-tools.test.mjs`。**Resources：** unit-runner仅验收。
 **接口：** `createSubagentOperationTools({executeStart,executeControl,renderCall,renderResult}):ToolDefinition[]`；单factory无新状态/定时器。
 - [ ] 七个main/model-only定义，start必填agent/task，control固定action通过唯一回调；不透传调用方action覆盖固定action。
 - [ ] 保留typed compiler/error keypath/model准入/raw返回；运行入口仍对无schema调用fail closed，字段串线不发spawn/control。
