@@ -12,7 +12,7 @@
 
 | 入口 | 位置 | 只承担 |
 | --- | --- | --- |
-| package 公开 TUI 出口 | `packages/pi-subagents-enhanced/package.json` 的 `exports["./tui/background-activity"]` → `packages/pi-subagents-enhanced/src/tui/index.ts` | 公共显示协议/registry（`src/tui/background-activity.ts`）+ subagent provider 工厂（`src/tui/subagent-activity.ts`） |
+| package 公开 TUI 出口 | `packages/pi-subagents-enhanced/package.json` 的 `exports["./tui/background-activity"]` → `packages/pi-subagents-enhanced/src/tui/index.ts` | 公共显示协议/registry（`packages/pi-subagents-enhanced/src/tui/background-activity.ts`）+ subagent provider 工厂（`packages/pi-subagents-enhanced/src/tui/subagent-activity.ts`） |
 | package footer 薄 Host 入口 | `packages/pi-subagents-enhanced/extensions/custom-footer.ts` | 注入 SDK/TUI 依赖 + 唯一 Alt+O 注册；不含领域状态 |
 | package footer runtime（唯一 owner） | `packages/pi-subagents-enhanced/src/tui/footer-runtime.ts` | 唯一 `ctx.ui.setFooter` 安装、owner/bus 握手、registry 持有、subagent 自有 source、standalone fallback、Alt+O 委托 |
 | 根显示 feature 公开入口 | `src/background-activity/index.ts` | re-export package 协议 + `layout.ts` + `detail-controller.ts` + `presenter.ts`；不重复实现 registry |

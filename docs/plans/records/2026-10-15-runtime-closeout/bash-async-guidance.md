@@ -99,3 +99,8 @@ details: receipt,                                              // 原样，rende
 2. 改点 C 使 launch tool result 从 1 个 text 块变为 2 个；源码内未见按「恰好一个 text 块」解析 launch 的消费者，`test/bash-async-runtime.integration.mjs` 断言走 `details`，但外部脚本未逐一审计。
 3. guidelines 注入依赖 `bash_async` 在活跃工具集（main 默认活跃）；child 白名单不含 `bash_async`，本引导对 child 不注入（诊断报告 §2.3），属预期而非缺陷。
 4. `test/bash-async-runtime.integration.mjs`（真实 Host）与 runtime 回归未在本次纯 unit 窗口内运行，需另槽审计。
+
+
+## Inline提交范围补记
+
+commit `b583052` 实际包含上一批F3只读observer的contracts/controller/index增量与本引导测试，非仅本记录原始三处文案。当前39/39同时覆盖二者；后续 `634deb4` 提交其package公开协议与Host接线依赖，因此仅以当前最终树声明整体可用，不声称早期中间commit可独立checkout安装。原任务阶段“未碰controller”仍是历史事实，但不能拿它描述该commit的最终范围。

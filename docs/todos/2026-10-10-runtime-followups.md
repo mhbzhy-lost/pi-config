@@ -55,3 +55,33 @@
 | 空闲通知 | 明确是否解除暂缓；先决定登记/epoch 方案，再单独决定真实 macOS 通知调用授权 | 不把缺少现成 registry 当作不可实现；未授权不调用 osascript |
 
 在取得对应输入或新的实施授权前，所有 production 行为保持现状。
+
+## 统一计划批次现状（2026-10-15 追加：Z 总账收口）
+
+> 本节仅追加统一计划 `docs/plans/2026-10-13-remaining-runtime-execution.md`（Subagent-Driven）执行后的新现状；上文各『暂缓/未实施/未授权』表述是各自历史调查阶段的快照，不构成对当前状态的声明。当前权威状态以 `docs/plans/records/2026-10-13-remaining-runtime-acceptance.md`（总状态 partial）为准。
+
+- **主会话空闲系统通知**：仍未实现。I1 静态 gate 判 blocked-upstream（公开 `rpc.status` 无逐 run 结构化 state，snapshot 为有界展示投影）+ coverage blocked-evidence；I2/I3/I4 未派发；实际桌面通知从未发出。解除条件见 idle contract §9。
+- **纯派发 `triggerTurn`**：仍未实现。Q1 blocked-upstream（上游 sender 消息无稳定 details/receipt 字段，本仓无合法接点）；Q2 not-applicable 未派 coding；现有 sender 与 `triggerTurn` 原语义保留。
+- **heartbeat / 孤儿清理**：managed coding+worktree:true 拓扑已由 H2 真实 SIGKILL 验证——父死 62449ms 后 child 依已记录 lease 到期自退出，无补杀、无残留进程；generic/binding-failed/detached/bash descendants 不外推。H2 fixture cleanup 为独立 blocked-environment（4 个 active 证据根 + 1 个已 released 根，无存活 owner 可产出 public 处置出口，现场冻结待父层只读核查）。
+- **RPC `rpc:v1/session`**：R1/R2 维持 blocked-evidence（静态处置收口，无字段级样本，未修代码）。
+- **supervisor reply/pending/steer 视图**：V1/V2 维持 blocked-evidence（无消费样本，fail-closed 门禁未动）。
+- **统一后台活动区（footer）**：F6/F6-package/F7 文档已验收（runtime 13/13、display 98/98、verify-package/typecheck exit 0）；6 个 package fixture 用例 blocked-environment（离线缓存缺 `typescript` packument 与 `typescript-5.9.3.tgz`，待联网授权或补缓存后重跑）；V1–V14 真实视觉全部 pending-user，未观察前不得记为通过。
+- **session-owner resume 事务**：S1a/S1b 已实现并验证（registry 38/38+18/18、lifecycle 40/40）；S1v 非 PTY 范围 8/8 通过；6 项真实 CLI/PTY 隔离测试 blocked-environment（需独立审计 + visibleHost 窗口授权，当前未授权 ≠ 环境永久不可做）。
+- **resume 换模型 bug（独立后续事项，状态 deferred-user / 待独立设计实施）**：用户最新明确指令『resume 单独立项，记到后续 todo，本次先不处理』——本批不实施任何修复，包括不实施 preflight 显式拒绝（hard error）与 warning+继续两类契约信号，也不用 fresh spawn 冒充 resume 支持（研究 §4.3 明确不推荐：会丢失 canonical sessionFile 续写与独占 revival lease、不继承 retained capability ceiling、并依赖可被 retention 清理的 run 工件）。根因登记：`docs/bugs/2026-10-14-subagent-resume-model-override.md`；只读调研与补设计：`docs/research/2026-10-14-subagent-resume-model-override-design.md`。研究已核实（不得据此宣称所有恢复均不可能换模型）：revive 复用旧 canonical sessionFile 并经 pi 核心 `SessionManager.open` 续写；`model` 在上游 `resumeParams` 重建式白名单处被静默丢弃（首偏离点，成功回执无 warning）；底层 SDK 显式 `options.model` 优先、可在同一 session 文件上以不同显式 model 启动——即「真正切模型」目标存在技术路径，但不被拒绝参数或替代路径所替代、冒充。后续真正实现需独立范围立项，至少评估：上游接口协同改动（RPC 参数层 / 直连守卫 / revive 启动层三处）、模型准入、revival lease 身份、launch contract digest 血缘与 `ResumedRunIdentity` metadata（需 v2 合同），并单独决定是否授权上游修改或升级（本次不接受上游修改）；解除暂缓前，fresh spawn 显式 model 仍是已验证可用的换模型替代路径（bug record §1 步骤 4 实证）。不建工单、不写新计划、不实现。
+- **scheduler store/lock 并发修复**：本批不做（计划全局约束），不因 footer 显示验收销账。
+- **交付状态**：HEAD 仍 `a9875d62…`，主代码未 commit 未 push，index 空，dirty 72 路径全部保护；全仓 `npm test` 未跑，不能 wholegreen。
+
+
+## 2026-10-16 Inline closeout 当前状态（取代上方旧快照的完成状态）
+
+- 用户已选择全部主线剩余任务Inline，并授权每个验收单元commit；全部npm只用官方registry，未获单独补缓存联网许可。
+- P0：7行为测试+after账本通过；P1：8非PTY+78合同测试通过；P2：受控真实CLI 5/5通过；P3：blocked-permission，未发SIGKILL。
+- F1/F6基础接线：综合回归184/184；V1/V2：真实TUI8/8、L2通过、L3pending-user。
+- D0–D3：诊断已实现并提交；最后组合纯合同/诊断248/248。历史RPC/supervisor个案归因未升级为已修复。
+- edit原生diff：91/91、root typecheck通过；prompt override：32/32，关联32pass+1既有TODO；H1-key identity：111/111、package typecheck通过。
+- scheduler只读observer：49/49，store/lock并发问题仍独立未实施。
+- 旧heartbeat H2证据保持通过；4active workspace仍保留。本窗口只跑默认关闭harness（2pass+1skip），不重复kill；heartbeat fixture显式tsc被既有process-birth-identity.ts Error.code类型诊断阻塞，未跨界修。
+- idle/resume(model)/triggerTurn继续原暂缓决定；每操作独立工具、MD/tool guidance迁移只有调研，尚未实施；不能当作本次closeout完成。
+- supervisor child级gate/inspect-clear仍是新计划，尚未实施，不把D3诊断当gate修复；部署必须fresh Host，不能热改当前控制状态。
+- 已完成代码正逐项commit，未push；不再沿用“HEAD a9875d6/dirty72/主代码未commit”的旧快照。
+- 最新总账：`docs/plans/records/2026-10-15-runtime-closeout/acceptance.md`。
