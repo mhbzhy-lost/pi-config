@@ -52,3 +52,11 @@
 - owner 在本仓 supervisor control plane，但本轮没有生产样本证明首个偏离；保持 gate、identity、消费对账和 fail-closed 边界不变。
 
 未运行测试、真实 reply/steer/Host、模型或 MCP；未修改 production。既有测试只是实现合同的支持证据，不是整个运行流程无 bug 的证明。
+
+## 2026-10-13 统一计划 V2 处置追加（仅追加本批状态/链接，以上历史章节保持原样）
+
+- 本批（统一计划 `docs/plans/2026-10-13-remaining-runtime-execution.md` V2）在上方历史记录基础上建立处置记录：`docs/plans/records/2026-10-13-supervisor-disposition.md`（taskId V2，status **blocked-evidence**，static/unconfirmed 承继 V1：`docs/plans/records/2026-10-13-supervisor-provenance.md`）。
+- 上方历史章节（含「未运行测试、真实 reply/steer/Host、模型或 MCP；未修改 production」等表述）限定其各自历史轮次的事实快照；该表述不构成本批或未来修改控制面的授权，本批亦未修改 gate/authority/源码/测试。
+- 最小输入：本批无新样本，无新增实际 requestId/runId/replyTo/childIndex/时间戳/consumption 事实。
+- 状态重申：M05A/M05B 维持 unconfirmed 不归因；M07 reply 成功、pending 空、run 完成、延迟 attention 均不构成消费证明；queued 为本仓 receipt 默认（consumed=false），durable request 保持 pending，gate-open 为 pending 派生判定。
+- 本批明确：处置记录不是 production fix，`SUPERVISOR_REPLY_REQUIRED` fail-closed 门禁语义未变。解除所需最小字段（requestId/runId/replyTo/childIndex/登记与调用时间戳/receipt 状态投影，非凭据）见处置记录 nextAction。

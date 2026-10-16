@@ -54,3 +54,22 @@ M00 task-before 与当前相关代码对照：
 ## 未执行事项
 
 本轮未修 production、未加 fallback、未触发模型/真实 RPC、未重启其它会话或提交上游工单。现代化 M12 已在其授权范围内收口，本报错未作为真实流程验收载体。当前用户只授权文档化并提交/推送，未授权实际代码修复。
+
+## R2 处置批次最小追加（2026-10-13，统一计划 §R2）
+
+> 本节为统一计划 `docs/plans/2026-10-13-remaining-runtime-execution.md` §R2 的文末最小追加，不修改上方任何历史结论与基线；上方各节保持原样。
+
+- **本批次状态：`blocked-evidence` 维持，该分支记阻塞、不计功能完成。**R1（字段级 provenance，父层已验收）零新现场样本：未发真实 RPC/Host/provider/网络，未读取报错会话，用户报错字符串仍是唯一输入；`sourceClass=unconfirmed`、`evidenceMode=static` 未升级。生产代码保持 fail-closed，无 fallback、无门禁放宽；若后续真实证据确证生产缺陷，由父层先补精确 patch 任务并申请超出计划路径的授权，R2 不修代码、不自动修。
+- **文案定位不变（static）：**首个可观察偏离静态定位在 `assertSpawnCapabilities`（extension.ts:270）；`rpc:v1/session`（extension.ts:292）是六子条件合取的复合标签，不能断言单一根因。stage / orchestrator cwd / Git root / worktree 是否派发 / 实际加载版本 / session 身份（sessionId/sessionFile/runId）仍全部 unknown；三个候选机制（上游 session context 未就绪、worktree cwd 判定不一致、旧 Host/资源世代）全部 unconfirmed。
+- **证据链接：**
+  - R1 字段级 provenance：`docs/plans/records/2026-10-13-rpc-provenance.md`
+  - R2 处置记录：`docs/plans/records/2026-10-13-rpc-disposition.md`
+  - 历史结构化 provenance：`docs/plans/records/2026-10-11-runtime-followups/rpc-provenance.json`
+  - 静态源码锚点：`packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts`（270 断言 / 292 复合标签 / 294 带前缀文案 / 835、1044 调用点）、`rpc-client.ts:119`（无前缀同类文案，据此排除）
+- **向用户申请的字段级所需输入（非敏感；不需要凭据/token、完整 session、authority、`.state`、完整日志正文）：**
+  1. 该次 typed subagent 工具结果的完整 text（含 code 与 missing 列表）及结构化 details 投影（如 TUI 保存了 details）。
+  2. 该次派发入参投影：`worktree`/`cwd` 字段值（不需要任务正文）。
+  3. 报错会话主会话启动 cwd 与 Git root 的路径字符串。
+  4. 报错会话实际加载的 pi / pi-subagents 版本投影（session_start 或包版本）。
+  5. 该次 toolCallId/runId 与启动首个异常的日志行（若存在；不含任务正文与凭据）。
+  6. 上游 ping 回包 session 块投影：sessionId/cwd/sessionFile 三者有无即可，不需要值本身。
