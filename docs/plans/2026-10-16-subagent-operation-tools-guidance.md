@@ -2,6 +2,8 @@
 
 > 给执行 agent：逐任务执行，使用复选框记录实际结果。父层编写/首轮审阅/修订不等于任意扩展实施授权；用户已要求后续实施使用Subagent，当前closeout由父Inline收尾。首轮review后父层Inline修订并交用户确认执行方式，不自动循环review。
 
+**执行授权：** 用户已明确“审一轮足够，执行吧”，选择Subagent-Driven；不再追加review，验收后由父精确commit、不push。S0已派发，S1/S2/S3按合同ready后并行，S4等待gate G2/C3真实发布。
+
 **目标：** 按用户“全部拆开，每个操作独立工具”方向迁移当前main工具面；操作参数和前提归tool旁文本，治理/授权/恢复决策留MD。解决本仓拥有的错误workspace处置引导，不改上游消息来迎合展示。
 
 **架构：** 新工具只是唯一typed dispatcher、workspace service、supervisor adapter/control-plane的薄操作入口。旧union不再向模型注册；旧内部factory可保留供兼容测试/实现复用，但不形成第二执行权威。既有历史toolCall和上游通知原文保持，不为名称迁移重写session/raw。
