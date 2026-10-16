@@ -5,7 +5,10 @@ import { createTestTui } from "./helpers/pi-tui.mjs";
 
 const { jiti, piTui } = await loadPiTestRuntime(import.meta.url);
 const { SubagentSessionBrowserState } = await jiti.import("../packages/pi-subagents-enhanced/src/tui/session-browser.ts");
-const { createBrowserInputController } = await jiti.import("../packages/pi-subagents-enhanced/extensions/custom-footer.ts");
+const { createBrowserInputController } = await jiti.import("../packages/pi-subagents-enhanced/src/tui/footer-runtime.ts");
+// F2a-v：entry 不再 named export display/input helper，改从 package footer-runtime 读取；
+// controller 新签名要求注入 pi-tui 输入/显示工具，绑定面与 extensions/custom-footer.ts 薄入口一致。
+const footerTui = { Key: piTui.Key, isKeyRelease: piTui.isKeyRelease, isKeyRepeat: piTui.isKeyRepeat, matchesKey: piTui.matchesKey, truncateToWidth: piTui.truncateToWidth, visibleWidth: piTui.visibleWidth };
 
 test("real TUI input chain routes child navigation, transcript scrolling, and tool expansion without forwarding editor input", () => {
   const browser = new SubagentSessionBrowserState();
@@ -21,6 +24,7 @@ test("real TUI input chain routes child navigation, transcript scrolling, and to
     scrollHome: () => { calls.scrollHome += 1; },
     scrollEnd: () => { calls.scrollEnd += 1; },
     toggleTools: () => { calls.toggleTools += 1; },
+    tui: footerTui,
   });
   const { tui, dispatchInput } = createTestTui(piTui);
   const forwarded = [];
@@ -94,6 +98,7 @@ test("real TUI input chain lets Escape reach the restored editor while an agent 
     scrollHome: () => {},
     scrollEnd: () => {},
     toggleTools: () => {},
+    tui: footerTui,
   });
   tui.addInputListener(controller.handleTerminalInput);
 
@@ -119,6 +124,7 @@ test("real TUI input chain ignores Kitty releases while preserving browser navig
     scrollHome: () => {},
     scrollEnd: () => {},
     toggleTools: () => {},
+    tui: footerTui,
   });
   const { tui, dispatchInput } = createTestTui(piTui);
   const forwarded = [];
@@ -157,6 +163,7 @@ test("real TUI input chain toggles Alt+O only for Kitty press events", () => {
     scrollHome: () => {},
     scrollEnd: () => {},
     toggleTools: () => {},
+    tui: footerTui,
   });
   const { tui, dispatchInput } = createTestTui(piTui);
   const forwarded = [];

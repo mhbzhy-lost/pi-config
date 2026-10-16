@@ -9,13 +9,15 @@ const { jiti, codingAgent, piTui } = await loadPiTestRuntime(import.meta.url);
 const { SessionManager, initTheme } = codingAgent;
 const { Text } = piTui;
 const customFooterModule = await jiti.import("../packages/pi-subagents-enhanced/extensions/custom-footer.ts");
+const footerRuntime = await jiti.import("../packages/pi-subagents-enhanced/src/tui/footer-runtime.ts");
+const footerTui = { Key: piTui.Key, isKeyRelease: piTui.isKeyRelease, isKeyRepeat: piTui.isKeyRepeat, matchesKey: piTui.matchesKey, truncateToWidth: piTui.truncateToWidth, visibleWidth: piTui.visibleWidth };
 const { SubagentSessionBrowserState } = await jiti.import("../packages/pi-subagents-enhanced/src/tui/session-browser.ts");
 const { getTitleRegistry } = await jiti.import("../packages/pi-subagents-enhanced/src/subagent-dispatch/title-registry.ts");
 
 initTheme("dark", false);
 
 test("browser selector keeps the selected item visible and accounts for hidden items with terminal widths", () => {
-  assert.equal(typeof customFooterModule.formatBrowserSelector, "function");
+  assert.equal(typeof footerRuntime.formatBrowserSelector, "function");
   const snapshot = {
     active: true,
     selectedKey: "run:1",
@@ -32,13 +34,13 @@ test("browser selector keeps the selected item visible and accounts for hidden i
     recentChildren: [],
   };
 
-  const narrow = customFooterModule.formatBrowserSelector(snapshot, 1);
+  const narrow = footerRuntime.formatBrowserSelector(snapshot, 1, footerTui);
   assert.match(narrow, /›|\u2026/);
 
-  const middle = customFooterModule.formatBrowserSelector(snapshot, 26);
+  const middle = footerRuntime.formatBrowserSelector(snapshot, 26, footerTui);
   assert.match(middle, /› \? 中文🙂 \(reviewer\)/);
 
-  const last = customFooterModule.formatBrowserSelector({ ...snapshot, selectedKey: "run:2" }, 24);
+  const last = footerRuntime.formatBrowserSelector({ ...snapshot, selectedKey: "run:2" }, 24, footerTui);
   assert.match(last, /› \? tester/);
   assert.match(last, /\+\d/);
 });
@@ -53,7 +55,7 @@ test("browser selector preserves the directional focus glyph at every glyph-size
   };
 
   for (const width of [1, 2, 3]) {
-    assert.match(customFooterModule.formatBrowserSelector(snapshot, width), /›/, `width ${width}`);
+    assert.match(footerRuntime.formatBrowserSelector(snapshot, width, footerTui), /›/, `width ${width}`);
   }
 });
 
@@ -64,7 +66,7 @@ test("main selector renders projected terminal-proof status as terminal", () => 
     activeChildren: [],
     recentChildren: [{ key: "done:0", agent: "executor", state: "terminal-proof" }],
   };
-  assert.equal(customFooterModule.formatBrowserSelector(snapshot, 80), "");
+  assert.equal(footerRuntime.formatBrowserSelector(snapshot, 80, footerTui), "");
 });
 
 test("main selector projects negotiated retained status as active", () => {
@@ -74,7 +76,7 @@ test("main selector projects negotiated retained status as active", () => {
     activeChildren: [{ key: "active:0", agent: "executor", state: "retained" }],
     recentChildren: [],
   };
-  assert.equal(customFooterModule.formatBrowserSelector(snapshot, 80), "● executor");
+  assert.equal(footerRuntime.formatBrowserSelector(snapshot, 80, footerTui), "● executor");
 });
 
 test("main selector expands active children and folds terminal children into display-only history", () => {
@@ -92,7 +94,7 @@ test("main selector expands active children and folds terminal children into dis
     ],
   };
 
-  const selector = customFooterModule.formatBrowserSelector(snapshot, 80);
+  const selector = footerRuntime.formatBrowserSelector(snapshot, 80, footerTui);
   assert.equal(selector, "● executor\n◯ history 2");
   assert.doesNotMatch(selector, /main|reviewer|tester/);
 });
@@ -108,13 +110,13 @@ test("main history count folds multiple terminal children from one active run", 
     activeChildren: [{ key: "active:0", runId: "active", agent: "executor", state: "running" }],
     recentChildren: terminalChildren,
   };
-  assert.match(customFooterModule.formatBrowserSelector(snapshot, 80), /◯ history 1$/);
+  assert.match(footerRuntime.formatBrowserSelector(snapshot, 80, footerTui), /◯ history 1$/);
 });
 
 test("main selector is empty when no child remains active", () => {
   const terminalChildren = [{ key: "done:0", runId: "done", agent: "reviewer", state: "completed" }];
   const snapshot = { active: false, children: terminalChildren, activeChildren: [], recentChildren: terminalChildren };
-  assert.equal(customFooterModule.formatBrowserSelector(snapshot, 80), "");
+  assert.equal(footerRuntime.formatBrowserSelector(snapshot, 80, footerTui), "");
 });
 
 test("selector caps one long title without mutating the roster or hiding sibling status", () => {
@@ -132,7 +134,7 @@ test("selector caps one long title without mutating the roster or hiding sibling
   };
   const before = structuredClone(snapshot);
 
-  const selector = customFooterModule.formatBrowserSelector(snapshot, 100);
+  const selector = footerRuntime.formatBrowserSelector(snapshot, 100, footerTui);
   const flattenedSelector = selector.replace(/\s+/g, " ");
 
   assert.match(selector, /This is an accidentally verbose/);
@@ -140,17 +142,17 @@ test("selector caps one long title without mutating the roster or hiding sibling
   assert.match(flattenedSelector, /history 1/);
   assert.deepEqual(snapshot, before);
 
-  const childSelector = customFooterModule.formatBrowserSelector({
+  const childSelector = footerRuntime.formatBrowserSelector({
     ...snapshot,
     active: true,
     selectedKey: "long:0",
-  }, 58);
+  }, 58, footerTui);
   assert.match(childSelector, /^› ● This is an accidentally verbose/);
   assert.deepEqual(snapshot, before);
 });
 
 test("selector wraps long child labels without ellipsis and aligns continuation text", () => {
-  const selector = customFooterModule.formatBrowserSelector({
+  const selector = footerRuntime.formatBrowserSelector({
     active: true,
     selectedKey: "long:0",
     children: [{
@@ -159,7 +161,7 @@ test("selector wraps long child labels without ellipsis and aligns continuation 
     }],
     activeChildren: [],
     recentChildren: [],
-  }, 24);
+  }, 24, footerTui);
   const lines = selector.split("\n");
   assert.equal(lines.length > 2, true);
   assert.doesNotMatch(selector, /\.\.\./);
@@ -171,13 +173,13 @@ test("selector wraps long child labels without ellipsis and aligns continuation 
 });
 
 test("main selector wraps a long active label while retaining history counter", () => {
-  const selector = customFooterModule.formatBrowserSelector({
+  const selector = footerRuntime.formatBrowserSelector({
     active: false,
     selectedKey: undefined,
     children: [],
     activeChildren: [{ key: "main:0", runId: "main", agent: "executor", state: "running", label: "A long active dispatch title" }],
     recentChildren: [{ key: "done:0", runId: "done", agent: "reviewer", state: "completed" }],
-  }, 18);
+  }, 18, footerTui);
   assert.doesNotMatch(selector, /\.\.\./);
   assert.match(selector, /A long active/);
   assert.match(selector, /dispatch title/);
@@ -186,13 +188,13 @@ test("main selector wraps a long active label while retaining history counter", 
 });
 
 test("main selector places history on its own physical row after wrapped active entries", () => {
-  const selector = customFooterModule.formatBrowserSelector({
+  const selector = footerRuntime.formatBrowserSelector({
     active: false,
     selectedKey: undefined,
     children: [],
     activeChildren: [{ key: "main-long:0", runId: "main-long", agent: "executor", state: "running", label: "A long active dispatch title" }],
     recentChildren: [{ key: "done:0", runId: "done", agent: "reviewer", state: "completed" }],
-  }, 18);
+  }, 18, footerTui);
   const lines = selector.split("\n");
   const historyIndex = lines.findIndex((line) => line.includes("◯ history 1"));
   assert.ok(historyIndex > 0);
@@ -210,11 +212,11 @@ test("footer expands wrapped selector rows before the thinking row", () => {
     activeChildren: [{ key: "long:0", agent: "executor", state: "running", label: "A very long dispatch title that needs wrapping" }],
     recentChildren: [],
   };
-  const component = customFooterModule.createFooterComponent({
+  const component = footerRuntime.createFooterComponent({
     getCwd: () => "/repo", getHome: () => "/home", getModel: () => ({ id: "main" }),
     getContextUsage: () => ({ percent: 1, contextWindow: 100_000 }), getThinkingLevel: () => "medium",
     getSnapshot: () => snapshot, getViewportPosition: () => ({ start: 1, end: 1, total: 1 }), requestRender() {},
-    theme: { fg: (_color, value) => value },
+    theme: { fg: (_color, value) => value }, tui: footerTui,
   });
   const lines = component.render(40);
   assert.equal(lines.length, 3);
@@ -230,11 +232,11 @@ test("footer keeps thinking on the fixed third row when main selector wraps with
     activeChildren: [{ key: "main-wrap:0", runId: "main-wrap", agent: "executor", state: "running", label: "A long active dispatch title that needs wrapping" }],
     recentChildren: [{ key: "done:0", runId: "done", agent: "reviewer", state: "completed" }],
   };
-  const component = customFooterModule.createFooterComponent({
+  const component = footerRuntime.createFooterComponent({
     getCwd: () => "/repo", getHome: () => "/home", getModel: () => ({ provider: "provider", id: "long-model-name" }),
     getContextUsage: () => ({ percent: 1, contextWindow: 100_000 }), getThinkingLevel: () => "xhigh",
     getSnapshot: () => snapshot, getViewportPosition: () => undefined, requestRender() {},
-    theme: { fg: (_color, value) => value },
+    theme: { fg: (_color, value) => value }, tui: footerTui,
   });
   const lines = component.render(40);
   assert.ok(lines.length > 3);
@@ -254,11 +256,11 @@ test("main footer shows every active child without count folding", () => {
     activeChildren,
     recentChildren: [{ key: "done:0", runId: "done", agent: "reviewer", state: "completed" }],
   };
-  const component = customFooterModule.createFooterComponent({
+  const component = footerRuntime.createFooterComponent({
     getCwd: () => "/repo", getHome: () => "/home", getModel: () => ({ provider: "provider", id: "model" }),
     getContextUsage: () => ({ percent: 1, contextWindow: 100_000 }), getThinkingLevel: () => "xhigh",
     getSnapshot: () => snapshot, getViewportPosition: () => undefined, requestRender() {},
-    theme: { fg: (_color, value) => value },
+    theme: { fg: (_color, value) => value }, tui: footerTui,
   });
   const rendered = component.render(60).join("\n");
   for (const label of ["One long active dispatch title", "Second task", "Third task", "Fourth task"]) assert.match(rendered, new RegExp(label));
@@ -272,13 +274,13 @@ test("wide main selector never returns an early count-folded first item", () => 
   const activeChildren = ["First", "Second", "Third", "Fourth"].map((label, index) => ({
     key: `wide-${index}:0`, runId: `wide-${index}`, agent: "executor", state: "running", label,
   }));
-  const selector = customFooterModule.formatBrowserSelector({
+  const selector = footerRuntime.formatBrowserSelector({
     active: false,
     selectedKey: undefined,
     children: activeChildren,
     activeChildren,
     recentChildren: [{ key: "wide-done:0", runId: "wide-done", agent: "reviewer", state: "completed" }],
-  }, 30);
+  }, 30, footerTui);
   assert.doesNotMatch(selector, /\+\d/);
   for (const label of ["First", "Second", "Third", "Fourth"]) assert.match(selector, new RegExp(label));
   assert.match(selector.split("\n").at(-1), /◯ history 1/);
@@ -295,7 +297,7 @@ test("child selector separates selection from lifecycle glyphs and keeps selecte
   ];
   const snapshot = { active: true, selectedKey: "complete:0", children, activeChildren: children.slice(0, 1), recentChildren: children.slice(1) };
 
-  const selector = customFooterModule.formatBrowserSelector(snapshot, 200);
+  const selector = footerRuntime.formatBrowserSelector(snapshot, 200, footerTui);
   assert.match(selector, /  ● executor/);
   assert.match(selector, /› ✓ 中文🙂 \(reviewer\)/);
   assert.match(selector, /  ! tester/);
@@ -304,10 +306,10 @@ test("child selector separates selection from lifecycle glyphs and keeps selecte
   assert.match(selector, /  \? observer/);
   assert.doesNotMatch(selector, /main|[◯⏺] [●✓✗Ⅱ■?]/);
 
-  const first = customFooterModule.formatBrowserSelector({ ...snapshot, selectedKey: "active:0" }, 200);
+  const first = footerRuntime.formatBrowserSelector({ ...snapshot, selectedKey: "active:0" }, 200, footerTui);
   assert.match(first, /^› ● executor/);
 
-  const narrow = customFooterModule.formatBrowserSelector(snapshot, 18);
+  const narrow = footerRuntime.formatBrowserSelector(snapshot, 18, footerTui);
   assert.match(narrow, /› ✓/);
 });
 
@@ -324,7 +326,7 @@ test("browser state keeps lifecycle titles separate from execution identity", ()
 
 
 test("child footer combines tokens with viewport position and preserves position when token text is truncated", () => {
-  assert.equal(typeof customFooterModule.createFooterComponent, "function");
+  assert.equal(typeof footerRuntime.createFooterComponent, "function");
   const snapshot = {
     active: true,
     selectedKey: "child:0",
@@ -333,11 +335,11 @@ test("child footer combines tokens with viewport position and preserves position
     activeChildren: [{ key: "child:0", agent: "executor", state: "running" }],
     recentChildren: [],
   };
-  const component = customFooterModule.createFooterComponent({
+  const component = footerRuntime.createFooterComponent({
     getCwd: () => "/repo", getHome: () => "/home/test", getModel: () => ({ id: "main" }),
     getContextUsage: () => ({ percent: 70, contextWindow: 100_000 }), getThinkingLevel: () => "off",
     getSnapshot: () => snapshot, getViewportPosition: () => ({ start: 120, end: 139, total: 434 }),
-    requestRender() {}, theme: { fg: (_color, text) => text },
+    requestRender() {}, theme: { fg: (_color, text) => text }, tui: footerTui,
   });
 
   assert.match(component.render(80)[0], /54.3k tokens · 120-139\/434$/);
@@ -360,11 +362,11 @@ test("child footer reads changing viewport positions, including an empty transcr
     recentChildren: [],
   };
   let position = { start: 1, end: 20, total: 100 };
-  const component = customFooterModule.createFooterComponent({
+  const component = footerRuntime.createFooterComponent({
     getCwd: () => "/repo", getHome: () => "/home/test", getModel: () => ({ id: "main" }),
     getContextUsage: () => ({ percent: 70, contextWindow: 100_000 }), getThinkingLevel: () => "off",
     getSnapshot: () => snapshot, getViewportPosition: () => position,
-    requestRender() {}, theme: { fg: (_color, text) => text },
+    requestRender() {}, theme: { fg: (_color, text) => text }, tui: footerTui,
   });
 
   assert.match(component.render(80)[0], /54.3k tokens · 1-20\/100$/);
@@ -384,11 +386,11 @@ test("child footer preserves an exactly fitting position without an empty token 
     activeChildren: [{ key: "child:0", agent: "executor", state: "running" }],
     recentChildren: [],
   };
-  const component = customFooterModule.createFooterComponent({
+  const component = footerRuntime.createFooterComponent({
     getCwd: () => "/repo", getHome: () => "/home/test", getModel: () => ({ id: "main" }),
     getContextUsage: () => ({ percent: 70, contextWindow: 100_000 }), getThinkingLevel: () => "off",
     getSnapshot: () => snapshot, getViewportPosition: () => ({ start: 120, end: 139, total: 434 }),
-    requestRender() {}, theme: { fg: (_color, text) => text },
+    requestRender() {}, theme: { fg: (_color, text) => text }, tui: footerTui,
   });
 
   assert.equal(component.render(11)[0], "120-139/434");
@@ -398,12 +400,12 @@ test("child footer preserves an exactly fitting position without an empty token 
 test("footer displays only the adapter task summary on the third line without adding rows", () => {
   const extensionStatuses = new Map([["pi-scheduler", "⏱ Daily backup"]]);
   const snapshot = { active: false, selectedKey: undefined, selected: undefined, children: [], activeChildren: [], recentChildren: [] };
-  const component = customFooterModule.createFooterComponent({
+  const component = footerRuntime.createFooterComponent({
     getCwd: () => "/repo", getHome: () => "/home/test", getModel: () => ({ id: "main" }),
     getContextUsage: () => ({ percent: 1, contextWindow: 100 }), getThinkingLevel: () => "off",
     getSnapshot: () => snapshot, getViewportPosition: () => undefined,
     getExtensionStatuses: () => extensionStatuses,
-    requestRender() {}, theme: { fg: (_color, text) => text },
+    requestRender() {}, theme: { fg: (_color, text) => text }, tui: footerTui,
   });
 
   const active = component.render(80);
@@ -422,19 +424,32 @@ test("footer displays only the adapter task summary on the third line without ad
   assert.doesNotMatch(component.render(80)[2], /scheduler/);
 });
 
+// F2b-v fixture 身份：production 派发事件必带父 session 身份（F0 记录 §2/§4：缺失时
+// asyncCtx 构造直接 throw），真实 SessionManager 公开接口含 getCwd/getSessionId/
+// getSessionFile（session 落盘前 getSessionFile 返回 null）。旧 fixture manager 只有
+// getSessionFile:null 且事件缺/伪造 sessionId（含字面量 "parent"），属类别 2 fixture
+// 污染；此处只修 fixture 为真实公开接口投影，事件默认注入所属 manager 当前 UUID
+//（file/UUID 双形态接受由 F2b provider 新测覆盖），production 无任何 fallback。
+const FIXTURE_SESSION_UUID = "0e2ea6d2-9f2f-4a1c-8b70-6f1f2f3f4f5f";
+const OTHER_SESSION_UUID = "99999999-9999-4999-8999-999999999999";
+
+function fixtureSessionManager({ cwd = "/repo", sessionId = FIXTURE_SESSION_UUID, sessionFile = null } = {}) {
+  return { getCwd: () => cwd, getSessionId: () => sessionId, getSessionFile: () => sessionFile };
+}
+
 function register(map, name, handler) {
   const handlers = map.get(name) ?? [];
   handlers.push(handler); map.set(name, handlers);
   return () => map.delete(name);
 }
 
-function setup(reason) {
+function setup(reason, options = {}) {
   const handlers = new Map(); const events = new Map(); let footerFactory; let shortcut;
   const pi = { on: (name, handler) => register(handlers, name, handler), events: { on: (name, handler) => register(events, name, handler) }, getThinkingLevel: () => "high", getAllTools: () => [], registerShortcut(_key, definition) { shortcut = definition; } };
   customFooterModule.default(pi);
   const ctx = {
     mode: "tui", hasUI: true, cwd: `${process.env.HOME}/workspace`, model: { provider: "codex-pool", id: "gpt-5.6-sol", contextWindow: 272_000 },
-    getContextUsage: () => ({ tokens: 207_000, contextWindow: 272_000, percent: 76.1 }), sessionManager: { getSessionFile: () => null },
+    getContextUsage: () => ({ tokens: 207_000, contextWindow: 272_000, percent: 76.1 }), sessionManager: options.manager ?? fixtureSessionManager({ cwd: `${process.env.HOME}/workspace` }),
     ui: {
       onTerminalInput() { throw new Error("browser must not install a global terminal input listener"); },
       setFooter(factory) { footerFactory = factory; }, getEditorComponent: () => undefined, setEditorComponent() {},
@@ -447,7 +462,7 @@ function setup(reason) {
     if (data === "\x1bo") shortcut?.handler(ctx);
     return { consume: true };
   };
-  return { component, input: () => input, asyncStart: (event) => events.get("subagent:async-started")[0](event), complete: (event) => events.get("subagent:async-complete")[0](event), shutdown: (reason) => handlers.get("session_shutdown")[0]({ reason }, ctx), events };
+  return { component, input: () => input, asyncStart: (event) => events.get("subagent:async-started")[0]({ sessionId: FIXTURE_SESSION_UUID, ...event }), complete: (event) => events.get("subagent:async-complete")[0]({ sessionId: FIXTURE_SESSION_UUID, ...event }), shutdown: (reason) => handlers.get("session_shutdown")[0]({ reason }, ctx), events };
 }
 
 test("footer renders a fixed three-line child status row", (t) => {
@@ -499,7 +514,7 @@ test("selector recovers authoritative run titles after reload without rewriting 
   ];
   const snapshot = { active: false, selectedKey: undefined, children: activeChildren, activeChildren, recentChildren: [] };
   const before = structuredClone(snapshot);
-  const rendered = customFooterModule.formatBrowserSelector(snapshot, 100);
+  const rendered = footerRuntime.formatBrowserSelector(snapshot, 100, footerTui);
   assert.match(rendered, /Recovered missing title \(executor\)/);
   assert.match(rendered, /Recovered correct title \(executor\)/);
   assert.match(rendered, /Untyped label \(delegate\)/);
@@ -511,7 +526,7 @@ test("selector recovers authoritative run titles after reload without rewriting 
 
 test("child mode reserves the directional focus glyph when a long model label would otherwise take the second line", (t) => {
   const subject = setup(); t.after(() => subject.shutdown("quit"));
-  subject.asyncStart({ id: "narrow-run", asyncDir: "/tmp/narrow-run", cwd: "/repo", agent: "executor", sessionId: "parent" });
+  subject.asyncStart({ id: "narrow-run", asyncDir: "/tmp/narrow-run", cwd: "/repo", agent: "executor" });
   subject.input()("\x1bo");
   const lines = subject.component.render(14);
   assert.equal(lines.length, 3);
@@ -525,44 +540,53 @@ test("browser input consumes Alt+O and legacy inspector input instead of rewriti
   assert.deepEqual(subject.input()("\x1b"), { consume: true });
 });
 
-test("reload preserves roster but disposes async listeners and restarts in main", (t) => {
-  const first = setup(); t.after(() => first.shutdown("quit"));
+test("reload preserves the roster across factory recreation for the same manager and session", (t) => {
+  // 旧 global 槽断言转 (manager, 逻辑 sessionID) 分区的外部行为：同一模块内重新
+  // default(pi) 的 factory 重建 + 同 manager/session 重新 start，plain rows 恢复
+  //（这是同模块 factory 重建证据；SDK moduleCache clear 的真实跨模块重载由 F2b
+  // provider 新测以 jiti moduleCache:false 重 import 覆盖）；async listeners 仍在
+  // shutdown 时退订清空。
+  const manager = fixtureSessionManager({ cwd: `${process.env.HOME}/workspace` });
+  const first = setup("startup", { manager }); t.after(() => first.shutdown("quit"));
   first.asyncStart({ id: "reload-run", asyncDir: "/tmp/reload-run", cwd: "/repo", agent: "reviewer" });
   first.shutdown("reload");
   assert.equal(first.events.size, 0);
-  const second = setup("reload"); t.after(() => second.shutdown("quit"));
-  assert.equal(globalThis[Symbol.for("pi-config.custom-footer.subagents.v2")].browser, undefined);
+  const second = setup("reload", { manager }); t.after(() => second.shutdown("quit"));
   assert.match(second.component.render(58)[1], /^● reviewer/);
   assert.doesNotMatch(second.component.render(58)[1], /main/);
 });
 
-test("migrates a pre-v1 browser class cache into a plain roster", (t) => {
+test("a stale unpartitioned v2 global slot is neither inherited nor rewritten by the partitioned roster", (t) => {
+  // F2b 分区设计不做旧未分区 v2 槽迁移（fresh restore 限制按 fail closed 处理）：
+  // 预置旧槽后以全新 manager/session 启动，roster 保持为空（明确不继承未知 slot），
+  // 旧槽对象原样保留（既不消费也不改写/删除）。roster 延续语义由 (manager, 逻辑
+  // sessionID) 分区承担，见同 manager/session 跨 factory reload 用例。
   const key = Symbol.for("pi-config.custom-footer.subagents.v2");
   const previous = globalThis[key];
   const oldState = new SubagentSessionBrowserState();
   oldState.trackStarted({ id: "legacy-run", asyncDir: "/tmp/legacy-run", cwd: "/repo", agent: "executor" });
-  globalThis[key] = { browser: oldState };
+  const legacySlot = { browser: oldState };
+  globalThis[key] = legacySlot;
   t.after(() => { if (previous === undefined) delete globalThis[key]; else globalThis[key] = previous; });
 
-  const handlers = new Map();
-  customFooterModule.default({ on: (name, handler) => register(handlers, name, handler), events: { on() { return () => {}; } }, getThinkingLevel: () => "off", registerShortcut() {} });
-
-  assert.deepEqual(globalThis[key], { version: 1, children: oldState.snapshot().children });
-  assert.equal("browser" in globalThis[key], false);
+  const subject = setup("startup"); t.after(() => subject.shutdown("quit"));
+  assert.doesNotMatch(subject.component.render(58)[1], /executor/);
+  assert.equal(globalThis[key], legacySlot);
+  assert.equal("browser" in globalThis[key], true);
 });
 
 function runtimeFixture(fixtureOptions = {}) {
   const handlers = new Map(); const events = new Map(); const timers = []; const cleared = []; const custom = []; const editorFactories = []; const notifications = [];
-  let shortcut; let editor = function OriginalEditor() {}; let draft = "unsent draft"; let footerFactory; let renders = 0;
+  let shortcut; let editor = function OriginalEditor() {}; let draft = "unsent draft"; let footerFactory; let footerInstalls = 0; let renders = 0;
   const originalSetInterval = globalThis.setInterval; const originalClearInterval = globalThis.clearInterval;
   globalThis.setInterval = (callback) => { const timer = { callback, unrefCalls: 0, unref() { this.unrefCalls += 1; } }; timers.push(timer); return timer; };
   globalThis.clearInterval = (timer) => { cleared.push(timer); };
   const pi = { on: (name, handler) => register(handlers, name, handler), events: { on: (name, handler) => register(events, name, handler) }, getThinkingLevel: () => "high", getAllTools() { throw new Error("ToolInfo must not be consumed as renderer"); }, registerShortcut(_key, definition) { shortcut = definition; } };
   customFooterModule.default(pi);
   const ctx = {
-    mode: "tui", hasUI: true, cwd: "/repo", model: { id: "model" }, getContextUsage: () => ({ percent: 1, contextWindow: 100 }), sessionManager: { getSessionFile: () => null },
+    mode: "tui", hasUI: true, cwd: "/repo", model: { id: "model" }, getContextUsage: () => ({ percent: 1, contextWindow: 100 }), sessionManager: fixtureSessionManager(),
     ui: {
-      onTerminalInput() { throw new Error("browser must not install a global terminal input listener"); }, setFooter(factory) { footerFactory = factory; },
+      onTerminalInput() { throw new Error("browser must not install a global terminal input listener"); }, setFooter(factory) { footerFactory = factory; footerInstalls += 1; },
       getEditorComponent: () => { if (fixtureOptions.throwAt === "getEditorComponent") throw new Error("get editor failed"); return editor; }, getEditorText: () => { if (fixtureOptions.throwAt === "getEditorText") throw new Error("get text failed"); return draft; }, setEditorComponent(factory) { if (fixtureOptions.throwAt === "setEditorComponent") throw new Error("set editor failed"); editor = factory; editorFactories.push(factory); }, setEditorText(text) { draft = text; },
       custom(factory, overlayOptions) { if (fixtureOptions.throwAt === "custom") throw new Error("custom failed"); const handle = { focusCalls: 0, focus() { this.focusCalls += 1; } }; const call = { factory, options: overlayOptions, handle, done: 0, component: undefined }; custom.push(call); call.component = factory({ terminal: { rows: 24 }, requestRender() { renders += 1; } }, { fg: (_c, value) => value, bold: (value) => value }, {}, () => { call.done += 1; }); overlayOptions.onHandle(handle); return fixtureOptions.rejectCustom ? Promise.reject(new Error("overlay failed")) : Promise.resolve(); },
       notify(message, level) { notifications.push({ message, level }); },
@@ -575,8 +599,8 @@ function runtimeFixture(fixtureOptions = {}) {
     return { consume: true };
   };
   return {
-    ctx, shortcut, timers, cleared, custom, editorFactories, notifications, events, input: () => input, component: () => footerFactory?.({ requestRender() {} }, { fg: (_c, value) => value }, {}), renders: () => renders,
-    start: (next = ctx, reason) => handlers.get("session_start")[0]({ reason }, next), asyncStart: (event) => events.get("subagent:async-started")[0](event),
+    ctx, shortcut, timers, cleared, custom, editorFactories, notifications, events, input: () => input, component: () => footerFactory?.({ requestRender() {} }, { fg: (_c, value) => value }, {}), renders: () => renders, footerInstalls: () => footerInstalls,
+    start: (next = ctx, reason) => handlers.get("session_start")[0]({ reason }, next), asyncStart: (event) => events.get("subagent:async-started")[0]({ sessionId: FIXTURE_SESSION_UUID, ...event }),
     shutdown: (reason = "quit") => handlers.get("session_shutdown")[0]({ reason }, ctx), poll: (index = timers.length - 1) => timers[index].callback(), restore() { globalThis.setInterval = originalSetInterval; globalThis.clearInterval = originalClearInterval; },
   };
 }
@@ -590,8 +614,8 @@ test("footer polls raw workflow and leaf runs while rendering one canonical conv
     fs.rmSync(rootDir, { recursive: true, force: true });
     fs.rmSync(leafDir, { recursive: true, force: true });
   });
-  subject.asyncStart({ id: "workflow-root", mode: "workflow", agent: "workflow", asyncDir: rootDir, cwd: "/repo", sessionId: "parent", workflowKey: "typed-key" });
-  subject.asyncStart({ id: "workflow-leaf", mode: "single", agent: "reviewer", asyncDir: leafDir, cwd: "/repo", sessionId: "parent", parentWorkflowRunId: "workflow-root", workflowKey: "typed-key", title: "审阅任务" });
+  subject.asyncStart({ id: "workflow-root", mode: "workflow", agent: "workflow", asyncDir: rootDir, cwd: "/repo", workflowKey: "typed-key" });
+  subject.asyncStart({ id: "workflow-leaf", mode: "single", agent: "reviewer", asyncDir: leafDir, cwd: "/repo", parentWorkflowRunId: "workflow-root", workflowKey: "typed-key", title: "审阅任务" });
   fs.writeFileSync(path.join(rootDir, "status.json"), JSON.stringify({ state: "complete", mode: "workflow", steps: [{ runId: "workflow-leaf", agent: "reviewer", workflowKey: "typed-key", status: "running" }] }));
   fs.writeFileSync(path.join(leafDir, "status.json"), JSON.stringify({ state: "running", mode: "single", parentWorkflowRunId: "workflow-root", workflowKey: "typed-key", steps: [{ agent: "reviewer", status: "running", model: "fixture/reviewer", thinking: "high", tokens: { total: 4321 }, sessionFile: path.join(leafDir, 'session.jsonl') }] }));
   const rootBytes = fs.readFileSync(path.join(rootDir, 'status.json'), 'utf8');
@@ -606,8 +630,13 @@ test("footer polls raw workflow and leaf runs while rendering one canonical conv
   assert.equal(fs.readFileSync(path.join(rootDir, 'status.json'), 'utf8'), rootBytes);
   assert.equal(fs.readFileSync(path.join(leafDir, 'status.json'), 'utf8'), leafBytes);
   subject.start(subject.ctx, 'reload');
-  const persisted = globalThis[Symbol.for('pi-config.custom-footer.subagents.v2')];
-  assert.deepEqual(new Set(persisted.children.map(c => c.runId)), new Set(['workflow-root','workflow-leaf']));
+  // 旧 global 槽 children 集合断言转外部行为：canonical workflow roster（root facade
+  // 与 leaf 的确认关系）经 (manager, 逻辑 sessionID) 分区跨 reload 保留——root 被确认
+  // 折叠、leaf 以 canonical 标签单次出现。
+  const reloaded = subject.component().render(100).join('\n');
+  assert.match(reloaded, /审阅任务 \(reviewer\)/);
+  assert.equal((reloaded.match(/审阅任务/g) ?? []).length, 1);
+  assert.doesNotMatch(reloaded, /workflow-root|\(workflow\)/);
   fs.writeFileSync(path.join(rootDir, 'status.json'), JSON.stringify({ state:'complete', mode:'workflow', steps:[
     {runId:'workflow-leaf',agent:'reviewer',workflowKey:'typed-key',status:'running'},
     {runId:'next-leaf',agent:'executor',workflowKey:'next-key',label:'后续步骤',status:'running'},
@@ -619,7 +648,7 @@ test("footer polls raw workflow and leaf runs while rendering one canonical conv
   assert.match(childFooter, /4.3k tokens/);
   assert.match(childFooter, /\(fixture\) reviewer/);
   assert.equal(subject.custom[0].done, 0);
-  subject.asyncStart({ id:'next-leaf', mode:'single', agent:'executor', asyncDir:path.join(rootDir,'next'), cwd:'/repo', sessionId:'parent', parentWorkflowRunId:'workflow-root', workflowKey:'next-key', title:'第二任务' });
+  subject.asyncStart({ id:'next-leaf', mode:'single', agent:'executor', asyncDir:path.join(rootDir,'next'), cwd:'/repo', parentWorkflowRunId:'workflow-root', workflowKey:'next-key', title:'第二任务' });
   subject.poll();
   const folded = subject.component().render(180).join('\n');
   assert.match(folded, /第二任务/);
@@ -634,7 +663,7 @@ test("Alt+O accepts a distinct shortcut context for the live session manager onl
   subject.shortcut.handler({ sessionManager: subject.ctx.sessionManager });
   assert.equal(subject.custom.length, 1);
   subject.custom[0].component.handleInput("\x1b");
-  subject.shortcut.handler({ sessionManager: { getSessionFile: () => null } });
+  subject.shortcut.handler({ sessionManager: fixtureSessionManager({ sessionId: OTHER_SESSION_UUID }) });
   assert.equal(subject.custom.length, 1);
 });
 
@@ -669,18 +698,22 @@ test("polling an emptied real status roster exits the browser and restores the o
   assert.doesNotMatch(subject.component().render(40)[1], /main|history/);
 });
 
-test("session starts clear roster except for reload and stale polls cannot access the former context", (t) => {
+test("roster follows the manager/session partition: same session restarts keep it and a new manager starts empty", (t) => {
+  // 旧「按 reason 清理」语义已被 F2b manager×逻辑 sessionID 分区取代：同 manager 同
+  // session 的再次 start（无论 startup/reload）恢复分区；切 manager（new/fork/switch
+  // 的新 SessionManager）取空分区且不串写原 manager 分区；旧代 poll 仍被隔离。
   const subject = runtimeFixture(); t.after(() => { subject.shutdown(); subject.restore(); });
   subject.asyncStart({ id: "old-run", asyncDir: "/tmp/old-run", cwd: "/repo", agent: "executor" });
   const stalePoll = subject.timers[0].callback;
   subject.start(subject.ctx, "startup");
-  assert.doesNotMatch(subject.component().render(58)[1], /main|executor/);
+  assert.match(subject.component().render(58)[1], /^● executor/);
   const renders = subject.renders();
   stalePoll();
   assert.equal(subject.renders(), renders);
-  subject.asyncStart({ id: "reload-run", asyncDir: "/tmp/reload-run", cwd: "/repo", agent: "reviewer" });
+  subject.start({ ...subject.ctx, sessionManager: fixtureSessionManager({ sessionId: OTHER_SESSION_UUID }) }, "new");
+  assert.doesNotMatch(subject.component().render(58)[1], /executor/);
   subject.start(subject.ctx, "reload");
-  assert.match(subject.component().render(58)[1], /^● reviewer/);
+  assert.match(subject.component().render(58)[1], /^● executor/, "原 manager 分区未被新 manager 会话串写");
 });
 test("a repeated session start exits the browser and replaces timer and input listeners", (t) => {
   const subject = runtimeFixture(); t.after(() => { subject.shutdown(); subject.restore(); });
@@ -701,7 +734,7 @@ test("a repeated session start exits the browser and replaces timer and input li
   assert.doesNotMatch(subject.component().render(58)[1], /main/);
 });
 
-test("an RPC session with UI support tears down the prior terminal browser and clears its roster", (t) => {
+test("an RPC session with UI support tears down the prior terminal browser without installing TUI", (t) => {
   const subject = runtimeFixture(); t.after(() => { subject.shutdown(); subject.restore(); });
   subject.asyncStart({ id: "no-ui-run", asyncDir: "/tmp/no-ui-run", cwd: "/repo", agent: "executor" });
   const original = subject.ctx.ui.getEditorComponent();
@@ -716,10 +749,15 @@ test("an RPC session with UI support tears down the prior terminal browser and c
   assert.equal(subject.cleared.length, 1);
   assert.equal(typeof subject.input(), "function");
   assert.equal(subject.events.size, 0);
-  assert.deepEqual(globalThis[Symbol.for("pi-config.custom-footer.subagents.v2")].children, []);
+  assert.equal(subject.footerInstalls(), 1, "RPC start 不安装 TUI footer");
   const renders = subject.renders();
   stalePoll();
   assert.equal(subject.renders(), renders);
+  // 旧 global 槽 children:[] 断言转外部行为：非 TUI start 不清 (manager, 逻辑
+  // sessionID) 分区（不 UI reload 清理），同 manager/session 的后续 TUI reload 恢复。
+  subject.start(subject.ctx, "reload");
+  assert.equal(subject.footerInstalls(), 2);
+  assert.match(subject.component().render(58)[1], /^● executor/);
 });
 
 test("empty-roster Alt+O is consumed without opening or changing the editor", (t) => {
@@ -883,7 +921,9 @@ test("no-UI reload tears down browser resources while preserving the roster for 
   assert.equal(subject.cleared.length, 1);
   assert.equal(typeof subject.input(), "function");
   assert.equal(subject.events.size, 0);
-  assert.match(globalThis[Symbol.for("pi-config.custom-footer.subagents.v2")].children[0].agent, /executor/);
+  // 旧 global 槽 children[0].agent 断言转外部行为：非 UI reload 不清 (manager,
+  // 逻辑 sessionID) 分区，roster 保留语义由下方同 manager/session TUI reload 的
+  // 恢复断言承担。
 
   subject.start(subject.ctx, "reload");
   assert.match(subject.component().render(58)[1], /^● executor/);

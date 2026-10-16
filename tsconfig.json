@@ -49,6 +49,8 @@
     "pi/extensions/basic-memory.ts",
     "pi/extensions/context-usage.ts",
     "pi/extensions/task-scheduler.ts",
-    "pi/extensions/async-progress-watcher.ts"
+    "pi/extensions/async-progress-watcher.ts",
+    "src/background-activity/**/*.ts",
+    "pi/extensions/background-activity.ts"
   ]
 }

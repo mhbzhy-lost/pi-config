@@ -25,6 +25,7 @@
   "exports": {
     "./dispatch-ir": "./src/contracts/dispatch-ir.ts",
     "./host-runtime": "./src/host-runtime/index.ts",
+    "./tui/background-activity": "./src/tui/index.ts",
     "./workspace": "./src/workspace/service.ts",
     "./workspace/admin": "./src/workspace/administration.ts"
   },
