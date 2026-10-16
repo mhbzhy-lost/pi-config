@@ -7,6 +7,13 @@ import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
+import { visibleWidth } from '@earendil-works/pi-tui';
+function renderedLines(debug) {
+  return debug.split('\n').flatMap((line) => {
+    const match = /^\[\d+\] \(w=(\d+)\) (.*)$/.exec(line);
+    return match ? [{ width: Number(match[1]), text: stripVTControlCharacters(JSON.parse(match[2])) }] : [];
+  });
+}
 import { startControlledPty } from './helpers/controlled-pty.mjs';
 import { repo, hostRoot, scenarios, visualArgs, visualEnv } from './helpers/background-activity-visual.mjs';
 
@@ -33,7 +40,7 @@ async function fixture(t, scenario) {
   await Promise.all(['home', 'tmp', 'agent', 'sessions', 'registry', 'cwd'].map((dir) => mkdir(join(root, dir), { mode: 0o700 })));
   const lease = await startControlledPty({ command: join(repo, 'scripts/pi-launcher.zsh'), args: visualArgs(root), cwd: join(root, 'cwd'), env: visualEnv(root), cols: 78, rows: 24, artifactDir: join(root, 'pty'), deadlineMs: 20_000 });
   t.after(async () => {
-    if (lease.exit === null) await lease.write('\x1b\x15').catch(() => {});
+    if (lease.exit === null) await lease.write('\x1b[27u\x15').catch(() => {});
     const closed = await lease.close();
     await writeFile(join(root, 'exit.json'), JSON.stringify(closed, null, 2), { mode: 0o600 });
     console.log(`[visual-ledger] ${scenario} ${root} ${JSON.stringify(closed)}`);
@@ -99,11 +106,20 @@ for (const scenario of scenarios) test(`真实后台活动视觉：${scenario}`,
   if (scenario === 'base') {
     const frame = stripVTControlCharacters(await debug('base'));
     for (const kind of ['subagent', 'bash_async', 'scheduler']) assert.ok(frame.includes(`fixture:${kind}:0`));
+    const entries = renderedLines(frame).filter((line) => /fixture:(subagent|bash_async|scheduler):0/.test(line.text));
+    assert.equal(entries.length, 3);
+    for (const line of entries) { assert.equal(visibleWidth(line.text.slice(0, line.text.indexOf('fixture:'))), 3); assert.equal(line.width, 78); }
   } else if (scenario === 'long') {
     await command('long');
     const frame = stripVTControlCharacters(await debug('long'));
     assert.ok(frame.includes('(delegate)'));
     assert.ok(frame.includes('fixture:'));
+    const title = renderedLines(frame).find((line) => line.text.includes('brightness-control'));
+    const continuation = renderedLines(frame).find((line) => line.text.includes('(delegate)'));
+    assert.ok(title && continuation);
+    assert.equal(title.width, 78);
+    assert.ok(continuation.text.startsWith('   '));
+    assert.ok(!continuation.text.startsWith('    '));
   } else if (scenario === 'widths') {
     for (const cols of [20, 40, 78, 120]) {
       const size = await lease.resize(cols, 24);
@@ -111,21 +127,33 @@ for (const scenario of scenarios) test(`真实后台活动视觉：${scenario}`,
       // /debug 自身在当前宽度渲染，宽度事实来自官方帧而非历史ANSI拼接。
       const frame = await debug(`width-${cols}`);
       assert.ok(frame.includes(`Terminal: ${cols}x24`));
+      for (const line of renderedLines(frame)) assert.ok(line.width <= cols, `官方渲染行超宽：${line.width}>${cols}`);
     }
   } else if (scenario === 'heights') {
+    for (const action of ['stale', 'unavailable']) {
+      await command(action);
+      const statusFrame = stripVTControlCharacters(await debug(action));
+      assert.match(statusFrame, action === 'stale' ? /过期观察/ : /暂不可用/);
+    }
     await command('overflow');
     for (const rows of [4, 10, 24]) {
       const size = await lease.resize(78, rows);
       assert.equal(size.appliedRows, rows);
       const frame = await debug(`height-${rows}`);
       assert.ok(frame.includes(`Terminal: 78x${rows}`));
+      for (const line of renderedLines(frame)) assert.ok(line.width <= 78);
     }
   } else if (scenario === 'draft') {
     await command('probe');
     const detail = waitProbe(root, (entry) => entry.event === 'detail');
     await lease.write('\x1bo');
     await detail;
-    await lease.write('\x1b[C\x1b[D\x1b');
+    for (const kind of ['bash_async', 'scheduler']) {
+      const nextDetail = waitProbe(root, (entry) => entry.event === 'detail' && entry.key === `fixture:${kind}:0`);
+      await lease.write('\x1b[C');
+      await nextDetail;
+    }
+    await lease.write('\x1b[D\x1b[27u');
     const draft = waitProbe(root, (entry) => entry.event === 'draft');
     await lease.write('\x1bp');
     assert.equal((await draft).draft, 'fixture 草稿保留');
@@ -133,7 +161,7 @@ for (const scenario of scenarios) test(`真实后台活动视觉：${scenario}`,
     for (const theme of ['light', 'dark']) await command(theme);
     await lease.write('\x1bo');
     await waitProbe(root, (entry) => entry.event === 'detail');
-    await lease.write('\x1b');
+    await lease.write('\x1b[27u');
     await debug('themes');
   } else if (scenario === 'lifecycle') {
     await lease.write('fixture seed\r');
