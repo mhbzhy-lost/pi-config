@@ -99,6 +99,14 @@ late terminal consumption不得把行政cleared的request复活为replied，也�
 - v1 request的旧id/digest/timestamp/终态不变，原stateDigest先验证，再生成v2digest；未知schema/字段/状态仍拒绝。补充v1/v2双向读取验收：新parser能读所有合法v1终态，v2写入后未修改的旧v1 parser明确拒绝（其既有分类为CORRUPT）；新版本仅对自身未知版本输出版本不兼容分类，不能改写旧Host事实。
 - 不实现降级回写；发布前说明旧Host不能读v2，不允许同root混用旧/新Host，执行时需fresh Host。当前回话不能在热patch中装上clear立即改自己的控制状态。challenge过期或CAS失败是预期并发结果，工具文案和验收要求重新inspect后重试；并发inspect签发的新challenge会使旧challenge失效。
 
+## G0 后父层执行裁决（2026-10-16）
+
+G0已查明上游pending存在静默漏检，不能证明exact absence；C1 observer、C2 clear事务和C3中的inspect/clear注册部分暂列blocked-upstream，禁止实现空数组fallback，不改上游。不是把clear视作完成。
+
+G1/G2继续：显式非负安全integer index选择投递目标；已证correlation只用于判定该request归属，不将稀疏请求集合当完整child目录。不能因child B从未发request就拒绝其显式index；membership仍由原上游投递校验，isError必须当失败，不能先/无条件记queued。缺index不猜0/不broadcast，返回独立歧义码。无correlation的pending不能被默认分给任意child，scope-unverified单列。
+
+新steer使用严格v2 intent并在receipt幂等键包含childIndex；v1原parser仍严格，state/request显式v1读取迁移按原§2.4执行，readDiagnostics不写迁移。C3中可独立交付的steer/reply接线（检查isError/throw、不写成功queued、失败可重试）拆作G2-wire，精确写extension.ts/test膜；不依赖clear observer。独立工具S4只等G2+G2-wire发布，clear未实现时只注册14工具，不注册空壳inspect/clear；未来clear具备事实接口后再加两工具。
+
 ## 3. 文件职责
 
 | Create/Modify | 路径与职责 |

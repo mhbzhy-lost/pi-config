@@ -2,7 +2,7 @@
 
 > 给执行 agent：逐任务执行，使用复选框记录实际结果。父层编写/首轮审阅/修订不等于任意扩展实施授权；用户已要求后续实施使用Subagent，当前closeout由父Inline收尾。首轮review后父层Inline修订并交用户确认执行方式，不自动循环review。
 
-**执行授权：** 用户已明确“审一轮足够，执行吧”，选择Subagent-Driven；不再追加review，验收后由父精确commit、不push。S0已派发，S1/S2/S3按合同ready后并行，S4等待gate G2/C3真实发布。
+**执行授权：** 用户已明确“审一轮足够，执行吧”，选择Subagent-Driven；不再追加review，验收后由父精确commit、不push。S0已派发，S1/S2/S3按合同ready后并行，S4等待gate G2及G2-wire真实发布；G0证实absence不可证，clear暂blocked，仅注册14工具，不注册空壳inspect/clear。
 
 **目标：** 按用户“全部拆开，每个操作独立工具”方向迁移当前main工具面；操作参数和前提归tool旁文本，治理/授权/恢复决策留MD。解决本仓拥有的错误workspace处置引导，不改上游消息来迎合展示。
 
@@ -44,7 +44,7 @@
 | supervisor_request_status | 只保留该操作当前支持的to/replyTo等精确字段 | 同上status，D2/D3诊断保留 |
 | supervisor_request_reply | replyTo/message必填，to如现支持则保留 | 同上reply，串行/commit/compensate不变 |
 
-以上14项；supervisor gate计划拟新增的subagent_supervisor_inspect/clear在其实现并发布后作为独立工具原名保留，届时总计16，不重复拆分。目前该兄弟计划仅B完成，G2/C3尚未实现。规范顺序为gate先行；S0记录未发布时向父报告S4依赖，父继续推进已授权gate DAG，不静默挂起；若gate出现无法推进的实际阻塞，则由用户决定继续等待或将S4缩为14工具，不自主取消依赖。状态/定位字段的逐项真实支持由S0读代码冻结，不将研究中“所有control共用canonicalSteerTarget”的建议当事实：现canonical resolver只对steer权威，其他operation不擅自收紧/扩展；无目标status若现可用则保留。schema根不使用union或allOf；启动条件必填保留原typed编译器权威。dispose的strategy仅integrate规则由既有runtime INVALID_WORKSPACE_STRATEGY裁决，schema不保留顶层allOf，也不新增未经验证的根if/then；这是明确的schema早拒降级而非runtime语义放宽，description说明条件，测试同时证明guard仍在。供应商兼容未知不凭fake断言真provider通过。
+以上14项；supervisor gate计划拟新增的subagent_supervisor_inspect/clear在其实现并发布后作为独立工具原名保留，届时总计16，不重复拆分。目前该兄弟计划仅B完成，G2/C3尚未实现。规范顺序为gate先行。G0后父层已按既定blocked分支裁决：absence不可证，C1/C2及C3清理部分blocked，独立steer/reply接线提取为G2-wire；S4只等G2+G2-wire，先交付14工具，inspect/clear未来有可信接口再加入，不注册虚假可清理工具。状态/定位字段的逐项真实支持由S0读代码冻结，不将研究中“所有control共用canonicalSteerTarget”的建议当事实：现canonical resolver只对steer权威，其他operation不擅自收紧/扩展；无目标status若现可用则保留。schema根不使用union或allOf；启动条件必填保留原typed编译器权威。dispose的strategy仅integrate规则由既有runtime INVALID_WORKSPACE_STRATEGY裁决，schema不保留顶层allOf，也不新增未经验证的根if/then；这是明确的schema早拒降级而非runtime语义放宽，description说明条件，测试同时证明guard仍在。供应商兼容未知不凭fake断言真provider通过。
 
 ### 2.2 兼容与fresh Host
 
@@ -81,7 +81,7 @@ S0 当前操作/调用者合同
 ├─ S1 start/roster/run factory ─┐
 ├─ S2 workspace factory ──────┼─ S4 唯一注册/历史renderer ── S5 guidance迁移 ── S6验收交付
 └─ S3 supervisor factory ────┘
-Supervisor G2/C3发布前置条件 ────┘（目前未实现；发布后S4消费其接口，不能覆盖新gate/clear）
+Supervisor G2+G2-wire发布前置条件 ────┘（目前未实现；发布后S4消费其接口，不能覆盖新gate/clear）
 ```
 
 - Wave0 S0；Wave1 S1/S2/S3可并行（disjoint新文件，不跑共享unit）；Wave2 S4；Wave3 S5；Wave4 S6。
@@ -130,8 +130,8 @@ Supervisor G2/C3发布前置条件 ────┘（目前未实现；发布后
 
 ### S4：唯一注册切换与历史显示
 
-**Deps：** S1/S2/S3、supervisor计划G2/C3发布（阻塞时不开始写extension）。**WritePaths：** `packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts`、`packages/pi-subagents-enhanced/src/tui/tool-renderers.ts`、`packages/pi-subagents-enhanced/src/tui/compact-rendering.ts`、`test/subagent-runtime-membrane.test.mjs`、`test/subagent-compact-rendering.test.mjs`、`test/joint-upgrade-model-only.test.mjs`、`test/subagent-dispatch-rpc.test.mjs`、`test/subagent-dispatch-extension.test.ts`；S0发现额外fixture先报父修订精确WritePaths，不将目录发现当任意写授权。**Resources：** unit-runner。
-**接口：** registered模型工具14+gate2，旧三名零注册；membrane捕获上游旧名不变。executeStart/Control仍同闭包和owner state。
+**Deps：** S1/S2/S3、supervisor计划G2+G2-wire发布（clear分支独立blocked，不阻14工具注册）。**WritePaths：** `packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts`、`packages/pi-subagents-enhanced/src/tui/tool-renderers.ts`、`packages/pi-subagents-enhanced/src/tui/compact-rendering.ts`、`test/subagent-runtime-membrane.test.mjs`、`test/subagent-compact-rendering.test.mjs`、`test/joint-upgrade-model-only.test.mjs`、`test/subagent-dispatch-rpc.test.mjs`、`test/subagent-dispatch-extension.test.ts`；S0发现额外fixture先报父修订精确WritePaths，不将目录发现当任意写授权。**Resources：** unit-runner。
+**接口：** registered模型工具14；gate2未实现则不注册，旧三名零注册；membrane捕获上游旧名不变。executeStart/Control仍同闭包和owner state。
 - [ ] 注册改按新factory名，按name查找而非tools数组位置；ctx/current Host不热重载，不改历史session工具名。deactivateSupervisorTool同步停用新三supervisor工具，未bind时不留active声明，inspect/clear仍遵守gate的可用性策略。
 - [ ] renderer新旧名都可显示，新名按工具名映射固定operation，不能再依赖模型args.action；compact-rendering校验失败正则覆盖新旧名，workspace共享已有文本/组件能力，不改模型raw；模型参数展示不冒充权限。gate C3的“旧单工具还可用”仅适用于gate阶段，S4发布后由新工具等价公开链验收取代，保留旧历史测试证据不覆写。
 - [ ] 更新真实SDK fake Host调用者，不批量替换历史docs；所有被改测试路径须来自S0，额外路径先报父。
