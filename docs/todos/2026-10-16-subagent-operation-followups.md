@@ -1,5 +1,7 @@
 # Subagent 独立操作工具后续待办
 
+> 总体后续事项统一索引见 `docs/todos/2026-10-16-runtime-independent-followups.md`。本文保留subagent工具专项细节；跨runtime的idle/triggerTurn/resume/scheduler/heartbeat/RPC等事项不在此重复展开。
+
 > 本文是 2026-10-16 之后的后续待办账本，不回滚已完成的 runtime-closeout 或独立工具 S0–S6 结论。每项都必须按真实证据收口；blocked 不得用 fallback 或文档改写冒充完成。
 
 ## 总览
