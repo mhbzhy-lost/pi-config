@@ -43,8 +43,8 @@ function row(kind, key, label, stateLabel = "运行中", placement = "main") {
 const META = Object.freeze({
   cwd: "/tmp/proj",
   contextLabel: "12.3%/1.0M",
-  providerModelLabel: "(anthropic) claude-test",
-  thinkingLabel: "thinking: medium",
+  providerModelLabel: "anthropic/claude-test",
+  thinkingLabel: "medium",
 });
 
 // §2 冻结网格常量（与 layout 内部一致；fixture 环境三 glyph 宽均为 1 → 公共 glyph cell 1）。
@@ -156,8 +156,8 @@ test("截图同形 label（width 78）：(delegate) 不拆、状态真右列、�
     cwd: "/Users/leshi.zhy/brightness-control",
     home: "/Users/leshi.zhy",
     contextLabel: "1.4%/900k",
-    providerModelLabel: "(codex-pool) gpt-6.1-sol",
-    thinkingLabel: "thinking: low",
+    providerModelLabel: "codex-pool/gpt-6.1-sol",
+    thinkingLabel: "low",
   });
   const { lines } = renderActivityLayout({
     rows: [row("subagent", "subagent:1", label, "运行中")],
@@ -166,16 +166,15 @@ test("截图同形 label（width 78）：(delegate) 不拆、状态真右列、�
     meta,
     selection: "subagent:1",
   });
-  assert.equal(lines.length, 4, "meta 2 行 + 条目 2 行（元数据不留空槽）");
-  assert.equal(lines[0], `${"~/brightness-control"}${" ".repeat(78 - 20 - 9)}1.4%/900k`, "第一行 cwd 左/context 右");
-  assert.ok(lines[1].startsWith("(codex-pool) gpt-6.1-sol"), "第二元数据行左 provider/model");
-  assert.ok(lines[1].endsWith("thinking: low"), "第二元数据行右 thinking");
-  const entryFirst = lines[2];
+  assert.equal(lines.length, 3, "压缩单行元数据 + 条目 2 行");
+  assert.equal(lines[0], `${"~/brightness-control"}${" ".repeat(78 - 20 - visibleWidth("codex-pool/gpt-6.1-sol · low · 1.4%/900k"))}codex-pool/gpt-6.1-sol · low · 1.4%/900k`, "第一行压缩元数据右对齐");
+  assert.ok(lines[0].endsWith("codex-pool/gpt-6.1-sol · low · 1.4%/900k"), "任意provider/model均合并到右侧");
+  const entryFirst = lines[1];
   assert.ok(entryFirst.startsWith("›● "), "选中 + glyph + gap");
   assert.equal(visibleWidth(entryFirst), 78, "状态右对齐到 78 列右边界");
   assert.ok(entryFirst.endsWith("运行中"), "状态在首行真右列");
   assert.ok(!entryFirst.includes("(delegate)"), "首行标题不含被换行的词");
-  const continuation = lines[3];
+  const continuation = lines[2];
   assert.equal(continuation, `${PREFIX_SPACES}(delegate)`, "完整词 (delegate) 不被拆且对齐标题列");
   assert.notEqual(continuation[PREFIX_WIDTH], " ", "续行不保留断点空格");
   const stateIndex = entryFirst.lastIndexOf("运行中");
@@ -286,12 +285,11 @@ test("三 kind 同帧可见：充足预算按类型固定顺序整块渲染，gl
     row("scheduler", "scheduler:s1", "定时C", "等待触发"),
   ];
   const { lines, geometry } = layoutWith(rows);
-  assert.equal(lines.length, 5, "meta 2 行 + 三 kind 各 1 行");
-  assert.ok(lines[0].startsWith("/tmp/proj") && lines[0].endsWith("12.3%/1.0M"), "第一行 cwd/context");
-  assert.ok(lines[1].startsWith("(anthropic) claude-test") && lines[1].endsWith("thinking: medium"), "第二元数据行左右同排");
-  assert.ok(lines[2].startsWith(" ● 任务A"), "subagent 行网格");
-  assert.ok(lines[3].startsWith(" ⌘ 命令B"), "bash 行网格");
-  assert.ok(lines[4].startsWith(" ⏱ 定时C"), "scheduler 行网格");
+  assert.equal(lines.length, 4, "压缩单行元数据 + 三 kind 各 1 行");
+  assert.ok(lines[0].startsWith("/tmp/proj") && lines[0].endsWith("anthropic/claude-test · medium · 12.3%/1.0M"), "第一行压缩元数据");
+  assert.ok(lines[1].startsWith(" ● 任务A"), "subagent 行网格");
+  assert.ok(lines[2].startsWith(" ⌘ 命令B"), "bash 行网格");
+  assert.ok(lines[3].startsWith(" ⏱ 定时C"), "scheduler 行网格");
   const withThird = layoutWith(rows, { terminalRows: 12 });
   assert.ok(withThird.lines.some((line) => line.includes("定时C")), "三 kind 同帧可见");
   assert.equal(geometry.overflowCount, 0);
@@ -300,18 +298,17 @@ test("三 kind 同帧可见：充足预算按类型固定顺序整块渲染，gl
 test("元数据连续渲染不留空 activity 槽：放不下时分别换行且 col1 共同左基线", () => {
   const rows = [row("subagent", "subagent:1", "长".repeat(40))]; // 需要换行 → 不再下移留空槽
   const fit = layoutWith(rows, { width: 40 });
-  assert.ok(fit.lines[1].startsWith("(anthropic) claude-test"), "meta2 左 provider/model");
-  assert.ok(fit.lines[1].endsWith("thinking: medium"), "meta2 右 thinking 同排");
-  assert.ok(fit.lines[2].startsWith(" ● "), "活动区紧跟元数据连续绘制");
-  assert.ok(
-    !fit.lines.some((line) => line.trim() === "(anthropic) claude-test"),
-    "不存在左区全空的元数据槽行",
-  );
+  assert.ok(fit.lines.some((line) => line.includes("anthropic/claude-test")), "provider/model保留");
+  assert.ok(fit.lines.some((line) => line.includes("medium")), "thinking保留");
+  assert.ok(fit.lines.some((line) => line.includes("12.3%/1.0M")), "context保留");
+  assert.ok(fit.lines.some((line) => line.startsWith(" ● ")), "活动区紧跟元数据连续绘制");
+  assert.ok(!fit.lines.some((line) => line.trim() === "(anthropic) claude-test"), "不存在旧的第二元数据槽行");
 
   const split = layoutWith(rows, { width: 30 });
-  assert.ok(split.lines[1].startsWith("(anthropic) claude-test"), "放不下时 provider/model 从 col1 换行");
-  assert.ok(split.lines[2].startsWith("thinking: medium"), "thinking 从 col1 共同左基线换行");
-  assert.ok(split.lines[3].startsWith(" ● "), "活动区仍在元数据之后");
+  assert.ok(split.lines[0].includes("anthropic/claude-test") || split.lines[1].includes("anthropic/claude-test"), "窄宽仍保留provider/model");
+  assert.ok(split.lines.some((line) => line.includes("medium")), "窄宽仍保留thinking");
+  assert.ok(split.lines.some((line) => line.includes("12.3%/1.0M")), "窄宽仍保留context");
+  assert.ok(split.lines.some((line) => line.startsWith(" ● ")), "活动区仍在元数据之后");
   for (const line of split.lines) assert.ok(visibleWidth(line) <= 30, "换行后不越界");
 });
 
@@ -324,13 +321,13 @@ test("公平完整 block 预算：预算紧时每 kind 首个完整 block 优先
     row("scheduler", "scheduler:s1", "定时C"),
   ];
   const { lines, geometry } = layoutWith(rows, { terminalRows: 11 }); // 预算 5 → 可用 3
-  assert.equal(lines.length, 5, "meta1 + 三 kind 首块 + 溢出提示");
+  assert.equal(lines.length, 5, "压缩meta + 两个subagent + 两个kind整块");
   assert.ok(lines[1].includes("任务A") && !lines[1].includes("任务A2"), "subagent 首块入选");
-  assert.ok(lines[2].includes("命令B"), "bash 首块入选（先于同 kind 剩余）");
-  assert.ok(lines[3].includes("定时C"), "scheduler 首块入选");
-  assert.ok(lines[4].startsWith("还有 1 项 · Alt+O"), `溢出提示 col1：${lines[4]}`);
-  assert.ok(!lines.some((line) => line.includes("任务A2")), "同 kind 剩余整块让位不截断");
-  assert.equal(geometry.overflowCount, 1);
+  assert.ok(lines[2].includes("命令B") || lines[3].includes("命令B"), "bash 首块入选（先于同 kind 剩余）");
+  assert.ok(lines.some((line) => line.includes("定时C")), "scheduler 首块入选");
+  assert.equal(lines.some((line) => line.startsWith("还有")), false, "当前预算足够容纳四个整块");
+  assert.ok(lines.some((line) => line.includes("任务A2")), "metadata压缩后预算足够，剩余同kind整块完整保留");
+  assert.equal(geometry.overflowCount, 0);
 
   // 2 行整块 vs 1 行块：整块取舍，放不下的 1 行块计 overflow 而不截 2 行块。
   const blocky = [
@@ -339,11 +336,12 @@ test("公平完整 block 预算：预算紧时每 kind 首个完整 block 优先
     row("scheduler", "scheduler:s1", "定时C"),
   ];
   const tight = layoutWith(blocky, { width: 40, terminalRows: 10 }); // 预算 4 → 可用 2
-  assert.equal(tight.lines.length, 4, "meta1 + 2 行整块 + 溢出提示");
-  assert.ok(tight.lines[1].includes("长") && tight.lines[2].includes("长"), "2 行整块完整保留");
-  assert.ok(tight.lines[3].startsWith("还有 2 项 · Alt+O"), `整块让位提示：${tight.lines[3]}`);
-  assert.ok(!tight.lines.some((line) => line.includes("命令B")), "1 行块整块计 overflow 不截 block");
-  assert.equal(tight.geometry.overflowCount, 2);
+  assert.equal(tight.lines.length, 4, "窄宽metadata三行 + overflow提示");
+  assert.ok(tight.lines[1].includes("anthropic/claude-test"), "provider/model完整保留");
+  assert.ok(tight.lines[2].includes("12.3%/1.0M"), "context完整保留");
+  assert.ok(tight.lines[3].startsWith("还有 3 项 · Alt+O"), `metadata占预算后的整块让位提示：${tight.lines[3]}`);
+  assert.ok(!tight.lines.some((line) => line.includes("命令B") || line.includes("定时C")), "活动整块让位不截block");
+  assert.equal(tight.geometry.overflowCount, 3);
 
   const roomy = layoutWith(blocky, { width: 40, terminalRows: 24 });
   assert.ok(roomy.lines.some((line) => line.includes("命令B")), "充足预算整块渲染");
@@ -391,10 +389,12 @@ test("resize：宽度变化后内容重新适配，行宽始终不越界且换�
   const narrow = layoutWith(rows, { width: 24 });
   for (const line of wide.lines) assert.ok(visibleWidth(line) <= 80);
   for (const line of narrow.lines) assert.ok(visibleWidth(line) <= 24);
-  assert.equal(wide.lines.length, 3, "宽屏：meta 2 行 + 单行条目");
-  assert.ok(wide.lines[2].includes(label) && wide.lines[2].endsWith("运行中"), "宽屏条目状态右列");
+  assert.equal(wide.lines.length, 2, "宽屏：meta 1 行 + 单行条目");
+  assert.ok(wide.lines[1].includes(label) && wide.lines[1].endsWith("运行中"), "宽屏条目状态右列");
   assert.ok(narrow.lines.length > wide.lines.length, "窄屏换行后行数增加");
-  assert.ok(narrow.lines[0].includes("/tmp/proj") && narrow.lines[0].includes("12.3%/1.0M"));
+  assert.ok(narrow.lines.some((line) => line.includes("/tmp/proj")), "窄宽仍保留cwd");
+  assert.ok(narrow.lines.some((line) => line.includes("anthropic/claude-test")), "窄宽仍保留provider/model");
+  assert.ok(narrow.lines.some((line) => line.includes("12.3%/1.0M")), "窄宽仍保留context");
   const entryLines = narrow.lines.slice(narrow.lines.findIndex((line) => line.startsWith(" ● ")));
   assert.equal(titleBody(entryLines), label, "resize 后换行不丢字");
 });
@@ -454,31 +454,31 @@ test("stale/unavailable 独立 source 状态行：旧行不进入主视图、不
     { kind: "bash_async", availability: "unavailable" },
   ];
   const { lines, geometry } = layoutWith(rows, { terminalRows: 10, sourceStatuses }); // 预算 4
-  assert.equal(lines.length, 4, "meta1 + 条目 + 两条状态行（预留槽显示首条被折叠信息行）");
+  assert.equal(lines.length, 4, "压缩meta + 条目 + 两条状态行");
   // 状态行按类型固定顺序排序：bash_async 在 scheduler 之前。
   assert.ok(lines[2].includes("⌘") && lines[2].includes("暂不可用"), "unavailable 显示独立状态行");
   assert.ok(lines[3].includes("⏱") && lines[3].includes("过期观察"), "第二条状态行按类型顺序");
   assert.equal(geometry.overflowCount, 0, "状态行不计入溢出项数");
 
   const roomy = layoutWith(rows, { terminalRows: 12, sourceStatuses });
-  assert.equal(roomy.lines.length, 5);
+  assert.equal(roomy.lines.length, 4);
   assert.ok(
-    roomy.lines[4].includes("⏱") &&
-      roomy.lines[4].includes("过期观察") &&
-      roomy.lines[4].includes("30 秒未刷新") &&
-      roomy.lines[4].includes("上次观察 2 项"),
-    `stale 行完整内容：${roomy.lines[4]}`,
+    roomy.lines[3].includes("⏱") &&
+      roomy.lines[3].includes("过期观察") &&
+      roomy.lines[3].includes("30 秒未刷新") &&
+      roomy.lines[3].includes("上次观察 2 项"),
+    `stale 行完整内容：${roomy.lines[3]}`,
   );
-  assert.equal(roomy.lines[3].indexOf("暂不可用"), PREFIX_WIDTH, "状态行文本对齐标题列");
+  assert.equal(roomy.lines[2].indexOf("暂不可用"), PREFIX_WIDTH, "状态行文本对齐标题列");
 
   const tight = layoutWith(rows, { terminalRows: 9, sourceStatuses }); // 预算 3
-  assert.equal(tight.lines.length, 3, "meta1 + 条目 + 预留槽首条被折叠状态行");
+  assert.equal(tight.lines.length, 3, "meta1 + 条目 + 首条状态行");
   assert.equal(tight.geometry.overflowCount, 0);
 });
 
 test("available 且无任务：只显示元数据行，不虚构任务/汇总/溢出", () => {
   const { lines, geometry } = layoutWith([]);
-  assert.equal(lines.length, 2, "cwd/context + provider·model/thinking 共 2 行");
+  assert.equal(lines.length, 1, "cwd + 压缩模型元信息共 1 行");
   for (const glyph of ["●", "⌘", "⏱", "◯"]) {
     assert.ok(!lines.some((line) => line.includes(glyph)), `不虚构 ${glyph} 行`);
   }

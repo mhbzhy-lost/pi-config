@@ -323,7 +323,7 @@ test("presenter 只返回 createFooter/openDetails/dispose，不 setFooter、不
     { fg: (_color, text) => text },
     {},
   );
-  assert.equal(footer.render(80).length, 3, "main footer 元数据 3 行");
+  assert.equal(footer.render(80).length, 2, "main footer 压缩元数据1行 + 条目1行");
   await fixture.view.openDetails();
   assert.equal(fixture.overlayCalls.length, 1);
   assert.equal(footer.render(80).length, DETAIL_FOOTER_MAX_ROWS, "detail footer 最多 3 行");
@@ -388,14 +388,14 @@ test("main footer：cwd/context、连续元数据行、entry 块与 selection �
   );
   const lines = footer.render(80);
   // §2 冻结合同：元数据连续渲染（不留空 activity 槽），活动区在元数据之后连续绘制。
-  assert.equal(lines.length, 4, "meta 2 行 + 2 条 entry 块");
+  assert.equal(lines.length, 3, "meta 1 行 + 2 条 entry 块");
   assert.ok(lines[0].includes("/repo") && lines[0].includes("76.1%/272k"), `cwd/context：${lines[0]}`);
   assert.ok(
-    lines[1].includes("(anthropic) claude-test") && lines[1].includes("thinking: high"),
-    `第二元数据行 provider/model 左 + thinking 右：${lines[1]}`,
+    lines[0].includes("anthropic/claude-test") && lines[0].includes("high") && lines[0].includes("76.1%/272k"),
+    `第一元数据行压缩 provider/model · thinking · context：${lines[0]}`,
   );
-  assert.ok(lines[2].includes("任务A") && lines[2].endsWith("运行中"), `entry 块状态真右列：${lines[2]}`);
-  assert.ok(lines[3].includes("命令B") && lines[3].includes("成功(exit 0)"), `entry 块：${lines[3]}`);
+  assert.ok(lines[1].includes("任务A") && lines[1].endsWith("运行中"), `entry 块状态真右列：${lines[1]}`);
+  assert.ok(lines[2].includes("命令B") && lines[2].includes("成功(exit 0)"), `entry 块：${lines[2]}`);
   assert.ok(!lines.some((line) => line.includes("›")), "未打开过详情时无选中标记");
 
   // 打开并右移到 B，关闭后主视图恢复选中 key 高亮（搜索焦点返回恢复选中 key）。

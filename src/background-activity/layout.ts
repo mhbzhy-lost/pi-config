@@ -155,9 +155,9 @@ export type ActivityFooterMeta = Readonly<{
   home?: string;
   /** 第一行右侧 context 标签（如 "12.3%/1.0M"）。 */
   contextLabel: string;
-  /** 第二元数据行左侧 provider/model 标签（如 "(anthropic) claude-…"）。 */
+  /** 第一元数据行右侧的 provider/model 压缩标签（如 "anthropic/claude-…"）。 */
   providerModelLabel: string;
-  /** 第二元数据行右侧 thinking 标签（如 "thinking: medium"）。 */
+  /** 第一元数据行右侧的 thinking 压缩标签（如 "medium"）。 */
   thinkingLabel: string;
 }>;
 
@@ -636,12 +636,12 @@ export function renderActivityLayout(input: ActivityLayoutInput): ActivityLayout
     toDisplayText(meta?.cwd),
     meta?.home === undefined ? undefined : toDisplayText(meta.home),
   );
-  const meta1 = composeMetaPair(cwdDisplay, toDisplayText(meta?.contextLabel), width);
-  const meta2 = composeMetaPair(
-    toDisplayText(meta?.providerModelLabel),
-    toDisplayText(meta?.thinkingLabel),
-    width,
-  );
+  const modelLabel = toDisplayText(meta?.providerModelLabel);
+  const thinkingLabel = toDisplayText(meta?.thinkingLabel).replace(/^thinking:\s*/i, "");
+  const contextLabel = toDisplayText(meta?.contextLabel);
+  const compactRight = [modelLabel, thinkingLabel, contextLabel].filter(Boolean).join(" · ");
+  const meta1 = composeMetaPair(cwdDisplay, compactRight, width);
+  const meta2: DisplayLine[] = [];
 
   // —— 活动区块：entry（本帧公共状态宽先于预算裁剪）→ source 状态 → recent ——
   const stateWidth = frameStateWidth(mainRows.map((row) => toEntryDisplay(row)));

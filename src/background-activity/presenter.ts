@@ -191,14 +191,15 @@ function projectActivityFooterMeta(ctx: ExtensionContext): ActivityFooterMeta {
     percent === null || percent === undefined
       ? `?/${windowLabel}`
       : `${percent.toFixed(1)}%/${windowLabel}`;
-  const providerPrefix = model?.provider ? `(${model.provider}) ` : "";
-  const providerModelLabel = model ? `${providerPrefix}${model.id ?? "no-model"}` : "no-model";
+  const provider = model?.provider ?? "no-provider";
+  const modelId = model?.id ?? "no-model";
+  const providerModelLabel = `${provider}/${modelId}`;
   return {
     cwd: typeof ctx.cwd === "string" ? ctx.cwd : "",
     home: typeof process.env.HOME === "string" ? process.env.HOME : undefined,
     contextLabel,
     providerModelLabel,
-    thinkingLabel: `thinking: ${ctx.thinkingLevel ?? "off"}`,
+    thinkingLabel: `${ctx.thinkingLevel ?? "off"}`,
   };
 }
 
