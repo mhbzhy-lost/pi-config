@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, writeFile, readdir } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile, readdir, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +12,7 @@ for (const scenario of ['ask','interview','progress','timeout','managed','stop',
  const repo=resolve(import.meta.dirname,'..'); const host=process.env.PI_TEST_CODING_AGENT_ROOT;
  const root=await mkdtemp(join(tmpdir(),'joint-contact-e2e-'));const agent=join(root,'agent');const cwd=join(root,'cwd');const capture=join(root,'capture.jsonl');
  await mkdir(join(agent,'agents'),{recursive:true});await mkdir(cwd);await mkdir(join(root,'home'));await mkdir(join(root,'tmp'));
+ await mkdir(join(agent,'extensions'),{recursive:true});await symlink(join(repo,'pi/extensions/agents-shared.ts'),join(agent,'extensions/agents-shared.ts'));
  if(scenario==='managed') {
    execFileSync('git',['init','-b','main'],{cwd,stdio:'ignore'});execFileSync('git',['config','user.email','fixture@example.invalid'],{cwd});execFileSync('git',['config','user.name','隔离测试'],{cwd});
    await writeFile(join(cwd,'base.txt'),'fixture\n');execFileSync('git',['add','base.txt'],{cwd});execFileSync('git',['commit','-m','test(fixture): 创建隔离基线'],{cwd,stdio:'ignore'});
@@ -34,7 +35,7 @@ for (const scenario of ['ask','interview','progress','timeout','managed','stop',
  let spawnResult;
  const until=Date.now()+45000;
  while(Date.now()<until){
-  spawnResult=records.find(r=>r.type==='tool_execution_end'&&r.toolName==='subagent')?.result;
+  spawnResult=records.find(r=>r.type==='tool_execution_end'&&r.toolName==='subagent_start')?.result;
   if(spawnResult?.isError)break;
   if(spawnResult?.details?.asyncDir){
     try{const s=JSON.parse(await readFile(join(spawnResult.details.asyncDir,'status.json'),'utf8'));if(!['running','queued'].includes(s.state))break;}catch{}
@@ -50,7 +51,7 @@ for (const scenario of ['ask','interview','progress','timeout','managed','stop',
  assert.equal(status.steps[0].model,'joint-contact/fixture','实际runner model，不用请求modelSelection替代');
  assert.equal(events.find(e=>e.child&&e.type==='identities')?.allEqual,true,'child内部四core严格同identity');assert.equal(events.find(e=>!e.child&&e.type==='identities')?.allEqual,true,'parent内部四core严格同identity');
  const actual=events.find(e=>e.child&&e.type==='start').actualModel;assert.deepEqual(actual,{provider:'joint-contact',id:'fixture',api:'joint-contact'});
- assert.deepEqual(new Set(status.runtimeAcknowledgedExtensions?.ids), new Set(['root-session-owner','integration-queue']), 'C11 required实际runtime ACK缺失');
+ assert.deepEqual(new Set(status.runtimeAcknowledgedExtensions?.ids), new Set(['agents-shared','root-session-owner','integration-queue']), 'C11 required实际runtime ACK缺失');
 if(scenario==='child-mcp') {
  const childStart=events.find(e=>e.child&&e.type==='start');assert.ok(childStart.tools.some(t=>t.name==='codemode'));assert.ok(!childStart.tools.some(t=>t.name==='mcp__fixture__forbidden'));
  const output=await readFile(status.outputFile,'utf8');assert.match(output,/child-mcp-allowed/);assert.match(output,/denied:/);const calls=(await readFile(join(root,'child-mcp.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);assert.deepEqual(calls.filter(c=>c.type==='call').map(c=>c.name),['echo']);return;
@@ -63,24 +64,32 @@ if(scenario==='empty') {const childStart=events.find(e=>e.child&&e.type==='start
  if(scenario==='managed') { assert.ok(events.find(e=>e.child&&e.type==='root-owner-ready'),'managed child必须通过真实grant建立root.subscribe，不能只是ACK加载'); }
  const request=events.findLast(e=>!e.child&&e.message?.customType==='subagent_supervisor_request');
  assert.ok(request,'父message_end未收到实际阻塞请求：'+JSON.stringify({status,events,stderr}));
- if(scenario==='stop') { assert.notEqual(status.state,'complete','stop不能被误标成功');const f=join(root,'workspace/supervisor-control');const persisted=await Promise.all((await readdir(f)).filter(x=>x.endsWith('.json')).map(async x=>JSON.parse(await readFile(join(f,x),'utf8')).value));assert.equal(persisted.flatMap(x=>x.requests).find(x=>x.requestId===request.message.details.requestId).state,'failed','stop不能留下幽灵pending');assert.equal(events.some(e=>!e.child&&e.message?.toolName==='subagent_supervisor'&&e.message.details?.replyTo),false);return; }
+ if(scenario==='stop') { assert.notEqual(status.state,'complete','stop不能被误标成功');const f=join(root,'workspace/supervisor-control');const persisted=await Promise.all((await readdir(f)).filter(x=>x.endsWith('.json')).map(async x=>JSON.parse(await readFile(join(f,x),'utf8')).value));assert.equal(persisted.flatMap(x=>x.requests).find(x=>x.requestId===request.message.details.requestId).state,'failed','stop不能留下幽灵pending');assert.equal(events.some(e=>!e.child&&e.message?.toolName==='supervisor_request_reply'&&e.message.details?.replyTo),false);return; }
  if(scenario==='invalid-reply') {
-   const replies=events.filter(e=>!e.child&&e.message?.toolName==='subagent_supervisor');assert.equal(replies.length,3);assert.ok(replies.every(e=>e.message.isError===true&&e.message.details.code==='SUPERVISOR_REQUEST_NOT_PENDING'));assert.equal(childResult.message.isError,true);return;
+   const replies=events.filter(e=>!e.child&&e.message?.toolName==='supervisor_request_reply');assert.equal(replies.length,3);assert.ok(replies.every(e=>e.message.isError===true&&e.message.details.code==='SUPERVISOR_REQUEST_NOT_PENDING'));assert.equal(childResult.message.isError,true);return;
  }
  if(scenario==='timeout') {
    assert.equal(childResult.message.isError,true); assert.match(childResult.message.content[0].text,/Timed out/);
    const folder=join(root,'workspace/supervisor-control');const files=await readdir(folder);const states=await Promise.all(files.filter(x=>x.endsWith('.json')).map(async x=>JSON.parse(await readFile(join(folder,x),'utf8')).value));
    assert.equal(states.flatMap(s=>s.requests).find(r=>r.requestId===request.message.details.requestId).state,'expired','真实native timeout不得保留20分钟幽灵pending');return;
  }
- const pending=events.find(e=>!e.child&&e.message?.toolName==='subagent_supervisor'&&e.message.details?.pending?.some(r=>r.id===request.message.details.requestId));assert.ok(pending,'native pending必须包含同UUID');
- const reply=events.find(e=>!e.child&&e.message?.toolName==='subagent_supervisor'&&e.message.details?.replyTo===request.message.details.requestId);assert.ok(reply,'父reply缺失');assert.equal(reply.message.isError,false,JSON.stringify(reply.message));
+ const pending=events.find(e=>!e.child&&e.message?.toolName==='supervisor_request_pending'&&e.message.details?.pending?.some(r=>r.id===request.message.details.requestId));assert.ok(pending,'native pending必须包含同UUID');
+ const reply=events.find(e=>!e.child&&e.message?.toolName==='supervisor_request_reply'&&e.message.details?.replyTo===request.message.details.requestId);assert.ok(reply,'父reply缺失');assert.equal(reply.message.isError,false,JSON.stringify(reply.message));
  const consumed=events.find(e=>e.child&&e.message?.toolName==='contact_supervisor'&&e.message.details?.requestId===request.message.details.requestId);assert.ok(consumed,'actual detached child waiter没有消费');assert.equal(consumed.message.isError,false);assert.match(consumed.message.content.map(c=>c.text??'').join('\n'),/joint-reply-nonce/);
  if(scenario==='interview') assert.deepEqual(consumed.message.details.structuredReply,{answer:'joint-reply-nonce'});
- if(scenario==='duplicate') {const replies=events.filter(e=>!e.child&&e.message?.toolName==='subagent_supervisor'&&!e.message.details?.pending);assert.equal(replies.length,2);assert.equal(replies.filter(e=>e.message.isError===false).length,1);assert.equal(replies.find(e=>e.message.isError===true).message.details.code,'SUPERVISOR_DELIVERY_IDEMPOTENT');}
+ if(scenario==='duplicate') {const replies=events.filter(e=>!e.child&&e.message?.toolName==='supervisor_request_reply'&&!e.message.details?.pending);assert.equal(replies.length,2);assert.equal(replies.filter(e=>e.message.isError===false).length,1);assert.equal(replies.find(e=>e.message.isError===true).message.details.code,'SUPERVISOR_DELIVERY_IDEMPOTENT');}
  if(['repeat-question','two-asks'].includes(scenario)){const asks=events.filter(e=>!e.child&&e.message?.customType==='subagent_supervisor_request');const consumedAll=events.filter(e=>e.child&&e.message?.toolName==='contact_supervisor');assert.equal(asks.length,2);assert.equal(consumedAll.length,2);assert.ok(consumedAll.every(e=>e.message.isError===false));assert.notEqual(asks[0].message.details.requestId,asks[1].message.details.requestId);}
  assert.equal(status.state,'complete',JSON.stringify(status));
  const folder=join(root,'workspace/supervisor-control');const files=await readdir(folder);const states=await Promise.all(files.filter(x=>x.endsWith('.json')).map(async x=>JSON.parse(await readFile(join(folder,x),'utf8')).value));
- const receipt=states.flatMap(s=>s.receipts).find(r=>r.requestId===request.message.details.requestId);const authoritative=states.flatMap(s=>s.requests).find(r=>r.requestId===request.message.details.requestId);
+ let receipt, authoritative;
+ const reconcileDeadline = Date.now() + 5000;
+ while (Date.now() < reconcileDeadline) {
+  const currentStates = await Promise.all((await readdir(folder)).filter(x=>x.endsWith('.json')).map(async x=>JSON.parse(await readFile(join(folder,x),'utf8')).value));
+  receipt = currentStates.flatMap(s=>s.receipts).find(r=>r.requestId===request.message.details.requestId);
+  authoritative = currentStates.flatMap(s=>s.requests).find(r=>r.requestId===request.message.details.requestId);
+  if (receipt?.consumed === true && authoritative?.state === 'replied') break;
+  await delay(50);
+ }
  assert.equal(typeof authoritative.correlation?.childSessionId,'string','注册时缺canonical child session binding');assert.equal(authoritative.correlation.toolCallId,consumed.message.toolCallId);assert.equal(authoritative.correlation.reason,consumed.message.details.reason);
  assert.equal(receipt.status,'delivered','C6: 实际消费后receipt仍queued');assert.equal(receipt.consumed,true);assert.equal(authoritative.state,'replied');
 });
@@ -93,6 +102,7 @@ test('C8 fresh parent稳定拒绝旧关闭generation的ask，不误写消费或�
  const repo=resolve(import.meta.dirname,'..'),host=process.env.PI_TEST_CODING_AGENT_ROOT,root=await mkdtemp(join(tmpdir(),'joint-contact-restart-'));
  const agent=join(root,'agent'),cwd=join(root,'cwd'),capture=join(root,'capture.jsonl'),provider=fileURLToPath(new URL('./fixtures/joint-upgrade/contact-provider.mjs',import.meta.url));
  await mkdir(join(agent,'agents'),{recursive:true});await mkdir(cwd);await mkdir(join(root,'home'));await mkdir(join(root,'tmp'));
+ await mkdir(join(agent,'extensions'),{recursive:true});await symlink(join(repo,'pi/extensions/agents-shared.ts'),join(agent,'extensions/agents-shared.ts'));
  for(const name of ['delegate','executor','reviewer'])await writeFile(join(agent,`agents/${name}.md`),`---\nname: ${name}\ndescription: fixture\nmodel: joint-contact/fixture\ntools: read,contact_supervisor\nextensions: ${provider}\n---\nfixture\n`);
  await writeFile(join(root,'trace.jsonl'),'',{mode:0o600});
  const id='restart-'+process.pid;let env={PATH:dirname(process.execPath)+':/usr/bin:/bin',HOME:join(root,'home'),TMPDIR:join(root,'tmp'),PI_CODING_AGENT_DIR:agent,PI_CODING_WORKSPACE_DIR:join(root,'state'),PI_CODING_AGENT_SESSION_DIR:join(root,'sessions'),PI_PACKAGE_DIR:host,PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT:host,PI_OFFLINE:'1',PI_TELEMETRY:'0',PI_INTERCOM_ASK_TIMEOUT_MS:'30000',PI_SUBAGENT_DISPATCH_TRACE_FILE:join(root,'trace.jsonl'),JOINT_CONTACT_CAPTURE:capture,JOINT_CONTACT_CASE:'restart-first'};
@@ -104,12 +114,12 @@ test('C8 fresh parent稳定拒绝旧关闭generation的ask，不误写消费或�
  current.p.stdin.end();await current.closed;
  env={...env,JOINT_CONTACT_CASE:'ask'};current=launch();current.p.stdin.write(JSON.stringify({id:'second',type:'prompt',message:'JOINT_PARENT_RECOVER'})+'\n');
  const end=Date.now()+10000;let messages=[];
- while(Date.now()<end){try{messages=(await readFile(capture,'utf8')).trim().split('\n').map(JSON.parse);}catch{}if(messages.some(e=>!e.child&&e.message?.toolName==='subagent_supervisor'&&e.message.isError===true))break;await delay(50);}
- const blocked=messages.find(e=>!e.child&&e.message?.toolName==='subagent_supervisor'&&e.message.isError===true);assert.ok(blocked,'fresh必须稳定拒绝旧请求');
+ while(Date.now()<end){try{messages=(await readFile(capture,'utf8')).trim().split('\n').map(JSON.parse);}catch{}if(messages.some(e=>!e.child&&e.message?.toolName==='supervisor_request_reply'&&e.message.isError===true))break;await delay(50);}
+ const blocked=messages.find(e=>!e.child&&e.message?.toolName==='supervisor_request_reply'&&e.message.isError===true);assert.ok(blocked,'fresh必须稳定拒绝旧请求');
  const states=await Promise.all((await readdir(join(root,'state/supervisor-control'))).filter(x=>x.endsWith('.json')).map(async x=>JSON.parse(await readFile(join(root,'state/supervisor-control',x),'utf8')).value));
  assert.equal(states.flatMap(s=>s.requests).find(r=>r.requestId===request.message.details.requestId).state,'failed');
  assert.equal(states.flatMap(s=>s.receipts).some(r=>r.consumed===true),false);
- assert.equal(messages.filter(e=>!e.child&&e.message?.toolName==='subagent_supervisor'&&e.message.details?.replyTo).length,0,'旧generation不得投递');
+ assert.equal(messages.filter(e=>!e.child&&e.message?.toolName==='supervisor_request_reply'&&e.message.details?.replyTo).length,0,'旧generation不得投递');
  t.diagnostic('fresh-parent证据目录：'+root);
 });
 
@@ -133,6 +143,7 @@ test('C10两个fresh父Host共享native临时通路，同名child与reply UUID�
 for(const lifecycle of ['root-close','lease-expire']) test('C9 managed真实root.subscribe生命周期 '+lifecycle,{timeout:100000},async t=>{
  const repo=resolve(import.meta.dirname,'..'),host=process.env.PI_TEST_CODING_AGENT_ROOT,root=await mkdtemp(join(tmpdir(),'joint-root-lifecycle-'));const agent=join(root,'agent'),cwd=join(root,'repo'),capture=join(root,'capture.jsonl'),provider=join(repo,'test/fixtures/joint-upgrade/contact-provider.mjs');
  await mkdir(join(agent,'agents'),{recursive:true});await mkdir(cwd);await mkdir(join(root,'tmp'));await mkdir(join(root,'home'));
+ await mkdir(join(agent,'extensions'),{recursive:true});await symlink(join(repo,'pi/extensions/agents-shared.ts'),join(agent,'extensions/agents-shared.ts'));
  execFileSync('git',['init','-b','main'],{cwd,stdio:'ignore'});execFileSync('git',['config','user.name','隔离测试'],{cwd});execFileSync('git',['config','user.email','fixture@example.invalid'],{cwd});await writeFile(join(cwd,'base.txt'),'base\n');execFileSync('git',['add','base.txt'],{cwd});execFileSync('git',['commit','-m','test(fixture): 创建生命周期基线'],{cwd,stdio:'ignore'});
  for(const name of ['delegate','executor','reviewer'])await writeFile(join(agent,`agents/${name}.md`),`---\nname: ${name}\ndescription: fixture\nmodel: joint-contact/fixture\ntools: read,contact_supervisor\nextensions: ${provider}\n---\nfixture\n`);
  const env={PATH:dirname(process.execPath)+':/usr/bin:/bin',HOME:join(root,'home'),TMPDIR:join(root,'tmp'),PI_CODING_AGENT_DIR:agent,PI_CODING_WORKSPACE_DIR:join(root,'state'),PI_PACKAGE_DIR:host,PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT:host,PI_OFFLINE:'1',PI_TELEMETRY:'0',PI_INTERCOM_ASK_TIMEOUT_MS:'90000',JOINT_CONTACT_CASE:lifecycle,JOINT_CONTACT_CAPTURE:capture};
@@ -140,7 +151,7 @@ for(const lifecycle of ['root-close','lease-expire']) test('C9 managed真实root
  t.after(async()=>{if(parent.exitCode===null)parent.kill('SIGKILL');await closed;if(runner){try{process.kill(runner.pid,'SIGTERM');}catch{}}});parent.stdin.write(JSON.stringify({id:'start',type:'prompt',message:'JOINT_LIFECYCLE'})+'\n');
  const readyDeadline=Date.now()+15000;let events=[];
  while(Date.now()<readyDeadline){try{events=(await readFile(capture,'utf8')).trim().split('\n').map(JSON.parse);}catch{}if(events.some(e=>e.child&&e.type==='root-owner-ready')&&events.some(e=>!e.child&&e.message?.customType==='subagent_supervisor_request'))break;await delay(50);}
- assert.ok(events.some(e=>e.child&&e.type==='root-owner-ready'),err+out.slice(-1500));runner=events.find(e=>e.child&&e.type==='start');assert.ok(runner);const handle=events.find(e=>!e.child&&e.message?.toolName==='subagent').message.details;
+ assert.ok(events.some(e=>e.child&&e.type==='root-owner-ready'),err+out.slice(-1500));runner=events.find(e=>e.child&&e.type==='start');assert.ok(runner);const handle=events.find(e=>!e.child&&e.message?.toolName==='subagent_start').message.details;
  const alive=()=>{try{process.kill(runner.pid,0);return true;}catch(e){if(e.code==='ESRCH')return false;throw e;}};
  if(lifecycle==='root-close'){parent.stdin.end();await closed;await writeFile(join(root,'parent-stderr.txt'),err);await writeFile(join(root,'parent-events.txt'),out);t.diagnostic(root+' '+err.slice(-3500));}
  else {parent.kill('SIGKILL');await closed;await delay(500);assert.equal(alive(),true,'有效lease的EOF不应立即杀child');}

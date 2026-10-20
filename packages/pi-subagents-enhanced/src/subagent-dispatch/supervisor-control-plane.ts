@@ -219,7 +219,7 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
     const stateBody = { schemaVersion: "supervisor-state.v2", rootSessionId: root,
       requests: [...requests.values()].filter(request => request.rootSessionId === root).map(migrateRequest),
       receipts: [...receipts.values()].filter(receipt => receipt.rootSessionId === root),
-      replyPayloads: [...replyPayloads].filter(payload => payload.startsWith(`${root}:`)) };
+      replyPayloads: [...replyPayloads].filter(payload => payload.startsWith(`${root}:`) || payload.startsWith(`supervisor-reply-guard.v2:${root}:`)) };
     const value = { ...stateBody, stateDigest: stateDigest(stateBody) };
     for (let attempt = 0; attempt < 8; attempt++) {
       const prior = await storage.read(stateKey(root));
@@ -245,7 +245,7 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
     try {
       for (const [key, r] of requests) if (r.rootSessionId === root) requests.delete(key);
       for (const [key, r] of receipts) if (r.rootSessionId === root) receipts.delete(key);
-      for (const payload of replyPayloads) if (payload.startsWith(root + ':')) replyPayloads.delete(payload);
+      for (const payload of replyPayloads) if (payload.startsWith(`${root}:`) || payload.startsWith(`supervisor-reply-guard.v2:${root}:`)) replyPayloads.delete(payload);
       loadedRoots.delete(root); lockedRoots.add(root);
       return await operation();
     } finally { lockedRoots.delete(root); await release(); }

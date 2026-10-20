@@ -18,6 +18,7 @@ import { createSupervisorAdapter, createSupervisorTool } from "./supervisor-adap
 import { createSubagentOperationTools } from "./operation-tools.ts";
 import { createSupervisorOperationTools } from "./supervisor-operation-tools.ts";
 import { supervisorCanonicalDigest, type SupervisorDiagnosticsRequestV1, type SupervisorDiagnosticsV1 } from "./supervisor-control-plane.ts";
+import { createSupervisorIntentId } from "./supervisor-intent-id.ts";
 import { findGoalRunCoordinator } from "./root-broker-registry.ts";
 import { resolveModelCandidates, resolveModelSelection, type ModelSelectionWarning } from "./model-selection.ts";
 import { createRunAuthorization } from "./run-authorization.ts";
@@ -1498,7 +1499,7 @@ async function executeControl(input, rpc, supervisorControlPlane, toolCallId, di
       const childIndex = Number.isSafeInteger(params.index) && params.index >= 0 ? params.index : undefined;
       const decision = await supervisorControlPlane.resolveSupervisorControl({
         schemaVersion: "supervisor-control-intent.v2",
-        intentId: toolCallId, runId: target.runId,
+        intentId: createSupervisorIntentId({ hostToolCallId: toolCallId, kind: "steer", rootSessionId: unownedRequest ? unownedRequest.rootSessionId : owner.rootSessionId, runId: target.runId }), runId: target.runId,
         rootSessionId: unownedRequest ? unownedRequest.rootSessionId : owner.rootSessionId,
         ownerGeneration: unownedRequest ? unownedRequest.ownerGeneration : owner.ownerGeneration, kind: "steer",
         ...(childIndex === undefined ? {} : { childIndex }),
@@ -1587,7 +1588,7 @@ function createControlledSupervisorAdapter(adapter, supervisorControlPlane, regi
         : undefined;
       const intent = {
         schemaVersion: "supervisor-control-intent.v2",
-        intentId: toolCallId, runId: request?.runId,
+        intentId: createSupervisorIntentId({ hostToolCallId: toolCallId, kind: "reply", rootSessionId: request.rootSessionId, runId: request.runId }), runId: request?.runId,
         rootSessionId: request?.rootSessionId, ownerGeneration: request?.ownerGeneration, kind: "reply",
         ...(replyChildIndex === undefined ? {} : { childIndex: replyChildIndex }),
         requestId: params.replyTo, requestGeneration: request?.requestGeneration,

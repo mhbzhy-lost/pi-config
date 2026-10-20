@@ -93,15 +93,15 @@ for (const kind of ['steer', 'reply']) for (const failure of ['isError', 'throw'
   const tool = h.tools.find(tool => tool.name === (kind === 'reply' ? 'supervisor_request_reply' : 'subagent_run_steer'));
   assert.ok(tool, '当前独立工具必须已注册');
   const args = kind === 'reply' ? { replyTo: 'ask-0', message: 'approved' } : { runId: 'run', index: 0, message: 'continue' };
-  if (failure === 'throw' && kind === 'reply') await assert.rejects(tool.execute('first', args, undefined, undefined, h.ctx), /fixture failure/);
+  if (failure === 'throw' && kind === 'reply') await assert.rejects(tool.execute('call_first|fc_first', args, undefined, undefined, h.ctx), /fixture failure/);
   else {
     // 原typed subagent工具将异常投影为失败结果；supervisor adapter则保留原异常。
-    const result = await tool.execute('first', args, undefined, undefined, h.ctx);
+    const result = await tool.execute('call_first|fc_first', args, undefined, undefined, h.ctx);
     assert.equal(result.isError, true);
     if (kind === 'reply') assert.equal(result, native);
     if (failure === 'throw') assert.match(JSON.stringify(result.content), /fixture failure/);
   }
   const diagnostics = await h.plane.readDiagnostics('root'); assert.equal(diagnostics.receipts[0].status, 'failed'); assert.equal(diagnostics.receipts[0].consumed, false);
-  fails = false; assert.notEqual((await tool.execute('retry', args, undefined, undefined, h.ctx)).isError, true);
+  fails = false; assert.notEqual((await tool.execute('call_retry|fc_retry', args, undefined, undefined, h.ctx)).isError, true);
   assert.equal((await h.plane.readDiagnostics('root')).receipts[0].status, 'queued');
 });
