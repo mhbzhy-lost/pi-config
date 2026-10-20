@@ -5,6 +5,14 @@ import { createTypedSubagentExtension } from "../packages/pi-subagents-enhanced/
 import { registerBuiltinAgentsViaEvents } from "../packages/pi-subagents-enhanced/src/compat/pi-subagents-0.75.ts";
 import { assertRunAuthorization } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/run-authorization.ts";
 
+// S4 之后模型面是 14 个独立工具，`tools[0]` 位置依赖会命中 subagent_roster。
+// 这里按工具名解析，roster 只接受空对象，派发字段一律走 subagent_start。
+function operationTool(tools, name) {
+  const tool = tools.find((candidate) => candidate.name === name);
+  assert.ok(tool, `harness 未注册 ${name}`);
+  return tool;
+}
+
 function authorizationRegistrar(registrations) {
   return (authorization) => {
     assertRunAuthorization(authorization);
@@ -36,7 +44,7 @@ test("real repository admission list exposes all three trusted profiles without 
   const admission = registerBuiltinAgentsViaEvents({ pi, agentDir: new URL("../pi/", import.meta.url).pathname });
   rpc.ping = async () => { throw new Error("list must not call RPC"); };
   createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, discoverAgents: admission.discoverAgents });
-  const result = await tools[0].execute("real-list", { action: "list" }, undefined, undefined, {
+  const result = await operationTool(tools, "subagent_roster").execute("real-list", {}, undefined, undefined, {
     cwd: "/repo", modelRegistry: { getAvailable() { throw new Error("list must not call registry"); } },
   });
   try {
@@ -63,7 +71,7 @@ test("repository admission list exposes trusted profiles without RPC or registry
       ] };
     },
   });
-  const result = await tools[0].execute("list", { action: "list" }, undefined, undefined, {
+  const result = await operationTool(tools, "subagent_roster").execute("list", {}, undefined, undefined, {
     cwd: "/repo",
     modelRegistry: { getAvailable() { throw new Error("list must not call registry"); } },
   });
@@ -83,7 +91,7 @@ test("profile omission selects first currently available candidate in generic le
     cleanupStore: {},
     discoverAgents() { return { admission: "repository-configured", agents: [{ name: "reviewer", models: ["pool/astra", "direct/astra", "pool/sol"] }] }; },
   });
-  const result = await tools[0].execute("profile-default", { agent: "reviewer", title: "Review", task: "Inspect." }, undefined, undefined, {
+  const result = await operationTool(tools, "subagent_start").execute("profile-default", { agent: "reviewer", title: "Review", task: "Inspect." }, undefined, undefined, {
     cwd: "/repo",
     modelRegistry: { getAvailable() { return [
       { provider: "pool", id: "sol", api: "openai-completions" },
@@ -103,7 +111,7 @@ test("profile omission selects first currently available candidate in coding lea
     cleanupStore: {},
     discoverAgents() { return { admission: "repository-configured", agents: [{ name: "reviewer", models: ["pool/astra", "pool/sol"] }] }; },
   });
-  const result = await tools[0].execute("coding-profile-default", {
+  const result = await operationTool(tools, "subagent_start").execute("coding-profile-default", {
     title: "Review", agent: "reviewer", task: "Inspect.",
     writePaths: ["test/subagent-model-selection.integration.mjs"],
     acceptance: { criteria: ["Inspect the dispatch contract."] },
@@ -129,7 +137,7 @@ test(`F1 ${kind} 首缺时 leaf 选择次位候选并报告 agent-default`, asyn
     rpc, cleanupStore: {},
     discoverAgents() { return { admission: "repository-configured", agents: [{ name: "reviewer", models: ["pool/first", "pool/second"] }] }; },
   });
-  const result = await tools[0].execute("profile-second", input, undefined, undefined, {
+  const result = await operationTool(tools, "subagent_start").execute("profile-second", input, undefined, undefined, {
     cwd: "/repo",
     modelRegistry: { getAvailable() { return [{ provider: "pool", id: "second", api: "openai-completions" }]; } },
   });
@@ -148,7 +156,7 @@ test(`F1 ${kind} 候选全缺在 RPC、workspace、title 副作用前失败`, as
     titleRegistry: { prepare() { effects.push("title"); } },
     discoverAgents() { return { admission: "repository-configured", agents: [{ name: "reviewer", models: ["pool/first", "pool/second"] }] }; },
   });
-  const result = await tools[0].execute("profile-none", { ...input, worktree: true }, undefined, undefined, {
+  const result = await operationTool(tools, "subagent_start").execute("profile-none", { ...input, worktree: true }, undefined, undefined, {
     cwd: "/repo", modelRegistry: { getAvailable() { return []; } },
   });
   assert.equal(result.isError, true);
@@ -162,7 +170,7 @@ test(`F1 ${kind} 无 profile 不访问 registry 且 leaf 省略 model`, async ()
   createTypedSubagentExtension(pi, {
     rpc, cleanupStore: {}, discoverAgents() { return { admission: "repository-configured", agents: [{ name: "reviewer" }] }; },
   });
-  const result = await tools[0].execute("profile-absent", input, undefined, undefined, { cwd: "/repo", modelRegistry: { getAvailable() { throw new Error("无 profile 不应访问 registry"); } } });
+  const result = await operationTool(tools, "subagent_start").execute("profile-absent", input, undefined, undefined, { cwd: "/repo", modelRegistry: { getAvailable() { throw new Error("无 profile 不应访问 registry"); } } });
   assert.equal(result.isError, false, result.content[0]?.text);
   assert.equal(Object.hasOwn(JSON.parse(calls[0].script.match(/, (.*)\);$/)[1]), "model"), false);
   assert.deepEqual(result.details.modelSelection, { source: "default" });
@@ -173,7 +181,7 @@ test(`F1 ${kind} explicit model 优先于 profile 默认首位`, async () => {
   createTypedSubagentExtension(pi, {
     rpc, cleanupStore: {}, discoverAgents() { return { admission: "repository-configured", agents: [{ name: "reviewer", models: ["pool/first", "pool/second"] }] }; },
   });
-  const result = await tools[0].execute("profile-explicit", { ...input, model: "pool/second" }, undefined, undefined, {
+  const result = await operationTool(tools, "subagent_start").execute("profile-explicit", { ...input, model: "pool/second" }, undefined, undefined, {
     cwd: "/repo", modelRegistry: { getAvailable() { return [{ provider: "pool", id: "first", api: "openai-completions" }, { provider: "pool", id: "second", api: "openai-completions" }]; } },
   });
   assert.equal(result.isError, false, result.content[0]?.text);
@@ -188,7 +196,7 @@ test(`F1 ${kind} 启动错误只报告失败，不换模再次 spawn`, async () 
   createTypedSubagentExtension(pi, {
     rpc, cleanupStore: {}, discoverAgents() { return { admission: "repository-configured", agents: [{ name: "reviewer", models: ["pool/first", "pool/second"] }] }; },
   });
-  const result = await tools[0].execute("provider-error", input, undefined, undefined, {
+  const result = await operationTool(tools, "subagent_start").execute("provider-error", input, undefined, undefined, {
     cwd: "/repo", modelRegistry: { getAvailable() { return [{ provider: "pool", id: "first", api: "openai-completions" }, { provider: "pool", id: "second", api: "openai-completions" }]; } },
   });
   assert.equal(result.isError, true);
@@ -202,7 +210,7 @@ test(`F1 ${kind} 启动错误只报告失败，不换模再次 spawn`, async () 
 test("profile omission preserves zero-spawn failure for virtual candidates", async () => {
   const { pi, rpc, calls, tools } = harness();
   createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, discoverAgents: () => ({ admission: "repository-configured", agents: [{ name: "reviewer", models: ["fixture/virtual"] }] }) });
-  const result = await tools[0].execute("profile-virtual", { agent: "reviewer", title: "Review", task: "Inspect." }, undefined, undefined, {
+  const result = await operationTool(tools, "subagent_start").execute("profile-virtual", { agent: "reviewer", title: "Review", task: "Inspect." }, undefined, undefined, {
     cwd: "/repo", modelRegistry: { getAvailable: () => [{ provider: "fixture", id: "virtual", api: "pi-virtual" }] },
   });
   assert.equal(result.details.code, "VIRTUAL_MODEL_UNSUPPORTED_BY_DISPATCH");
@@ -218,12 +226,12 @@ test("generic bare model uses sorted global catalog warning and normalized reque
     resolveRootSessionId: () => "root-session", resolveCanonicalOrigin: async () => "/repo", inspectWorkspaceSource: async () => ({ originRef: "refs/heads/main", baseCommit: "b".repeat(40) }), registerAuthorizedRun: authorizationRegistrar(registrations),
   });
   const ctx = { cwd: "/repo", sessionManager: {}, modelRegistry: { getAvailable() { return [{ provider: "openai", id: "gpt-5.6-sol", api: "openai-completions" }, { provider: "codex-pool", id: "gpt-5.6-sol", api: "openai-completions" }, { provider: "codex-pool", id: "gpt-5.6-luna", api: "openai-completions" }]; } } };
-  const result = await tools[0].execute("generic", { agent: "reviewer", title: "Review", task: "Inspect.", model: " gpt-5.6-sol ", worktree: true }, undefined, undefined, ctx);
+  const result = await operationTool(tools, "subagent_start").execute("generic", { agent: "reviewer", title: "Review", task: "Inspect.", model: " gpt-5.6-sol ", worktree: true }, undefined, undefined, ctx);
   assert.equal(result.isError, false); assert.match(result.content[0].text, /Warning: requested model gpt-5\.6-sol matched codex-pool\/gpt-5\.6-sol/);
   assert.deepEqual(result.details.modelSelection, { requestedModel: "gpt-5.6-sol", resolvedModel: "codex-pool/gpt-5.6-sol", source: "global-catalog" });
   assert.deepEqual(result.details.warnings, [{ code: "MODEL_MATCH_USED_GLOBAL_CATALOG", agent: "reviewer", requestedModel: "gpt-5.6-sol", resolvedModel: "codex-pool/gpt-5.6-sol" }]);
   assert.equal(JSON.parse(calls[0].script.match(/, (.*)\);$/)[1]).model, "codex-pool/gpt-5.6-sol");
-  const second = await tools[0].execute("generic-qualified", { agent: "reviewer", title: "Review", task: "Inspect.", model: "codex-pool/gpt-5.6-sol", worktree: true }, undefined, undefined, ctx);
+  const second = await operationTool(tools, "subagent_start").execute("generic-qualified", { agent: "reviewer", title: "Review", task: "Inspect.", model: "codex-pool/gpt-5.6-sol", worktree: true }, undefined, undefined, ctx);
   assert.equal(second.isError, false);
   assert.equal(Object.hasOwn(second.details, "warnings"), false);
   assert.notEqual(requests[0].contractHash, requests[1].contractHash);
@@ -238,9 +246,9 @@ test("model misses and undiscovered generic targets have no workspace, Goal, RPC
   rpc.ping = async () => { effects += 1; return {}; };
   createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, discoverAgents() { return { agents: [{ name: "reviewer", models: [] }] }; }, workspaceService: { ensureAllocated() { effects += 1; } } });
   const ctx = { cwd: "/repo", modelRegistry: { getAvailable() { return []; } } };
-  const result = await tools[0].execute("miss", { agent: "reviewer", title: "Review", task: "Inspect.", model: "missing", worktree: true }, undefined, undefined, ctx);
-  const undiscovered = await tools[0].execute("undiscovered", { agent: "absent", title: "Absent", task: "Inspect.", model: "missing", worktree: true }, undefined, undefined, ctx);
-  const undiscoveredDefault = await tools[0].execute("undiscovered-default", { agent: "absent", title: "Absent", task: "Inspect.", worktree: true }, undefined, undefined, ctx);
+  const result = await operationTool(tools, "subagent_start").execute("miss", { agent: "reviewer", title: "Review", task: "Inspect.", model: "missing", worktree: true }, undefined, undefined, ctx);
+  const undiscovered = await operationTool(tools, "subagent_start").execute("undiscovered", { agent: "absent", title: "Absent", task: "Inspect.", model: "missing", worktree: true }, undefined, undefined, ctx);
+  const undiscoveredDefault = await operationTool(tools, "subagent_start").execute("undiscovered-default", { agent: "absent", title: "Absent", task: "Inspect.", worktree: true }, undefined, undefined, ctx);
   assert.equal(result.details.code, "MODEL_NOT_AVAILABLE");
   assert.equal(undiscovered.details.code, "UNKNOWN_AGENT");
   assert.equal(undiscoveredDefault.details.code, "UNKNOWN_AGENT");
@@ -257,7 +265,7 @@ test("repository admission rejection preserves AGENT_ADMISSION_UNAVAILABLE befor
     workspaceService: { ensureAllocated() { effects += 1; } },
     titleRegistry: { prepare() { effects += 1; } },
   });
-  const result = await tools[0].execute("probe-worker", { agent: "probe-worker", title: "Probe", task: "Reject." }, undefined, undefined, { cwd: "/repo", modelRegistry: { getAvailable() { return []; } } });
+  const result = await operationTool(tools, "subagent_start").execute("probe-worker", { agent: "probe-worker", title: "Probe", task: "Reject." }, undefined, undefined, { cwd: "/repo", modelRegistry: { getAvailable() { return []; } } });
   assert.equal(result.details.code, "AGENT_ADMISSION_UNAVAILABLE");
   assert.match(result.content[0].text, /AGENT_ADMISSION_UNAVAILABLE/);
   assert.equal(effects, 0); assert.equal(calls.length, 0);
@@ -276,7 +284,7 @@ test("undiscovered coding profile fails before workspace, RPC, and title effects
     workspaceService: { ensureAllocated() { effects += 1; } },
     titleRegistry: { prepare() { effects += 1; } },
   });
-  const result = await tools[0].execute("undiscovered-coder", { ...codingContract, agent: "coder-alpha" }, undefined, undefined, {
+  const result = await operationTool(tools, "subagent_start").execute("undiscovered-coder", { ...codingContract, agent: "coder-alpha" }, undefined, undefined, {
     cwd: "/repo",
     modelRegistry: { getAvailable() { return [{ provider: "codex-pool", id: "gpt-5.6-sol", api: "openai-completions" }]; } },
   });
@@ -295,8 +303,8 @@ test("custom coding and generic executor dispatch use their structure and discov
     registerAuthorizedRun: authorizationRegistrar(registrations),
   });
   const ctx = { cwd: "/repo" };
-  const coding = await tools[0].execute("custom-coding", { ...codingContract, agent: "coder-alpha", worktree: false }, undefined, undefined, ctx);
-  const generic = await tools[0].execute("generic-executor", { agent: "executor", title: "Review", task: "Inspect." }, undefined, undefined, ctx);
+  const coding = await operationTool(tools, "subagent_start").execute("custom-coding", { ...codingContract, agent: "coder-alpha", worktree: false }, undefined, undefined, ctx);
+  const generic = await operationTool(tools, "subagent_start").execute("generic-executor", { agent: "executor", title: "Review", task: "Inspect." }, undefined, undefined, ctx);
   assert.equal(coding.isError, false, coding.content[0]?.text);
   assert.equal(generic.isError, false, generic.content[0]?.text);
   assert.equal(calls.length, 2);
@@ -330,7 +338,7 @@ test("typed executor selects an available declared candidate and fails a termina
     },
     registerAuthorizedRun: authorizationRegistrar(registrations),
   });
-  const available = await tools[0].execute("available-executor", { ...codingContract, model: "gpt-5.6-luna", worktree: false }, undefined, undefined, {
+  const available = await operationTool(tools, "subagent_start").execute("available-executor", { ...codingContract, model: "gpt-5.6-luna", worktree: false }, undefined, undefined, {
     cwd: "/repo",
     modelRegistry: { getAvailable() { return [{ provider: "openai-codex", id: "gpt-5.6-luna", api: "openai-completions" }]; } },
   });
@@ -341,7 +349,7 @@ test("typed executor selects an available declared candidate and fails a termina
   assert.deepEqual(registrations, []);
 
   effects = 0; calls.length = 0;
-  const miss = await tools[0].execute("unavailable-executor", { ...codingContract, model: "gpt-5.6-luna" }, undefined, undefined, {
+  const miss = await operationTool(tools, "subagent_start").execute("unavailable-executor", { ...codingContract, model: "gpt-5.6-luna" }, undefined, undefined, {
     cwd: "/repo",
     modelRegistry: { getAvailable() { return [{ provider: "global-only", id: "gpt-5.6-luna", api: "openai-completions" }]; } },
   });
@@ -360,7 +368,7 @@ test("model discovery receives the current host model provider", async () => {
     cleanupStore: {},
     discoverAgents(...args) { discoveryCalls.push(args); return { agents: [{ name: "reviewer", models: ["codex-pool/gpt-5.6-sol"] }] }; },
   });
-  const result = await tools[0].execute("provider", { agent: "reviewer", title: "Review", task: "Inspect.", model: "gpt-5.6-sol" }, undefined, undefined, {
+  const result = await operationTool(tools, "subagent_start").execute("provider", { agent: "reviewer", title: "Review", task: "Inspect.", model: "gpt-5.6-sol" }, undefined, undefined, {
     cwd: "/repo",
     model: { provider: "codex-pool", id: "parent", api: "openai-completions" },
     modelRegistry: { getAvailable() { return [{ provider: "codex-pool", id: "gpt-5.6-sol", api: "openai-completions" }]; } },
@@ -381,7 +389,7 @@ test("provider blacklist rejects deepseek before workspace and RPC side effects"
     discoverAgents() { return { agents: [{ name: "executor", models: ["deepseek/deepseek-v4-pro"] }] }; },
     workspaceService: { ensureAllocated() { effects += 1; } },
   });
-  const result = await tools[0].execute("blocked-provider", {
+  const result = await operationTool(tools, "subagent_start").execute("blocked-provider", {
     ...codingContract,
     model: "deepseek/deepseek-v4-pro",
   }, undefined, undefined, {

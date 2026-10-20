@@ -14,9 +14,9 @@ export function heartbeatContract(cwd: string) {
   return {
     title: "隔离 managed coding heartbeat 观察",
     agent: "executor",
-    task: `${CHILD_MARKER}：只在本地异步 barrier 等待。禁止修改 probe.txt 或任何仓库文件，禁止网络、shell 和新增后代；释放后只报告 changedFiles=[]。`,
+    task: `${CHILD_MARKER}：只在本地异步 barrier 等待。禁止修改 probe.txt 或任何仓库文件，禁止网络、shell 和新增后代；释放后用 read 读取 probe.txt 并如实报告 changedFiles=[] 与命令证据。`,
     writePaths: ["probe.txt"],
-    acceptance: { criteria: ["不修改任何仓库文件，changedFiles=[]；仅等待 fixture 的本地异步 barrier。"] },
+    acceptance: { criteria: ["不修改任何仓库文件，changedFiles=[]；等待本地 barrier 后通过 read 读取 probe.txt，记录实际结果。"] },
     cwd,
     worktree: true,
     model: "heartbeat-fixture/local",
@@ -27,10 +27,10 @@ function text(message: any): string {
   return typeof message?.content === "string" ? message.content : (message?.content ?? []).filter((part: any) => part.type === "text").map((part: any) => part.text).join("\n");
 }
 
-function childReport() {
+function childReport(command: string) {
   return `本地 barrier 已释放，未修改文件。\n\n\`\`\`acceptance-report\n${JSON.stringify({
     criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: "fixture provider 没有文件修改或 shell 分支。" }],
-    changedFiles: [], testsAddedOrUpdated: [], commandsRun: [], validationOutput: ["本地异步 barrier 已释放"], residualRisks: [], noStagedFiles: true,
+    changedFiles: [], testsAddedOrUpdated: [], commandsRun: [{ command, result: "passed", summary: "实际 read 工具成功读取 probe.txt" }], validationOutput: ["本地异步 barrier 已释放；read 工具成功"], residualRisks: [], noStagedFiles: true,
     diffSummary: "未修改仓库文件。",
   })}\n\`\`\``;
 }
@@ -106,26 +106,31 @@ export default function heartbeatProvider(pi: ExtensionAPI) {
               if (options?.signal?.aborted) throw new Error("fixture barrier aborted");
               await delay(100, undefined, { signal: options?.signal });
             }
-            output = childReport();
+            const validation = results.findLast(entry => entry.toolName === "read");
+            if (!validation) tool = { name: "read", arguments: { path: join(cwd, "probe.txt") } };
+            else {
+              if (validation.isError) throw new Error("正常 child 的 read 验证失败，不能报告命令通过");
+              output = childReport(`read ${join(cwd, "probe.txt")}`);
+            }
           } else if (userText.includes(CLEANUP_MARKER)) {
             // prepare-only 仅通过公开 workspace 工具处置；拒绝 raw git worktree/rm。
             const last = results.at(-1) as any;
-            const dispatched = results.find(entry => entry.toolName === "subagent" && (entry as any).details?.workspace_id) as any;
+            const dispatched = results.find(entry => entry.toolName === "subagent_start" && (entry as any).details?.workspace_id) as any;
             cleanupWorkspace ??= dispatched?.details?.workspace_id;
             if (!cleanupWorkspace) throw new Error("normal dispose 缺 workspace handle");
             const lastDetails = last?.details;
-            if (last?.toolName === "subagent_worktree" && last?.isError) throw new Error("public workspace dispose 失败");
-            if (last?.toolName !== "subagent_worktree") tool = { name: "subagent_worktree", arguments: { action: "status", workspace_id: cleanupWorkspace } };
+            if (["managed_workspace_status", "managed_workspace_dispose"].includes(last?.toolName) && last?.isError) throw new Error("public workspace dispose 失败");
+            if (!["managed_workspace_status", "managed_workspace_dispose"].includes(last?.toolName)) tool = { name: "managed_workspace_status", arguments: { workspace_id: cleanupWorkspace } };
             else if (lastDetails?.workspace_state === "released") output = "HEARTBEAT_FIXTURE_DISPOSED";
-            else if (lastDetails?.allowed_dispositions?.includes("discard") && lastDetails?.action_token) tool = { name: "subagent_worktree", arguments: { action: "dispose", disposition: "discard", workspace_id: cleanupWorkspace, action_token: lastDetails.action_token } };
+            else if (lastDetails?.allowed_dispositions?.includes("discard") && lastDetails?.action_token) tool = { name: "managed_workspace_dispose", arguments: { disposition: "discard", workspace_id: cleanupWorkspace, action_token: lastDetails.action_token } };
             else throw new Error("public workspace 未允许 discard；保留现场等待精确处置");
-          } else if (results.some(entry => entry.toolName === "subagent")) {
-            if (results.some(entry => entry.toolName === "subagent" && entry.isError)) throw new Error("typed dispatch 失败");
+          } else if (results.some(entry => entry.toolName === "subagent_start")) {
+            if (results.some(entry => entry.toolName === "subagent_start" && entry.isError)) throw new Error("typed dispatch 失败");
             output = "HEARTBEAT_FIXTURE_DISPATCHED";
           } else {
             if (!userText.includes(PARENT_MARKER)) throw new Error("parent 收到非 fixture prompt");
-            if (!getCurrentTools(messages).some(entry => entry.name === "subagent")) throw new Error("缺 typed subagent tool");
-            tool = { name: "subagent", arguments: heartbeatContract(process.cwd()) };
+            if (!getCurrentTools(messages).some(entry => entry.name === "subagent_start")) throw new Error("缺 typed subagent tool");
+            tool = { name: "subagent_start", arguments: heartbeatContract(process.cwd()) };
           }
           if (options?.signal?.aborted) throw new Error("fixture aborted");
           if (tool) {

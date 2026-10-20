@@ -266,13 +266,13 @@ test("真实 service：status token/allowed 权威、owner fail-closed、CAS tok
   assert.equal(preserved.isError, false);
   assert.equal(preserved.details.state, "preserved");
   const releasedA = await by.managed_workspace_release.execute("call", { workspace_id: "ws-a" }, undefined, undefined, ctx);
-  assert.equal(releasedA.isError, false);
-  assert.equal(releasedA.details.state, "released");
+  assert.equal(releasedA.isError, true);
+  assert.equal(releasedA.details.code, "MANAGED_WORKSPACE_TERMINAL");
   const statusReleased = await by.managed_workspace_status.execute("call", { workspace_id: "ws-a" }, undefined, undefined, ctx);
   assert.equal(statusReleased.isError, true);
   assert.equal(statusReleased.details.code, "MANAGED_WORKSPACE_STATE", "released 终态：status 由 service 权威拒绝");
-  assert.equal(statusReleased.details.detail.state, "released");
-  assert.deepEqual(statusReleased.details.detail.allowedActions, []);
+  assert.equal(statusReleased.details.detail.state, "preserved");
+  assert.deepEqual(statusReleased.details.detail.allowedActions, ["release"]);
 
   // CAS：token 一次性且绑定最新 challenge —— 重签后旧 token 必须被拒。
   const statusB1 = await by.managed_workspace_status.execute("call", { workspace_id: "ws-b" }, undefined, undefined, ctx);
@@ -330,5 +330,5 @@ test("真实 service：cleanup-debt 绑定 run 的工作区，模型 release 不
   const by = byName(createWorkspaceOperationTools({ service, resolveRootSessionId: () => "root-debt" }));
   const result = await by.managed_workspace_release.execute("call", { workspace_id: "ws-debt" }, undefined, undefined, ctx);
   assert.equal(result.isError, true);
-  assert.equal(result.details.code, "MANAGED_WORKSPACE_ACTION", "已绑定 run 的 debt release 需要显式 issueRelease token；模型工具不得绕过 service 权威");
+  assert.equal(result.details.code, "MANAGED_WORKSPACE_TERMINAL", "已绑定 run 的 debt release 需要先满足终态 proof；模型工具不得绕过 service 权威");
 });

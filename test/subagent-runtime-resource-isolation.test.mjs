@@ -126,13 +126,13 @@ test("the model-facing description contains the project dispatch and push-notifi
   const { TYPED_SUBAGENT_DESCRIPTION } = await import("../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts");
 
   assert.doesNotMatch(TYPED_SUBAGENT_DESCRIPTION, /dispatch-ir\.v1/);
-  assert.match(TYPED_SUBAGENT_DESCRIPTION, /For coding work, provide the complete dispatch-ir.v2 contract/);
-  assert.match(TYPED_SUBAGENT_DESCRIPTION, /generic=\{agent,task\}/);
+  assert.match(TYPED_SUBAGENT_DESCRIPTION, /coding 任务需提供完整 dispatch-ir.v2 合同/);
+  assert.match(TYPED_SUBAGENT_DESCRIPTION, /只读调研或纯文本工作用 \{agent,task\}/);
   assert.doesNotMatch(TYPED_SUBAGENT_DESCRIPTION, /For executor, provide/);
   assert.doesNotMatch(TYPED_SUBAGENT_DESCRIPTION, /spark/);
-  assert.match(TYPED_SUBAGENT_DESCRIPTION, /completion notifications are delivered automatically/i);
-  assert.match(TYPED_SUBAGENT_DESCRIPTION, /do not use sleep, status polling, or supervisor pending/i);
-  assert.match(TYPED_SUBAGENT_DESCRIPTION, /if none remains, end the turn/i);
-  assert.match(TYPED_SUBAGENT_DESCRIPTION, /use status only for explicit user requests, intervention, or diagnostics/i);
+  assert.match(TYPED_SUBAGENT_DESCRIPTION, /完成通知自动送达/);
+  assert.match(TYPED_SUBAGENT_DESCRIPTION, /不要用 sleep、轮询 status 或 supervisor pending 等待完成/);
+  assert.match(TYPED_SUBAGENT_DESCRIPTION, /若无则结束当前 turn/);
+  assert.match(TYPED_SUBAGENT_DESCRIPTION, /status 仅用于用户明确要求、需要干预或诊断/);
   assert.doesNotMatch(TYPED_SUBAGENT_DESCRIPTION, /PARALLEL|proactive skill|Fable|watchdog|schedule/i);
 });

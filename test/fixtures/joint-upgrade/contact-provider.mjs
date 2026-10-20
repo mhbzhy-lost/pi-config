@@ -16,7 +16,7 @@ export default async function (pi) {
   for (const type of ['subagent:async-complete','subagent:process-terminal']) pi.events.on(type, value => record({ type, value }));
   pi.events.on('pi-config:root-owner-ready', value => record({type:'root-owner-ready',value}));
   pi.on('session_start', (_event, ctx) => record({ type: 'start', actualModel: {provider:ctx.model?.provider,id:ctx.model?.id,api:ctx.model?.api}, sessionId: ctx.sessionManager.getSessionId(), sessionFile: ctx.sessionManager.getSessionFile(), tools: pi.getAllTools().map(t => ({ name: t.name, exposure: t.exposure })) }));
-  pi.on('message_end', event => { const m = event.message; if (m.customType === 'subagent_supervisor_request' || (m.role === 'toolResult' && ['subagent', 'subagent_supervisor', 'contact_supervisor'].includes(m.toolName))) record({ type: 'message_end', message: m }); });
+  pi.on('message_end', event => { const m = event.message; if (m.customType === 'subagent_supervisor_request' || (m.role === 'toolResult' && ['subagent_start', 'subagent_run_stop', 'supervisor_request_pending', 'supervisor_request_reply', 'contact_supervisor'].includes(m.toolName))) record({ type: 'message_end', message: m }); });
   pi.registerProvider('joint-contact', {
     api: 'joint-contact', apiKey: 'fixture-only', baseUrl: 'http://127.0.0.1:9',
     models: [{ id: 'fixture', name: 'fixture', reasoning: false, input: ['text'], contextWindow: 65536, maxTokens: 1024, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
@@ -44,26 +44,26 @@ export default async function (pi) {
         let modelVisibleRequestId = [...user.matchAll(/replyTo:\s*"([0-9a-f-]+)"/g)].at(-1)?.[1];
         if(scenario==='two-asks') {
           const ids=[...user.matchAll(/replyTo:\s*"([0-9a-f-]+)"/g)].map(m=>m[1]);
-          modelVisibleRequestId=ids.find(id=>!results.some(r=>r.toolName==='subagent_supervisor'&&r.content.some(c=>c.text?.includes('Replied to supervisor request '+id))));
+          modelVisibleRequestId=ids.find(id=>!results.some(r=>r.toolName==='supervisor_request_reply'&&r.content.some(c=>c.text?.includes('Replied to supervisor request '+id))));
         }
-        if (!results.some(r => r.toolName === 'subagent')) next = { name: 'subagent', arguments: { agent: 'executor', task: 'JOINT_CHILD_ASK', title: 'Contact supervisor真实往返', model: 'joint-contact/fixture', ...(['managed','root-close','lease-expire'].includes(scenario) ? { worktree: true, writePaths: ['base.txt'], acceptance: { criteria: ['完成隔离通信测试'] } } : {}) } };
-        else if (results.some(r => r.toolName === 'subagent' && r.isError)) text = 'JOINT_PARENT_SPAWN_FAILED';
-        else if (scenario === 'invalid-reply' && modelVisibleRequestId && results.filter(r=>r.toolName==='subagent_supervisor').length < 3) {
-          const n=results.filter(r=>r.toolName==='subagent_supervisor').length;
-          next={name:'subagent_supervisor',arguments:n===0?{action:'reply',replyTo:'unknown-request',message:'bad'}:n===1?{action:'reply',to:'executor',message:'bad'}:{action:'reply',message:'bad'}};
+        if (!results.some(r => r.toolName === 'subagent_start')) next = { name: 'subagent_start', arguments: { agent: 'executor', task: 'JOINT_CHILD_ASK', title: 'Contact supervisor真实往返', model: 'joint-contact/fixture', ...(['managed','root-close','lease-expire'].includes(scenario) ? { worktree: true, writePaths: ['base.txt'], acceptance: { criteria: ['完成隔离通信测试'] } } : {}) } };
+        else if (results.some(r => r.toolName === 'subagent_start' && r.isError)) text = 'JOINT_PARENT_SPAWN_FAILED';
+        else if (scenario === 'invalid-reply' && modelVisibleRequestId && results.filter(r=>r.toolName==='supervisor_request_reply').length < 3) {
+          const n=results.filter(r=>r.toolName==='supervisor_request_reply').length;
+          next={name:'supervisor_request_reply',arguments:n===0?{replyTo:'unknown-request',message:'bad'}:n===1?{to:'executor',message:'bad'}:{message:'bad'}};
         }
-        else if (results.some(r=>r.toolName==='subagent_supervisor'&&r.isError)) text='JOINT_PARENT_REPLY_BLOCKED';
-        else if (scenario === 'stop' && modelVisibleRequestId && !results.some(r=>r.toolName==='subagent' && r.content.some(c=>c.text?.includes('stopp')))) next={name:'subagent',arguments:{action:'stop',id:user.match(/Run:\s*([a-f0-9-]+)/)?.[1]}};
-        else if (!['root-close','lease-expire'].includes(scenario) && scenario !== 'timeout' && scenario !== 'restart-first' && scenario !== 'stop' && modelVisibleRequestId && !results.some(r => r.toolName === 'subagent_supervisor' && r.content.some(c => c.text?.includes('Replied to supervisor request '+modelVisibleRequestId)))) {
-          const pending = results.findLast(r => r.toolName === 'subagent_supervisor' && r.content.some(c => c.text?.includes(modelVisibleRequestId)));
-          if (!pending) next = { name: 'subagent_supervisor', arguments: { action: 'pending' } };
-          else next = { name: 'subagent_supervisor', arguments: { action: 'reply', replyTo: modelVisibleRequestId, message: scenario === 'interview' ? '{"answer":"joint-reply-nonce"}' : 'joint-reply-nonce' } };
+        else if (results.some(r=>r.toolName==='supervisor_request_reply'&&r.isError)) text='JOINT_PARENT_REPLY_BLOCKED';
+        else if (scenario === 'stop' && modelVisibleRequestId && !results.some(r=>r.toolName==='subagent_run_stop' && r.content.some(c=>c.text?.includes('stopp')))) next={name:'subagent_run_stop',arguments:{id:user.match(/Run:\s*([a-f0-9-]+)/)?.[1]}};
+        else if (!['root-close','lease-expire'].includes(scenario) && scenario !== 'timeout' && scenario !== 'restart-first' && scenario !== 'stop' && modelVisibleRequestId && !results.some(r => r.toolName === 'supervisor_request_reply' && r.content.some(c => c.text?.includes('Replied to supervisor request '+modelVisibleRequestId)))) {
+          const pending = results.findLast(r => r.toolName === 'supervisor_request_pending' && r.content.some(c => c.text?.includes(modelVisibleRequestId)));
+          if (!pending) next = { name: 'supervisor_request_pending', arguments: {} };
+          else next = { name: 'supervisor_request_reply', arguments: { replyTo: modelVisibleRequestId, message: scenario === 'interview' ? '{"answer":"joint-reply-nonce"}' : 'joint-reply-nonce' } };
 
         } else text = modelVisibleRequestId ? 'JOINT_PARENT_REPLIED' : 'JOINT_WAITING';
       }
       const content = next ? [{ type: 'toolCall', id: 'joint-call-' + process.pid + '-' + Date.now(), name: next.name, arguments: next.arguments }] : [{ type: 'text', text }];
       if(child&&scenario==='two-asks'&&next?.name==='contact_supervisor') content.push({...content[0],id:content[0].id+'-b',arguments:{reason:'need_decision',message:'parallel-ask-b'}});
-      if (!child && scenario === 'duplicate' && next?.name === 'subagent_supervisor' && next.arguments.action === 'reply') content.push({ ...content[0], id: content[0].id + '-duplicate' });
+      if (!child && scenario === 'duplicate' && next?.name === 'supervisor_request_reply') content.push({ ...content[0], id: content[0].id + '-duplicate' });
       const message = { role: 'assistant', content, api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: next ? 'toolUse' : 'stop', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
       stream.push({ type: 'start', partial: message });
       if (next) for(let i=0;i<content.length;i++){ stream.push({ type: 'toolcall_start', contentIndex: i, partial: message }); stream.push({ type: 'toolcall_delta', contentIndex: i, delta: JSON.stringify(content[i].arguments), partial: message }); stream.push({ type: 'toolcall_end', contentIndex: i, toolCall: content[i], partial: message }); }

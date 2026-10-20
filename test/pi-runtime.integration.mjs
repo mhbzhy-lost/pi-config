@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join, resolve } from "node:path";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import test from "node:test";
 
@@ -28,6 +28,8 @@ test("configured enhanced local package registers one authoritative subagent too
   let session;
   try {
     await mkdir(join(agentDir, "agents"), { recursive: true });
+    await mkdir(join(agentDir, "extensions"), { recursive: true });
+    await symlink(join(repoRoot, "pi/extensions/agents-shared.ts"), join(agentDir, "extensions/agents-shared.ts"));
     for (const name of ["delegate", "executor", "reviewer"]) {
       await writeFile(join(agentDir, "agents", `${name}.md`), await readFile(join(repoRoot, "pi", "agents", `${name}.md`)));
     }
@@ -47,10 +49,13 @@ test("configured enhanced local package registers one authoritative subagent too
       noContextFiles: true,
     });
     await resourceLoader.reload();
+    const modelRuntime = await host.ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: null,
+      modelsStorePath: join(agentDir, "catalog.json"), allowModelNetwork: false, refreshOnCreate: false });
     ({ session } = await host.createAgentSession({
       cwd: repository,
       agentDir,
       resourceLoader,
+      modelRuntime,
       sessionManager: host.SessionManager.inMemory(repository),
     }));
     const errors = [];
@@ -59,13 +64,16 @@ test("configured enhanced local package registers one authoritative subagent too
     const extensions = resourceLoader.getExtensions().extensions;
     const enhanced = extensions.filter((extension) => String(extension.path).includes("/packages/pi-subagents-enhanced/extensions/"));
     const legacy = extensions.filter((extension) => /\/pi\/extensions\/(?:subagent-runtime|custom-footer)\.ts$/.test(String(extension.path)));
-    const toolNames = session.getAllTools().map((tool) => tool.name)
-      .filter((name) => ["subagent", "subagent_worktree", "subagent_supervisor"].includes(name)).sort();
+    const operationNames = ["subagent_roster", "subagent_start", "subagent_run_status", "subagent_run_steer",
+      "subagent_run_interrupt", "subagent_run_resume", "subagent_run_stop", "managed_workspace_list",
+      "managed_workspace_status", "managed_workspace_dispose", "managed_workspace_release",
+      "supervisor_request_pending", "supervisor_request_status", "supervisor_request_reply"].sort();
+    const toolNames = session.getAllTools().map((tool) => tool.name).filter((name) => operationNames.includes(name)).sort();
     const runtime = enhanced.find((extension) => String(extension.path).endsWith("/subagent-runtime.ts"));
     assert.deepEqual(errors, []);
     assert.equal(enhanced.length, 2);
     assert.equal(legacy.length, 0);
-    assert.deepEqual(toolNames, ["subagent", "subagent_supervisor", "subagent_worktree"]);
+    assert.deepEqual(toolNames, operationNames);
     assert.deepEqual(runtime?.sourceInfo, {
       path: join(repoRoot, "packages", "pi-subagents-enhanced", "extensions", "subagent-runtime.ts"),
       source: join(repoRoot, "packages", "pi-subagents-enhanced"),

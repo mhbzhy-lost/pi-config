@@ -266,7 +266,10 @@ test("real dispatch allocation is v2 and its terminal proof settles from pending
     registerAuthorizedRun(authorization) { registered.push(authorization); },
   });
 
-  const spawned = await tools[0].execute("real-dispatch", realDispatchCodingContract(f.originRoot), undefined, undefined, { cwd: f.originRoot, sessionManager: {} });
+  // S4 之后模型面是 14 个独立工具，`tools[0]` 是 subagent_roster；派发必须按名取 subagent_start。
+  const startTool = tools.find((tool) => tool.name === "subagent_start");
+  assert.ok(startTool, "harness 未注册 subagent_start");
+  const spawned = await startTool.execute("real-dispatch", realDispatchCodingContract(f.originRoot), undefined, undefined, { cwd: f.originRoot, sessionManager: {} });
   assert.equal(spawned.isError, false, spawned.content[0]?.text);
   const workspaceId = spawned.details.workspace_id;
   assert.equal(registered.length, 1);

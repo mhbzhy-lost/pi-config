@@ -50,6 +50,10 @@ export function decideDeterministicTurn({ messages = [], toolNames = [] } = {}) 
   const userText = messages.filter((message) => message?.role === "user").map(textParts).join("\n");
   const toolResults = messages.filter((message) => message?.role === "toolResult");
   const inventory = toolNames.join(",");
+  // 同一既有 fixture 也用于 upstream 兼容 probe；按实际注册面选择协议。
+  const modernSupervisor = toolNames.includes("supervisor_request_pending");
+  const pendingName = modernSupervisor ? "supervisor_request_pending" : "subagent_supervisor";
+  const replyName = modernSupervisor ? "supervisor_request_reply" : "subagent_supervisor";
 
   const parentMode = userText.includes("PI_SUBAGENTS_COMPAT_PARENT_ATTENTION")
     ? "attention"
@@ -72,7 +76,7 @@ export function decideDeterministicTurn({ messages = [], toolNames = [] } = {}) 
     if (!toolResults.some((message) => message.toolName === "compat_inspect_nested_events")) {
       return { tool: { name: "compat_inspect_nested_events", arguments: {} } };
     }
-    const supervisorResults = toolResults.filter((message) => message.toolName === "subagent_supervisor");
+    const supervisorResults = toolResults.filter((message) => [pendingName, replyName].includes(message.toolName));
     const pending = supervisorResults.find((message) => Array.isArray(message.details?.pending) && message.details.pending.length > 0);
     const replied = supervisorResults.some((message) => typeof message.details?.replyTo === "string");
     const emptyPendingCount = supervisorResults.filter((message) => Array.isArray(message.details?.pending) && message.details.pending.length === 0).length;
@@ -80,12 +84,12 @@ export function decideDeterministicTurn({ messages = [], toolNames = [] } = {}) 
     if (!replied && !pending) {
       if (emptyPendingCount >= 5) return { text: "COMPAT_PARENT_PENDING_MISSING" };
       if (pauseCount <= emptyPendingCount) return { tool: { name: "compat_pause", arguments: {} } };
-      return { tool: { name: "subagent_supervisor", arguments: { action: "pending" } } };
+      return { tool: { name: pendingName, arguments: modernSupervisor ? {} : { action: "pending" } } };
     }
     if (!replied) {
       const requestId = pending?.details.pending[0]?.id;
       if (typeof requestId === "string" && requestId) {
-        return { tool: { name: "subagent_supervisor", arguments: { action: "reply", replyTo: requestId, message: "APPROVED" } } };
+        return { tool: { name: replyName, arguments: { ...(modernSupervisor ? {} : { action: "reply" }), replyTo: requestId, message: "APPROVED" } } };
       }
     }
     return waits.length === 0
