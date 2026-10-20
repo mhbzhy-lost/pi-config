@@ -26,6 +26,8 @@ export type ActivityPlacement = "main" | "recent";
 /**
  * 统一展示行。key 由类型、source 稳定 ID 与必要 child index 组成；
  * 身份只认 key，禁止按 label 去重，也不得以显示文本复活条目。
+ * `metaLabel` 是可选的**只读展示投影**（例如 subagent 的 provider/model 与 thinking），
+ * 仅供详情壳 chrome 行展示；不参与身份、去重、排序，也不得被当作任务事实权威。
  */
 export type ActivityRow = Readonly<{
   key: string;
@@ -33,6 +35,7 @@ export type ActivityRow = Readonly<{
   label: string;
   stateLabel: string;
   placement: ActivityPlacement;
+  metaLabel?: string;
 }>;
 
 /** source 查询可用性；可用性不占任务身份。 */
@@ -174,7 +177,8 @@ function isActivityRow(value: unknown): value is ActivityRow {
     isActivityKind(candidate.kind) &&
     typeof candidate.label === "string" &&
     typeof candidate.stateLabel === "string" &&
-    (candidate.placement === "main" || candidate.placement === "recent")
+    (candidate.placement === "main" || candidate.placement === "recent") &&
+    (candidate.metaLabel === undefined || typeof candidate.metaLabel === "string")
   );
 }
 

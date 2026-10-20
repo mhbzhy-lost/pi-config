@@ -38,6 +38,19 @@ export interface BrowserRosterPersistence {
   children: BrowserChild[];
 }
 
+/**
+ * child 模型展示标签（纯 TUI 投影，不改写 raw status）。
+ * 旧 footer 在 browser/child 模式右侧显示该值；统一详情壳改由 row.metaLabel 消费同一格式，
+ * 避免重做面板后丢失“这个 subagent 用的什么模型”。
+ */
+export function formatChildModelLabel(model: string | undefined, thinking: string | undefined): string {
+  if (!model) return "no-model";
+  const suffix = thinking && model.endsWith(`:${thinking}`) ? `:${thinking}` : "";
+  const normalized = suffix ? model.slice(0, -suffix.length) : model;
+  const slash = normalized.indexOf("/");
+  return slash > 0 ? `(${normalized.slice(0, slash)}) ${normalized.slice(slash + 1)}` : normalized;
+}
+
 type BrowserRun = {
   id: string;
   asyncDir: string;

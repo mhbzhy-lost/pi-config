@@ -28,7 +28,7 @@ import type { MarkdownTheme } from "@earendil-works/pi-tui";
 import { browserTrustedRoots, readBrowserRunStatus, renderBrowserTranscript } from "./browser-adapter.ts";
 import { NativeChildConversationRenderer } from "./native-conversation.ts";
 import { createChildConversationRenderers } from "./tool-renderers.ts";
-import { projectSessionStatus, SubagentSessionBrowserState, type BrowserChild } from "./session-browser.ts";
+import { formatChildModelLabel, projectSessionStatus, SubagentSessionBrowserState, type BrowserChild } from "./session-browser.ts";
 import { createSubagentActivitySource } from "./subagent-activity.ts";
 import { parseSgrWheelDirection, ReadOnlyBrowserEditor, SubagentTranscriptViewport } from "./session-viewport.ts";
 import { layoutFooter } from "./footer-layout.ts";
@@ -337,14 +337,6 @@ function resolveChildSessionFile(child: { sessionFile?: string; asyncDir: string
   return path.isAbsolute(child.sessionFile) ? child.sessionFile : path.resolve(child.asyncDir, child.sessionFile);
 }
 
-function formatChildModel(model: string | undefined, thinking: string | undefined): string {
-  if (!model) return "no-model";
-  const suffix = thinking && model.endsWith(`:${thinking}`) ? `:${thinking}` : "";
-  const normalized = suffix ? model.slice(0, -suffix.length) : model;
-  const slash = normalized.indexOf("/");
-  return slash > 0 ? `(${normalized.slice(0, slash)}) ${normalized.slice(slash + 1)}` : normalized;
-}
-
 function formatTokens(tokens: number | undefined): string {
   if (tokens === undefined) return "? tokens";
   if (tokens < 1_000) return `${tokens} tokens`;
@@ -412,7 +404,7 @@ export function createFooterComponent({ getCwd, getHome, getModel, getContextUsa
     const contextLabel = child
       ? formatChildContext(child.tokens, getViewportPosition?.(), width, tui)
       : usage?.percent === null ? `?/${windowLabel}` : `${(usage?.percent ?? 0).toFixed(1)}%/${windowLabel}`;
-    const model = child ? formatChildModel(child.model, child.thinking) : currentModel?.id ?? "no-model";
+    const model = child ? formatChildModelLabel(child.model, child.thinking) : currentModel?.id ?? "no-model";
     const provider = !child && currentModel?.provider ? `(${currentModel.provider}) ` : "";
     const thinking = child?.thinking ?? getThinkingLevel?.() ?? "off";
     const extensionStatuses = getExtensionStatuses?.();

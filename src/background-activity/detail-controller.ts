@@ -703,8 +703,8 @@ class ActivityDetailShellController implements ActivityDetailShell {
     const entry = this.currentEntry();
     const identity = entry
       ? `› ${ACTIVITY_KIND_GLYPHS[entry.kind] ?? "◇"} ${entry.label} · ${entry.stateLabel}${
-          this.staleKeys.has(entry.key) ? " · 过期观察" : ""
-        }`
+          entry.metaLabel ? ` · ${entry.metaLabel}` : ""
+        }${this.staleKeys.has(entry.key) ? " · 过期观察" : ""}`
       : "当前无后台活动";
     lines.push(renderActivityDetailTextLine(identity, width, theme, this.tui));
     if (bodyBudget >= 2) {

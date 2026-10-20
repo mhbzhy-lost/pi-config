@@ -19,7 +19,7 @@
 
 import type { ActivityPlacement, ActivityRow, ActivitySnapshot, ActivitySource, DetailComponent, DetailRequest } from "./background-activity.ts";
 import { getTitleRegistry } from "../subagent-dispatch/title-registry.ts";
-import { projectSessionStatus, type BrowserChild, type BrowserSnapshot } from "./session-browser.ts";
+import { formatChildModelLabel, projectSessionStatus, type BrowserChild, type BrowserSnapshot } from "./session-browser.ts";
 
 /** provider 消费的 browser 投影面：footer runtime 持有的当代 browser 实例。 */
 export interface SubagentActivityBrowser {
@@ -54,6 +54,20 @@ export function subagentActivityLabel(child: Pick<BrowserChild, "runId" | "label
 }
 
 /**
+ * 行 metaLabel：该 subagent 实际使用的模型与 thinking（纯展示投影）。
+ * 统一详情壳重做后，旧 browser footer 右侧的 child 模型标签丢失；这里把同一
+ * 事实以可选 row 字段提供给详情 chrome，不改写 raw status，也不参与行身份。
+ * 模型与 thinking 都未知时返回 undefined，不在 chrome 里堆 “no-model” 噪声。
+ */
+export function subagentActivityMetaLabel(child: Pick<BrowserChild, "model" | "thinking">): string | undefined {
+  const thinking = typeof child.thinking === "string" && child.thinking.trim() ? child.thinking.trim() : undefined;
+  const model = typeof child.model === "string" && child.model.trim() ? formatChildModelLabel(child.model, child.thinking) : undefined;
+  if (model === undefined && thinking === undefined) return undefined;
+  return [model === undefined ? undefined : `模型 ${model}`, thinking === undefined ? undefined : `thinking: ${thinking}`]
+    .filter(Boolean).join(" · ");
+}
+
+/**
  * 行状态文案：由既有 presentation/lifecycle 状态解释。reported/needs-context 与
  * 未知/待处置状态不得显示为已完成；仅结构化完成证据（presentation completed 或
  * classic complete/completed 终态）显示已完成。legacy failed/rejected 无结构化
@@ -85,12 +99,14 @@ export function subagentStateLabel(child: Pick<BrowserChild, "state" | "presenta
 }
 
 function activityRow(child: BrowserChild, placement: ActivityPlacement): ActivityRow {
+  const metaLabel = subagentActivityMetaLabel(child);
   return {
     key: subagentActivityRowKey(child),
     kind: "subagent",
     label: subagentActivityLabel(child),
     stateLabel: subagentStateLabel(child),
     placement,
+    ...(metaLabel === undefined ? {} : { metaLabel }),
   };
 }
 
