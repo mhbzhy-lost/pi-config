@@ -472,6 +472,29 @@ test("public dispatch bindings fail closed for duplicate task identity mismatche
   }
 });
 
+test("dispatch 回执任务身份以 toolCallId 为权威，production 派生 taskId 不被当任务名", () => {
+  const productionDetails = { taskId: "dispatch-19e5682d", runId: "run-parse", workspace_id: "workspace-parse", lease_id: "lease-parse" };
+  const bindings = acceptanceProbe.collectPublicDispatchBindings([{
+    records: [{ type: "tool_execution_end", toolName: "subagent_start", toolCallId: "acceptance-parse", result: { isError: false, details: productionDetails } }],
+  }], { inventory: { workspaces: [{ receipt: {
+    owner: { toolCallId: "acceptance-parse" }, run: { runId: "run-parse" },
+    workspaceId: "workspace-parse", leaseId: "lease-parse",
+  } }] } });
+  assert.deepEqual(bindings.get("parse"), { task: "parse", runId: "run-parse", workspaceId: "workspace-parse", leaseId: "lease-parse" });
+
+  // 派生 taskId 丢了 toolCallId 就无法归属任务：fail closed，不按哈希猜。
+  assert.throws(() => acceptanceProbe.collectPublicDispatchBindings([{
+    records: [{ type: "tool_execution_end", toolName: "subagent_start", result: { isError: false, details: productionDetails } }],
+  }], {}), /lost its acceptance toolCallId/);
+
+  // 未知形态既不是派生身份也不是合法任务名：同样 fail closed。
+  for (const taskId of ["dispatch-ZZZZZZZZ", "acceptance-unknown", "parse"]) {
+    assert.throws(() => acceptanceProbe.collectPublicDispatchBindings([{
+      records: [{ type: "tool_execution_end", toolName: "subagent_start", toolCallId: "acceptance-parse", result: { isError: false, details: { ...productionDetails, taskId } } }],
+    }], {}), /unrecognized taskId shape/, `${taskId} 应被拒`);
+  }
+});
+
 
 test("probe closes Root hosts only after public audit settlement", async () => {
   const order = [];

@@ -79,7 +79,7 @@ export default function acceptanceRootProvider(pi) {
       const tasks = (process.env.PI_ACCEPTANCE_TASKS ?? "").split(",").filter(Boolean);
       if (tasks.length === 0 || tasks.some((task) => !ALLOWED_TASKS.has(task)) || new Set(tasks).size !== tasks.length) throw new Error("PI_ACCEPTANCE_TASKS must contain distinct allowed acceptance tasks");
       const issuedIds = new Set((context.messages ?? []).filter((message) => message.role === "assistant").flatMap((message) => message.content ?? []).filter((part) => part?.type === "toolCall").map((part) => part.id));
-      const calls = tasks.filter((task) => !issuedIds.has(`acceptance-${task}`)).map((task) => ({ type: "toolCall", id: `acceptance-${task}`, name: "subagent", arguments: contract(task) }));
+      const calls = tasks.filter((task) => !issuedIds.has(`acceptance-${task}`)).map((task) => ({ type: "toolCall", id: `acceptance-${task}`, name: "subagent_start", arguments: contract(task) }));
       const text = "acceptance root settled";
       const message = { role: "assistant", content: calls.length ? calls : [{ type: "text", text }], api: model.api, provider: model.provider, model: model.id, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: calls.length ? "toolUse" : "stop", timestamp: Date.now() };
       stream.push({ type: "start", partial: message });

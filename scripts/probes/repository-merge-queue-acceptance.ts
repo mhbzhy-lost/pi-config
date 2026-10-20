@@ -394,6 +394,31 @@ function acceptanceTaskName(taskId) {
   return matches[0].name;
 }
 
+const DERIVED_DISPATCH_TASK_ID = /^dispatch-[0-9a-f]{8}$/;
+
+function isDerivedDispatchTaskId(value) {
+  return typeof value === "string" && DERIVED_DISPATCH_TASK_ID.test(value);
+}
+
+function isAcceptanceTaskId(value) {
+  return typeof value === "string" && ACCEPTANCE_TASKS.some((task) => value === `acceptance-${task.name}`);
+}
+
+/**
+ * 任务身份只认 probe 自己控制的 `toolCallId`：production 的 `details.taskId` 是由
+ * contractHash 派生的 dispatch 身份（`dispatch-<8hex>`，`contracts/dispatch-ir.ts`），
+ * 不是调用方任务名。旧回执形态（taskId 直接是 `acceptance-<task>`）仍可识别，
+ * 但派生形态丢了 toolCallId 时无法归属任务，必须 fail closed，不猜。
+ */
+function acceptanceTaskIdentity(record, details) {
+  const toolCallId = record?.toolCallId;
+  if (isAcceptanceTaskId(toolCallId)) return acceptanceTaskName(toolCallId);
+  if (isDerivedDispatchTaskId(details?.taskId)) {
+    throw new Error(`host dispatch record lost its acceptance toolCallId (derived taskId: ${details.taskId})`);
+  }
+  return acceptanceTaskName(details?.taskId);
+}
+
 export function collectPublicDispatchBindings(hosts, audit) {
   const bindings = new Map();
   const merge = (binding, source) => {
@@ -408,11 +433,14 @@ export function collectPublicDispatchBindings(hosts, audit) {
       if (record.type !== "tool_execution_end" || record.toolName !== "subagent_start" || record.result?.isError === true) continue;
       const details = record.result?.details;
       if (!details?.taskId) continue;
+      if (!isDerivedDispatchTaskId(details.taskId) && !isAcceptanceTaskId(details.taskId)) {
+        throw new Error(`host dispatch receipt has an unrecognized taskId shape: ${details.taskId}`);
+      }
       if (typeof details.runId !== "string" || !details.runId) throw new Error("host dispatch binding is missing public runId");
       if (typeof details.workspace_id !== "string" || !details.workspace_id || typeof details.lease_id !== "string" || !details.lease_id) {
         throw new Error("host dispatch binding is missing public workspace_id or lease_id");
       }
-      merge({ task: acceptanceTaskName(details.taskId), runId: details.runId, workspaceId: details.workspace_id, leaseId: details.lease_id }, "duplicate");
+      merge({ task: acceptanceTaskIdentity(record, details), runId: details.runId, workspaceId: details.workspace_id, leaseId: details.lease_id }, "duplicate");
     }
   }
   for (const entry of audit?.inventory?.workspaces ?? []) {
@@ -577,7 +605,7 @@ function configuredTimeout(name, fallback) {
 
 export async function runAcceptance(options = parseAcceptanceOptions()) {
   const piBinary = process.env.PI_REAL_BIN;
-  if (!piBinary) throw new Error("PI_REAL_BIN must identify the real Pi 0.87.1 binary; acceptance probe never substitutes a fake model");
+  if (!piBinary) throw new Error("PI_REAL_BIN must identify a real supported Pi binary (see scripts/probes/pi-subagents-compat.ts SUPPORTED_PI_VERSIONS); acceptance probe never substitutes a fake model");
 
   const root = await mkdtemp(join(tmpdir(), "repository-merge-queue-acceptance-"));
   const repository = join(root, "repository");

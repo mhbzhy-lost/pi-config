@@ -15,6 +15,9 @@ const samples: Array<[string, Record<string, unknown>]> = [
   ["缺 version 且只有 agent/title/task 的合法 generic", { agent: "executor", title: "generic", task: "Run probe" }],
   ["generic 混入 coding-exclusive 字段", { agent: "executor", title: "generic", task: "Run probe", }],
   ["coding 混入 generic 字段", { ...coding, outputMode: "inline" }],
+  // 以下两条是历史 union 入口（`subagent({action:…})`）的路由样本。S4 拆成 14 个独立工具后
+  // 生产已无 `action` 路由分支，因此 `route()` 的 control 分支现在是死路径；保留样本
+  // 只为了对照旧 IR 路由语义，不代表当前工具面。是否删除本 probe 由 owner 决定。
   ["带 action 的 control", { action: "status", id: "probe" }],
   ["action 与 version 同时存在", { action: "status", }],
 ];
