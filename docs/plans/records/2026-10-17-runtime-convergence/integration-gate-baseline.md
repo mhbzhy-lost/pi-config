@@ -80,3 +80,10 @@ wrapper exit 0，**`GATE_EXIT=1`**，约 1031 秒：`tests 342 / pass 304 / fail
 | session-owner-install `fresh zsh wrapper` | wrapper 退出码 1 | 需 wrapper 输出取证 |
 
 这 6 项一律**先取证再分类**，未加任何生产兼容分支，也未放宽断言。
+
+## 用户裁决与后续实验（2026-10-20）
+
+- 用户裁决：`pi-subagents-045-workflow` 的 `0.87.1` 版本 pin 属过期断言，直接改。已改为接受 `SUPPORTED_PI_VERSIONS`（当前 `1.0.4`）或显式 `PI_HISTORICAL_REAL_BIN` 提供的 `0.87.1`；该 lane 的真实前提是“upstream `pi-subagents@0.62.0` 装在受支持 Host 内”，版本 pin 只是历史组合的守卫，不代表当前 Host 版本。
+- top-level RPC 两条 lane：先前“是否退役/排除/改生产”的三选一是基于错误假设（以为要保 upstream 兼容面）。取证后确认本仓 runtime 本来就 bootstrap upstream（`extensions/subagent-runtime.ts:319` `bootstrap: upstreamSubagentRuntime`），而生产合同要求 spawn 具备 `rpc:v1/session`，session 身份只从 Host session manager 投影、不从 cwd 猜测（`compat/pi-subagents-0.75.ts:17`、`subagent-dispatch/extension.ts:545`）。lane 用 `--no-session` 启动，因此 ping 无 session 身份 → `no_active_session` / `CAPABILITY_NEGOTIATION_FAILED`。处置改为 fixture 迁移：`--no-session` → `--session-dir <临时目录>`，不动生产、不退役、不排除门禁。
+- 验证运行：job `fcde6205-efcb-466b-85b0-dc15867db508`（`test/pi-subagents-045-workflow.integration.mjs` + `test/pi-subagents-runtime.integration.mjs`），日志 `/tmp/rc-rpc-lane-session.log`。结果以完成通知为准；若仍失败则按现场重新分类，不假定 session 就是唯一偏离点。
+- 同一 `rpc:v1/session` 假设也适用于 project-workflow / completion-notification / steer-text-insertion 三条 lane（它们同样只设 `PI_CODING_AGENT_SESSION_DIR` 而未传 `--session-dir`）；待本轮结果确认后再统一迁移，不提前批量改。

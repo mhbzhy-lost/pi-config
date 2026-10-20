@@ -195,7 +195,10 @@ test("pi-subagents 0.62.0 rejects clarify and correlates a public workflow leaf"
   const historicalRoot=resolve(piBinary,"../..");
   const historicalEnv={...process.env,PI_PACKAGE_DIR:historicalRoot,PI_REAL_BIN:piBinary,PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT:historicalRoot};
   const piVersion = (await execFileAsync(piBinary, ["--version"], { encoding: "utf8",env:historicalEnv })).stdout.trim();
-  assert.ok(["0.87.1"].includes(piVersion), `历史0.62 lane必须绑定0.87.1 Host: ${piVersion}`);
+  // 本机 Host 已升级到受支持版本（1.0.4），不再存在 0.87.1；该 lane 的历史前提是
+  // “upstream pi-subagents 0.62.0 装在受支持 Host 内”。因此接受当前受支持 Host，
+  // 也仍允许通过 PI_HISTORICAL_REAL_BIN 显式绑定 0.87.1 复现历史组合。
+  assert.ok(SUPPORTED_PI_VERSIONS.includes(piVersion) || piVersion === "0.87.1", `历史0.62 lane 需要受支持 Host（${SUPPORTED_PI_VERSIONS.join("/")}）或显式 0.87.1 历史 Host: ${piVersion}`);
 
   const root = await mkdtemp(join(tmpdir(), "pi-subagents-045-workflow-"));
   const npmRoot = join(root, "npm");
