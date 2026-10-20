@@ -718,13 +718,13 @@ Guide agents through decision points:
   If workflows become large or complicated with many steps, consider pushing them into separate files and tell the agent to read the appropriate file based on the task at hand.
 </Tip>
 
-## Evaluation and iteration
+## 评估建议与迭代
 
-### Build evaluations first
+### 可选：用户授权后的评估驱动方法
 
-**Create evaluations BEFORE writing extensive documentation.** This ensures your Skill solves real problems rather than documenting imagined ones.
+新增评估、测试或压力场景须先取得用户明确授权；既有测试和断言可随已授权修复调整。Skill 编写和文档更新不默认要求先创建评估，也不要求删除已有文档重做基线。
 
-**Evaluation-driven development:**
+**仅在用户明确授权新增评估时参考以下方法：**
 
 1. **Identify gaps**: Run your agent on representative tasks without a Skill. Document specific failures or missing context
 2. **Create evaluations**: Build three scenarios that test these gaps
@@ -755,7 +755,7 @@ This approach ensures you're solving actual problems rather than anticipating re
 
 ### Develop Skills iteratively with the agent
 
-The most effective Skill development process involves the agent itself. Work with one instance ("Agent A") to create a Skill that will be used by other instances ("Agent B"). Agent A helps you design and refine instructions, while Agent B tests them in real tasks. This works because the underlying models understand both how to write effective agent instructions and what information agents need.
+可利用已授权真实工作中的观察迭代 Skill；也可在用户明确授权新增评估后，以不同 agent 对照措辞效果。以下是可选方法，不要求默认创建 fresh-context run、测试 harness、压力实验或额外 reviewer。
 
 **Creating a new Skill:**
 
@@ -775,7 +775,7 @@ The most effective Skill development process involves the agent itself. Work wit
 
 5. **Improve information architecture**: Ask Agent A to organize the content more effectively. For example: "Organize this so the table schema is in a separate reference file. We might add more tables later."
 
-6. **Test on similar tasks**: Use the Skill with Agent B (a fresh instance with the Skill loaded) on related use cases. Observe whether Agent B finds the right information, applies rules correctly, and handles the task successfully.
+6. **按授权范围验证**：复用已有工作观察和检查；用户授权新增行为评估后，再用 fresh instance 运行相关场景并记录可观察结果。
 
 7. **Iterate based on observation**: If Agent B struggles or misses something, return to Agent A with specifics: "When the agent used this Skill, it forgot to filter by date for Q4. Should we add a section about date filtering patterns?"
 
@@ -797,7 +797,7 @@ The same hierarchical pattern continues when improving Skills. You alternate bet
 
 4. **Review Agent A's suggestions**: Agent A might suggest reorganizing to make rules more prominent, using stronger language like "MUST filter" instead of "always filter", or restructuring the workflow section.
 
-5. **Apply and test changes**: Update the Skill with Agent A's refinements, then test again with Agent B on similar requests
+5. **应用并记录**：更新 Skill，运行适用的既有检查；新增评估须明确授权，未执行不冒充验证通过。
 
 6. **Repeat based on usage**: Continue this observe-refine-test cycle as you encounter new scenarios. Each iteration improves the Skill based on real agent behavior, not assumptions.
 

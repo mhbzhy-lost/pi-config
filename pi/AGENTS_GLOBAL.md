@@ -65,7 +65,7 @@ generic（纯文本/调研）：`{agent, task}` 必填，`{title, model}` 可选
 
 ```js
 // coding
-subagent_start({ agent: "executor", task: "修复登录 bug", writePaths: ["src/auth/**"], acceptance: { criteria: ["测试通过"] }, worktree: true });
+subagent_start({ agent: "executor", task: "修复登录 bug", writePaths: ["src/auth/**"], acceptance: { criteria: ["合法登录恢复预期行为"] }, worktree: true });
 // generic
 subagent_start({ agent: "reviewer", task: "审阅当前 diff 并报告风险" });
 ```
@@ -86,9 +86,9 @@ subagent_start({ agent: "reviewer", task: "审阅当前 diff 并报告风险" })
 派发前核对：任务的正确完成状态是否依赖执行中发现的新信息。是 → 探索型任务（先派只读诊断，产出报告落盘，修复任务引用报告原文）；否 → 执行型任务（正常派发）。
 
 - 仅当用户明确要求本会话 inline 执行时才可 inline；刚亲自读取过原始证据、变更点单一明确不构成 inline 理由，仍按上述规则派发。
-- 粒度上限是一次派发一个精确变更：blocker、high、测试分属不同派发。
-- 30 分钟是单个派发预计执行时长（含测试）的任务组织预算，不是 runtime watchdog 硬上限：runtime 的 execution deadline、startup collector、RPC 默认超时与 lease 续租等是各自独立的配置，与该预算不是同一 timeout，不得把 30 分钟当成实际执行时限。预计超预算的任务优先按阶段拆小，不为满足预算构建复杂拆分策略，确有冲突时按停止条件上报。修复与真实运行不得打包进同一派发。
-- 不假设 child 自动继承 skills，也不把 skill 全文注入 task：确需使用某项未被禁用的 skill 时，必须在 task 中给出该 skill 的确切文件路径并要求执行者先 read 再使用；默认不得在 task 中注入任何 TDD 类 skill 路径（共享规范默认禁用 TDD，见 `pi/AGENTS_SHARED.md`）。
+- 粒度上限是一次派发一个精确变更：blocker、high 分属不同派发；已获授权的测试任务可单独派发。
+- 30 分钟是单个派发预计执行时长（含实际获准的验证）的任务组织预算，不是 runtime watchdog 硬上限：runtime 的 execution deadline、startup collector、RPC 默认超时与 lease 续租等是各自独立的配置，与该预算不是同一 timeout，不得把 30 分钟当成实际执行时限。预计超预算的任务优先按阶段拆小，不为满足预算构建复杂拆分策略，确有冲突时按停止条件上报。修复与真实运行不得打包进同一派发。
+- 不假设 child 自动继承 skills，也不把 skill 全文注入 task：确需使用某项 skill 时，必须在 task 中给出该 skill 的确切文件路径并要求执行者先 read 再使用。
 
 | 粒度 | 可派发 |
 |---|---|
@@ -101,20 +101,15 @@ subagent_start({ agent: "reviewer", task: "审阅当前 diff 并报告风险" })
 
 每次派发必须在 task 中包含停止条件：列出发现什么情况时应停下报告而不是继续执行。对所有 agent 生效的通用停止条件见 `pi/AGENTS_SHARED.md`；child 上报后由本会话决策或交用户排除。
 
-child 边界文字按保守措辞写入 task：`contact_supervisor` 在该 child 实际可用时，用它上报并等待决定；不可用时不得指示 child 调用不存在的工具，而是要求在输出中列出阻塞事实后结束任务。某 agent 能否调用 `contact_supervisor` 以其 profile 的 `tools` 白名单为事实（例如 `reviewer` 未列入该工具，`executor`/`delegate` 已列入）；不得为绕过这一点给 reviewer 追加工具权限，也不得在派发时假设工具一定可用。runtime 注入的 child 边界块目前仍是无条件的 `contact_supervisor` 指令，与该条件化文字的刻意差异及同步责任归 `src/agents-shared/index.ts` 的 owner，本文件不代替它，也不改 `pi/AGENTS_SHARED.md` 的政策。
+child 边界文字按保守措辞写入 task：`contact_supervisor` 在该 child 实际可用时，用它上报并等待决定；不可用时不得指示 child 调用不存在的工具，而是要求在输出中列出阻塞事实后结束任务。`contact_supervisor` **不需要写进 agent profile 的 `tools`**，profile 声明也不是它可用性的权威：上游 pi-subagents 在 child 运行时按 supervisor channel metadata 注册该工具（`intercom/native-supervisor-channel.js` 的 `registerNativeSupervisorClient`），`runs/shared/permissions.js` 把它列入不可被 permission 规则 gate 的 `INTERNAL_TOOLS`，`runs/shared/child-tool-plan.js` 也明确它不是 allowlist 的强制项。因此三个档位（含 `reviewer`）的白名单都不声明它；实际可用性取决于该 child 是否取得 supervisor channel metadata，没有 metadata 的 child 不会注册，仍不得在派发时假设工具一定可用。reviewer 不因该工具存在而改变只读审阅、直接返回结论的角色方法论；不得为绕过这一点给 reviewer 追加工具权限。runtime 注入的 child 边界块目前仍是无条件的 `contact_supervisor` 指令，与该条件化文字的刻意差异及同步责任归 `src/agents-shared/index.ts` 的 owner，本文件不代替它，也不改 `pi/AGENTS_SHARED.md` 的政策。
 
 ### 模型分级
 
-- 用户明确指定模型时，遵照用户指令。
-- 使用裸 model-id 进行模型选择；裸名解析失败不是正常 fallback：停止派发并报告。
+- 默认省略 `subagent_start` 的 `model`，由 runtime 按 agent profile 的 `models` 候选顺序选择首个当前可用模型。只有用户明确指定本次派发模型时才传入 `model`；不得自行从 roster 选模、重复填写首个候选或按任务难度换模。
+- 用户明确指定模型时，遵照用户指令，保留用户给出的裸 model-id 或 qualified `provider/model` 形式，交由 runtime 校验；解析或候选校验失败时停止派发并报告，不自主换模或显式指定其他模型重派。
 - review 任务使用 review 档（`reviewer`）；复杂开发使用 primary 档（`delegate`）；确定性执行使用 deterministic 档（`executor`）。
+- `reviewer` 是**只读档**：工具面只有 `read,grep,find,ls,bash`，没有写入、编辑或派发能力。不得把落盘、改文件、新建记录、提交或任何需要写权限的任务派给 `reviewer`；需要产出文件时改用 `executor`/`delegate`，审阅结果由主会话或写档档位落盘。
 - 档位能力不足时降优先级拆小任务，不升档。
-
-### 模型不可用紧急补救
-
-subagent 模型不可用时，qualified 补救仍先走常规档位候选校验（runtime 先解析 profile 档位候选，再处理显式 model）：经非敏感模型目录或 typed 工具的可用性信息确认后，在本次 `subagent_start` 中显式写明 qualified `provider/model` 字段重新派发。显式 model 不能绕过校验：qualified 必须精确匹配当前可用模型目录并通过 API guard，与档位候选同一门槛；候选全部不可用或候选 API guard 失败时，显式 model 同样不得强行通过，应停止派发并报告。不得直接读取凭据或凭据文件内容，不得把 provider 请求失败当作自动换模的触发条件。
-
-qualified 显式选用与常规选择的区别：常规选择用裸 model-id 交由 runtime 解析档位与候选；紧急补救是候选校验确认后的显式 `provider/model` 指定，仅用于恢复当次派发，不改变模型选择逻辑，也不构成裸名解析失败或 provider 失败时的运行时 fallback——裸名解析失败仍按上条停止派发并报告。
 
 ### Worktree 选择
 

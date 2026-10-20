@@ -24,4 +24,4 @@ package 内由 Node 直接执行的 `scripts/*.ts` 和所有 `src/**/*.ts` 均�
 
 ## T9 acceptance probe
 
-`repository-merge-queue-acceptance.ts` 是诊断/验收 CLI，不属于 production coordinator。合同验证先运行 `node --test test/repository-merge-queue-acceptance-probe.test.mjs`；真实验收另行显式执行，禁止以 deterministic/fake model 代替 coding child。测试 barrier 只允许五个不同 trusted child 在相同 `baseCommit` 登记后一次释放，并且失败必须保留临时 repo、queue、worktree 与进程现场。
+`repository-merge-queue-acceptance.ts` 是诊断/验收 CLI，不属于 production coordinator。合同验证可按任务范围选择既有 `node --test test/repository-merge-queue-acceptance-probe.test.mjs`，先审计副作用；新增测试、全新 fixture 和压力场景需要用户具体授权，既有测试和既有断言可随生产修复同步调整。真实验收另行显式执行，禁止以 deterministic/fake model 代替 coding child。测试 barrier 只允许五个不同 trusted child 在相同 `baseCommit` 登记后一次释放，并且失败必须保留临时 repo、queue、worktree 与进程现场。

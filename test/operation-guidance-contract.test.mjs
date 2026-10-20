@@ -9,7 +9,7 @@
 //   行为层的 spawn 回执整句由 test/subagent-runtime-membrane.test.mjs 覆盖（该文件原第 1419 行
 //   逐字钉住旧句，经父层授权仅按选项 A 修正为匹配新文案，其他断言与生产逻辑未动）。
 // - 不导入、不启动 Host、不联网、不调用 provider；不读取 settings/models/auth/session/authority/state。
-// - 不给 reviewer 加权限：只断言 profile 的 tools 白名单里仍没有 contact_supervisor。
+// - 不给 reviewer 加权限：断言三个档位的 profile `tools` 都不声明 contact_supervisor（该工具由上游 child runtime 注册）。
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -28,6 +28,7 @@ const read = (relative) => readFileSync(join(ROOT, relative), "utf8");
 const globalMd = () => read("pi/AGENTS_GLOBAL.md");
 const reviewerMd = () => read("pi/agents/reviewer.md");
 const executorMd = () => read("pi/agents/executor.md");
+const delegateMd = () => read("pi/agents/delegate.md");
 const extensionTs = () => read("packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts");
 const reminderTs = () => read("packages/pi-subagents-enhanced/src/workspace/completion-reminder.ts");
 const bashAsyncTs = () => read("src/bash-async/index.ts");
@@ -233,7 +234,8 @@ test("引导合同：AGENTS_GLOBAL 保留治理/授权/恢复/预算政策，只
     ["coding child-owned 集成", "CHILD_OWNS_INTEGRATION"],
     ["terminal proof", "都不等于 terminal proof"],
     ["工单需用户确认", "任何工单、申请流程，直接向用户取得确认"],
-    ["模型不可用恢复顺序", "不得把 provider 请求失败当作自动换模的触发条件"],
+    ["模型默认省略与候选顺序", "默认省略 `subagent_start` 的 `model`"],
+    ["模型解析失败不自主换模", "不自主换模或显式指定其他模型重派"],
     ["resume 决策顺序", "本规则只描述主管对既有 `subagent_run_resume` 能力的决策顺序"],
   ]) {
     assert.ok(md.includes(needle), `GLOBAL 政策丢失（${label}）：${needle}`);
@@ -242,11 +244,16 @@ test("引导合同：AGENTS_GLOBAL 保留治理/授权/恢复/预算政策，只
   assert.equal(md.includes("allowedActionsFor"), false);
 });
 
-test("引导合同：child 边界保守措辞、contact_supervisor 可用性与 profile 白名单关系显式说明", () => {
+test("引导合同：child 边界保守措辞、contact_supervisor 由 runtime 注册而非 profile 声明", () => {
   const md = globalMd();
   assert.match(md, /`contact_supervisor` 在该 child 实际可用时/);
   assert.match(md, /不可用时不得指示 child 调用不存在的工具/);
-  assert.match(md, /以其 profile 的 `tools` 白名单为事实/);
+  // 用户裁决：profile 不再声明该工具；GLOBAL 必须写明上游 runtime 注册机制与三个上游依据。
+  assert.match(md, /不需要写进 agent profile 的 `tools`/);
+  assert.match(md, /registerNativeSupervisorClient/);
+  assert.match(md, /INTERNAL_TOOLS/);
+  assert.match(md, /不是 allowlist 的强制项/);
+  assert.match(md, /没有 metadata 的 child 不会注册/);
   assert.match(md, /不得为绕过这一点给 reviewer 追加工具权限/);
   // 刻意差异与 owner 同步责任已记录；SHARED/agents-shared 本迁移不改。
   assert.match(md, /src\/agents-shared\/index\.ts/);
@@ -255,12 +262,13 @@ test("引导合同：child 边界保守措辞、contact_supervisor 可用性与 
   assert.match(sharedSource, /经 contact_supervisor（reason: \\"need_decision\\"）上报并等待决定/, "agents-shared 注入文本本任务未改");
 });
 
-test("引导合同：不给 reviewer 追加工具权限；executor/delegate 白名单保持原样", () => {
+test("引导合同：不给 reviewer 追加工具权限；三个档位都不在 profile 声明 contact_supervisor", () => {
   const toolsOf = (md) => /^tools:\s*(.+)$/m.exec(md)?.[1]?.trim() ?? "";
   const reviewer = toolsOf(reviewerMd());
   assert.equal(reviewer, "read,grep,find,ls,bash", `reviewer tools 白名单不得变化：${reviewer}`);
-  assert.equal(reviewer.includes("contact_supervisor"), false);
-  assert.ok(toolsOf(executorMd()).includes("contact_supervisor"), "executor 仍保留 contact_supervisor");
+  for (const [name, md] of [["reviewer", reviewerMd()], ["executor", executorMd()], ["delegate", delegateMd()]]) {
+    assert.equal(toolsOf(md).includes("contact_supervisor"), false, `${name} 不再声明 contact_supervisor，该工具由 child runtime 注册`);
+  }
 });
 
 /* ------------------------------------------------------------------ */

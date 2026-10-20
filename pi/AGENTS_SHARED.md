@@ -4,9 +4,7 @@
 
 ## 测试与逻辑变更
 
-默认行为：任何情况下不得使用 tdd 开发方式，也不得使用任何 tdd 类型的 skill，包括不得 read/load 此类 skill 文件。
-
-用户授权：用户明确要求为某项功能点补充测试，或使用 tdd 开发某个需求，此时可在该明确授权范围内豁免。运行既有测试、阅读现有测试代码不构成对 tdd 方式的自动或持续授权。
+未经用户明确授权，agent 严禁主动新增测试。
 
 ## 敏感信息
 
@@ -42,7 +40,6 @@ Git 管理的信息必须脱敏。
 - TUI 只渲染精简投影，不改写 raw payload；agent 实际收到的消息、tool result、session 内容及其结构化 details 不得为展示目的被改写（根目录 TUI 精简边界同样适用）。
 - 不覆盖 dirty 现场；不对受管 workspace 执行 stash、reset 或 raw git worktree 操作，需要清理时报告并等待指示。
 - completion/status 回执不等于 terminal proof，完成与否以实际验证证据为准。
-- 不得使用 deepseek 系列模型。
 
 ## 停止条件
 

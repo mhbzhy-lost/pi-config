@@ -591,7 +591,6 @@ function assertCodingSpawnIdentity(identity) {
 
 const CODING_ACCEPTANCE_EVIDENCE = Object.freeze([
   "changed-files",
-  "tests-added",
   "commands-run",
   "validation-output",
   "residual-risks",

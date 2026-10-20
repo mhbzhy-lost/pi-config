@@ -38,20 +38,27 @@ test("agent profiles keep runtime configuration in frontmatter and cannot grant 
   assertModelChain(executor, "executor", "medium");
   assertModelChain(delegate, "delegate", "high");
   const subagentConfig = JSON.parse(await readFile(new URL("../pi/extensions/subagent/config.json", import.meta.url), "utf8"));
-  assert.deepEqual(subagentConfig.providerBlacklist, ["deepseek"]);
+  // 用户裁决（2026-10-19）：移除 provider 硬编码黑名单。该 key 既不被上游消费，也不被本仓 runtime 读取，
+  // 保留会造成“仍有黑名单”的误导；模型可用性权威是 registry/profile 候选链与 runtime 校验。
+  assert.equal(Object.hasOwn(subagentConfig, "providerBlacklist"), false, "config.json 不得保留已废弃的 providerBlacklist");
   // systemPromptMode: append 是用户明确授权的 M07 决策：Pi 原生 preamble/tools/rules 保留，
   // 角色正文作为 addendum 追加；配置事实必须留在 frontmatter，正文不承担配置职责。
   // 工具面即权限面：逐字固定三份 profile 的 tools，角色正文或后续改动不得扩大；
   // 委派与受管 workspace 处置工具属于父会话，child profile 一律不持有。
   for (const [text, label] of [[reviewer, "reviewer"], [executor, "executor"], [delegate, "delegate"]]) {
-    assert.doesNotMatch(text, /^\s*- deepseek\//m, `${label} models 候选链不得包含 deepseek`);
     assert.match(text, /^systemPromptMode: append$/m, `${label} 必须显式声明 systemPromptMode: append`);
     assert.doesNotMatch(text, /^inheritGlobal:/m, `${label} 不得设置 inheritGlobal`);
     assert.doesNotMatch(text, /^tools:.*(?:subagent|worktree)/m, `${label} tools 不得包含委派或 workspace 处置工具`);
+    // contact_supervisor 由上游 child runtime 按 supervisor channel metadata 注册，属不可 gate 的 INTERNAL_TOOL；
+    // profile 不声明它是正确做法，不得以断言把它钉回白名单。
+    assert.doesNotMatch(text, /^tools:.*contact_supervisor/m, `${label} 不得在 profile tools 声明 contact_supervisor`);
   }
-  assert.match(executor, /^tools: read,write,edit,bash,grep,find,ls,apply_patch,contact_supervisor$/m, "executor tools 面必须保持原授权不变");
-  assert.match(delegate, /^tools: read,write,edit,bash,grep,find,ls,apply_patch,contact_supervisor$/m, "delegate tools 面必须保持原授权不变");
+  assert.match(executor, /^tools: read,write,edit,bash,grep,find,ls,apply_patch$/m, "executor tools 面必须保持只含实现/验证工具");
+  assert.match(delegate, /^tools: read,write,edit,bash,grep,find,ls,apply_patch$/m, "delegate tools 面必须保持只含实现/验证工具");
   assert.match(reviewer, /^tools: read,grep,find,ls,bash$/m, "reviewer 保持只读工具面，不得获得写权限");
+  // reviewer 的只读属性必须对派发方可见：description 是 roster/派发决策入口，必须明写无写入能力。
+  assert.match(reviewer, /^description: .*只读.*$/m, "reviewer description 必须强调只读属性");
+  assert.match(reviewer, /^description: .*(?:无写入|不得用于落盘).*$/m, "reviewer description 必须说明不能承接落盘任务");
   // 角色职责保留在正文（不再把正文出现“runtime”等字样本身当违规，配置事实改为验证
   // frontmatter）：审阅只读职责与发现格式、执行验证职责、委派边界与共享规范引用。
   assert.match(reviewerBody, /计划执行前.*(?:审阅|审查)/);

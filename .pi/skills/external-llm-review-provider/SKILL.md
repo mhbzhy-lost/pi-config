@@ -80,17 +80,19 @@ _PROVIDER_CLS: dict[str, type[BaseProvider]] = {
 
 更新当前 provider 表、provider 选择规则、CLI 枚举与必要的协议说明；当前表格中的运行时事实必须与 YAML、白名单和 push gate 一致。
 
-### 7. TDD 测试（至少 2 个）
+### 7. 测试建议（待用户授权）
 
-先写两个测试：YAML 加载能构造正确 provider 类并插值测试 key；`resolve_provider()` 接受 `<name>`。先运行并确认 RED，再实现注册和协议代码，最后运行确认 GREEN。
+建议覆盖 YAML 加载、正确 provider 类与测试 key 插值、`resolve_provider()` 白名单。只有用户明确授权新增测试、全新 fixture 或压力场景后才编写；既有测试和断言可随 provider 修复同步调整，不要求先 RED 再实现。
 
-对 streaming provider，测试必须覆盖请求含 `stream: true` 与 `stream_options.include_usage: true`；SSE 同时有 content/reasoning 时最终取 content、content 为空时回退 reasoning；usage-only chunk；以及 error JSON 仅输出白名单字段的脱敏错误。
+以下是获授权后的建议覆盖：
 
-标准非流式 OpenAI provider 必须单独测试 `/chat/completions`、Bearer header、`client.post`，且请求不含 `stream` 或 Qwen 扩展字段；测试 `message.content`、空/畸形响应和脱敏错误。不得默认复用 `IdealabOpenAIProvider`。
+对 streaming provider，建议覆盖请求含 `stream: true` 与 `stream_options.include_usage: true`；SSE 同时有 content/reasoning 时最终取 content、content 为空时回退 reasoning；usage-only chunk；以及 error JSON 仅输出白名单字段的脱敏错误。
 
-对 Pi auth，测试必须覆盖成功结果优先于环境变量、超时/不可执行/非零退出/空输出四类失败均回退到环境变量，以及双来源不可用时仅报告 `Pi auth lookup <reason>; IDEALAB_OPENAI_API_KEY fallback unavailable`，不包含原始输出。
+标准非流式 OpenAI provider 建议单独覆盖 `/chat/completions`、Bearer header、`client.post`，且请求不含 `stream` 或 Qwen 扩展字段；测试 `message.content`、空/畸形响应和脱敏错误。不得默认复用 `IdealabOpenAIProvider`。
 
-对 provider 退役，测试必须覆盖旧 provider 被 `resolve_provider()` 和 CLI choices 拒绝，以及 push gate 仅按现役 provider 的既定顺序尝试 fallback。
+对 Pi auth，建议覆盖成功结果优先于环境变量、超时/不可执行/非零退出/空输出四类失败均回退到环境变量，以及双来源不可用时仅报告 `Pi auth lookup <reason>; IDEALAB_OPENAI_API_KEY fallback unavailable`，不包含原始输出。
+
+对 provider 退役，建议覆盖旧 provider 被 `resolve_provider()` 和 CLI choices 拒绝，以及 push gate 仅按现役 provider 的既定顺序尝试 fallback。
 
 ### 8. Healthcheck 验证
 
@@ -118,7 +120,9 @@ uv run --no-project --with httpx --with python-dotenv --with pyyaml python _heal
 
 是否把 provider 变更加入 push gate 必须作出显式决策，并在变更说明中记录加入或不加入及原因；不得由注册或 YAML 变更隐式推导。
 
-## 全量回归
+## 按需既有回归
+
+以下为既有检查参考，先核实依赖、网络与副作用，按实际授权范围选择；不因加载本 Skill 自动运行全仓测试或安装依赖。
 
 ```bash
 cd skill-overrides/external-llm-review
@@ -162,5 +166,5 @@ feat(external-llm-review): 增加 <vendor> provider（异源评审第 N 链路�
 - .env.example: 追加 <NAME>_API_KEY 占位说明
 - SKILL.md: provider 表、选型表、CLI 示例均更新
 
-TDD: 先写 YAML 构造与白名单接受测试，确认 RED 后实现 GREEN。N/N 通过。
+验证：按实际执行记录检查命令、结果和未验证范围；新增测试、全新 mock/fixture 和压力场景必须有明确授权；既有测试结果、断言和 fixture 可随已授权生产修复同步调整。
 ```

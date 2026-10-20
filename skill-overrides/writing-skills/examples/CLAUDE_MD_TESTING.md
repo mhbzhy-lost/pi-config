@@ -132,9 +132,9 @@ Not checking before you start is choosing to repeat those mistakes.
 Start here: `skills/using-skills`
 ```
 
-## Testing Protocol
+## 可选评估方案（新增评估须用户明确授权）
 
-For each variant:
+本例作为措辞对照资料保留，不是 Skill 写作前置门禁。只有用户明确授权新增评估后，才可对各变体执行以下步骤：
 
 1. **Run NULL baseline** first (no skills doc)
    - Record which option agent chooses
@@ -179,9 +179,9 @@ For each variant:
 
 **Variant D:** Balanced, but longer - will agents internalize it?
 
-## Next Steps
+## 后续建议（待用户明确授权新增测试）
 
-1. Create subagent test harness
+1. 获授权后创建 subagent test harness
 2. Run NULL baseline on all 4 scenarios
 3. Test each variant on same scenarios
 4. Compare compliance rates

@@ -207,9 +207,6 @@ export function projectManagedWorkspaceTerminalProof(
 
 export default function subagentRuntime(pi: ExtensionAPI): void {
   if (process.env.PI_SUBAGENT_CHILD === "1" || process.env.PI_SUBAGENT_FANOUT_CHILD === "1") return;
-  // 0.71 config is write-only at the public boundary (contract §4, types.d.ts:2592-2600).
-  // Provider policy is owned by this package; do not read upstream private config.
-  const providerBlacklist = ["deepseek"];
   const { renderSubagentCall, renderSubagentResult, renderSupervisorRequest, renderControlNotice, renderSupervisorCall, renderSupervisorResult, renderSupervisorReplyEntry, renderCompletionNotification } = createSubagentToolRenderers();
   // Host binding：共享 AGENTS 注入项从可信 PI_CODING_AGENT_DIR 解析（与 repository
   // agent admission 同一准入 env，缺失即失败，不做回退推断）。package 实现不得
@@ -310,7 +307,6 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
   });
   try {
   installHeadlessTypedSubagentRuntime(pi, {
-    providerBlacklist,
     diagnosticSink,
     workingStateTrace: diagnosticSink,
     requiredSharedChildExtension: agentsSharedChildExtension,

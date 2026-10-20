@@ -23,8 +23,8 @@ LLMs respond to the same persuasion principles as humans. Understanding this psy
 
 **Example:**
 ```markdown
-✅ Write code before test? Delete it. Start over. No exceptions.
-❌ Consider writing tests first when feasible.
+✅ 处置资源前核对权威 owner、当前允许动作和一次性 token。
+❌ 凭显示状态猜测 owner 并跳过权限校验。
 ```
 
 ### 2. Commitment
@@ -61,8 +61,8 @@ LLMs respond to the same persuasion principles as humans. Understanding this psy
 
 **Example:**
 ```markdown
-✅ After completing a task, IMMEDIATELY request code review before proceeding.
-❌ You can review code when convenient.
+✅ 用户明确授权成果 review 后，携带具体产物和验收范围派发。
+❌ 将任务完成自动解释成额外 reviewer 授权。
 ```
 
 ### 4. Social Proof
