@@ -30,7 +30,7 @@ export class DurableStorage {
         const pid = held.value.pid ?? (birth ? Number(birth[1]) : undefined);
         if (!Number.isSafeInteger(pid) || pid <= 0 || typeof held.value.owner !== "string" || !held.value.owner
           || (birth && Number(birth[1]) !== pid)) throw new DurableStorageError("DURABLE_LOCK_UNPROVEN");
-        try { process.kill(pid, 0); throw new DurableStorageError("DURABLE_LOCK_HELD"); }
+        try { process.kill(pid, 0); throw new DurableStorageError("DURABLE_LOCK_HELD", `DURABLE_LOCK_HELD: durable owner PID ${pid} is still present; key=${key}`); }
         catch (error: any) {
           if (error instanceof DurableStorageError) throw error;
           // 只有内核明确回答ESRCH才能证明原owner已退出；EPERM或其他错误均不抢。
@@ -84,7 +84,8 @@ export class DurableStorage {
     let handle;
     try { handle = await open(guard, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); }
     catch (error: any) {
-      if (error?.code === "EEXIST") throw new DurableStorageError("DURABLE_LOCK_HELD");
+      // 空 guard 无 owner 证据；保留现场并指出实际阻塞阶段，不能按年龄自动抢锁。
+      if (error?.code === "EEXIST") throw new DurableStorageError("DURABLE_LOCK_HELD", `DURABLE_LOCK_HELD: mutation guard exists; key=${key}; guard owner is unproven, preserve the guard for scoped recovery`, { cause: error });
       throw new DurableStorageError("DURABLE_LOCK_UNPROVEN", "DURABLE_LOCK_UNPROVEN", { cause: error });
     }
     try { return await work(); }
