@@ -10,7 +10,9 @@
 // - renderActivityLayout(input): ActivityLayoutResult
 //     主视图 footer 工厂：元数据先连续渲染（第一行 cwd 左/context 右；第二元数据行
 //     provider/model 左 + thinking 右，放不下时分别换行且均从 col1 共同左基线开始，
-//     不留空 activity 槽），活动区全部在元数据之后连续绘制；recent 只折叠为单行
+//     不留空 activity 槽），活动区在元数据之后连续绘制（元数据整块与首个实际可见
+//     动态块之间插入一个空白行，计入同一物理预算；无可见动态块时不留空行）；
+//     recent 只折叠为单行
 //     `◯ recent N` 提示；stale/unavailable source 显示独立状态行，旧行不进入主视图、
 //     不计入 main/recent 数量；主视图物理行预算 max(0, terminalRows-6)，预算紧时按
 //     每 kind 首个完整 block 的公平策略填充，超出时最后一行显示「还有 N 项 · Alt+O」。
@@ -597,7 +599,10 @@ export function renderActivityRows(
  * 行结构（物理行预算 max(0, terminalRows-6)，顺序固定）：
  * 1. 元数据连续渲染：cwd（左）/ context（右）；provider/model（左）+ thinking（右），
  *    放不下时分别换行且均从 col1 共同左基线开始；不留空 activity 槽位；
- * 2. 活动区全部在元数据之后连续绘制：entry 块（统一左基线 + 状态公共右列）→
+ * 2. 活动区在元数据之后连续绘制（元数据整块与首个实际可见动态块之间有且仅有一个
+ *    空白行，计入同一物理预算；无可见动态块时不产生尾随空行，元数据换行不在其内部
+ *    插空行；预算不足时该行随动态块按既有整块降级让位，不留悬空空行）：
+ *    entry 块（统一左基线 + 状态公共右列）→
  *    stale/unavailable source 独立状态行（旧行不渲染、不计入 main/recent 数量）→
  *    recent 汇总单行 `◯ recent N`（N 按统一列表 key 去重；recent 不逐条进主视图）；
  * 3. 溢出提示行「还有 N 项 · Alt+O」（N=预算外 activity 条目数，预留最后一行，col1 起）。
@@ -674,27 +679,43 @@ export function renderActivityLayout(input: ActivityLayoutInput): ActivityLayout
   const entryCount = mainRows.length;
 
   // —— 预算装配：全放得下 → 稳定整块；否则元数据让位 + 公平填充 + 溢出提示 ——
-  const fullLines = [...meta1, ...meta2, ...blocks.flatMap((block) => block.lines)];
+  // 元数据整块与首个实际可见动态块之间插入一个空白行：计入同一物理预算，满预算与
+  // 紧预算路径均只在确有可见动态块行时插入；无可见动态块不留尾随空行，元数据换行
+  // 不在其续行中插空行；预算不足时该行随动态块一起让位（不留悬空空行）。
+  const SEPARATOR_LINE: DisplayLine = [];
+  const hasDynamicBlocks = blocks.length > 0;
+  const fullLines = [
+    ...meta1,
+    ...meta2,
+    ...(hasDynamicBlocks ? [SEPARATOR_LINE] : []),
+    ...blocks.flatMap((block) => block.lines),
+  ];
   let lines: DisplayLine[];
   let overflowCount = 0;
   if (fullLines.length <= budget) {
     lines = fullLines;
   } else if (blocks.length === 0) {
-    // 无活动块：元数据自身超预算时按物理预算截断显示行（不虚构活动）
+    // 无活动块：元数据自身超预算时按物理预算截断显示行（不虚构活动，也不留分隔空行）
     lines = fullLines.slice(0, budget);
   } else {
-    const metaLines = meta1.slice(0, budget); // 第一元数据行优先保留
+    const metaLines = meta1.slice(0, budget); // 第一元数据行优先保留（整块，不在其内部插空行）
     const remaining = budget - metaLines.length;
     if (remaining <= 0) {
       lines = metaLines;
       overflowCount = entryCount;
     } else {
-      const available = remaining - 1; // 预留最后一行给溢出提示/被折叠信息行
+      // 预留最后一行给溢出提示/被折叠信息行；剩余 >=2 行时再预留 1 行给分隔行
+      //（保证分隔行与至少一个动态块行可同时容纳，极小高度不留悬空空行）
+      const available = remaining - 1 - (remaining > 1 ? 1 : 0);
       const { chosen, droppedEntries, droppedInfos } = fillBlocks(
         fairFillOrder(blocks),
         available,
       );
-      lines = [...metaLines, ...chosen.flatMap((block) => block.lines)];
+      lines = [
+        ...metaLines,
+        ...(chosen.length > 0 ? [SEPARATOR_LINE] : []),
+        ...chosen.flatMap((block) => block.lines),
+      ];
       overflowCount = droppedEntries;
       if (droppedEntries > 0) {
         lines.push(...composeOverflowHintLine(droppedEntries, width));
