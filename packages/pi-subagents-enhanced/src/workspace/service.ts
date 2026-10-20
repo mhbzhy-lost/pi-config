@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 
 import { createManagedWorkspaceRequestV2 } from "./contract.ts";
+import { DISPOSITION_PREPARE_VERSION, isPreparedWorkspaceDisposition, dispositionBindingMatches, type PreparedWorkspaceDispositionV1 } from "./disposition-contract.ts";
 import {
   ensureManagedGitWorkspace,
   inspectManagedGitWorkspace,
@@ -14,6 +15,7 @@ import {
   applyPublishedArtifact,
   fastForwardManagedGitWorkspace,
   inspectManagedIntegrationAdmission,
+  inspectManagedNoPayload,
 } from "./git-worktree.ts";
 import {
   allowedActionsFor,
@@ -279,6 +281,11 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
     return receipt(lease.record);
   }
 
+  function noPayloadFacts(binding: any) {
+    const lease = loadIntegrationBinding(binding);
+    return inspectManagedNoPayload(lease.record);
+  }
+
   function integrationAdmissionFacts(input: any, binding: any) {
     activeAdmissionProbe?.();
     const lease = loadIntegrationBinding(binding);
@@ -532,6 +539,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
 
   function recoverDisposition(lease, settledProof = undefined) {
     const pending = lease.record.pendingAction;
+    if (isPreparedWorkspaceDisposition(pending)) throw failure("MANAGED_WORKSPACE_RECOVERY", "coordinator must settle the prepared workspace disposition");
     if (lease.record.state !== "disposing" || !pending) throw managedWorkspaceStateFailure(lease.record.state, "workspace has no disposition to recover");
     try {
       if (pending.disposition === "preserve") {
@@ -579,6 +587,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
       record.actionChallenge.used = true;
       record.state = "disposing";
       record.disposition = normalizedDisposition;
+      if (observed(snapshot.terminalProof)) record.terminalProof = structuredClone(snapshot.terminalProof);
       record.pendingAction = {
         disposition,
         strategy: disposition === "integrate" ? strategy : null,
@@ -603,7 +612,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
 
   function issueReleaseForLease(lease, { terminalProof }: { terminalProof?: unknown } = {}) {
     if (lease.record.state !== "preserved" && lease.record.state !== "cleanup-debt") throw managedWorkspaceStateFailure(lease.record.state, "release authorization requires a preserved workspace");
-    const proof = proofValue(terminalProof);
+    const proof = lease.record.run ? resolveProof(lease.record, terminalProof) : proofValue(terminalProof);
     if (lease.record.run && !observed(proof)) throw failure("MANAGED_WORKSPACE_TERMINAL", "release requires an observed terminal proof");
     const token = actionToken();
     const next = mutate(lease, record => { record.actionChallenge = { tokenHash: tokenHash(token), snapshotHash: null, allowed: ["release"], proofHash: observed(proof) ? proof.proofId : null, used: false }; return record; });
@@ -616,18 +625,17 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
     if (lease.record.state !== "preserved" && lease.record.state !== "cleanup-debt") {
       throw managedWorkspaceStateFailure(lease.record.state, "only a preserved or cleanup-debt workspace can be released");
     }
-    const proof = proofValue(terminalProof);
-    // Unbound preserved workspaces have no terminal proof to bind; issue a
-    // one-shot internal challenge for legacy administrative cleanup. Bound
-    // workspaces must always supply the explicit proof/token pair.
+    const proof = lease.record.run ? resolveProof(lease.record, terminalProof) : proofValue(terminalProof);
+    if (lease.record.run && !observed(proof)) throw failure("MANAGED_WORKSPACE_TERMINAL", "release requires an observed terminal proof");
+    // 无显式 token 的公开回收也必须经过同一证明校验和内部一次性授权。
+    if (suppliedToken === undefined) {
+      const authorization = issueReleaseForLease(lease, { terminalProof: proof });
+      suppliedToken = authorization.actionToken;
+      lease = load(lease.workspaceId);
+    }
     const challenge = lease.record.actionChallenge;
-    // Preserve the established direct/admin release semantics for unbound
-    // records and dispositions whose original challenge was already consumed;
-    // recovery-tool release still requires its explicit token/proof at the
-    // coordinator boundary.
-    const legacyRelease = suppliedToken === undefined && (!lease.record.run || challenge?.used === true);
-    if (!legacyRelease && (!challenge || challenge.used || !challenge.allowed?.includes("release") || tokenHash(suppliedToken) !== challenge.tokenHash
-        || challenge.proofHash !== (observed(proof) ? proof.proofId : null))) {
+    if (!challenge || challenge.used || !challenge.allowed?.includes("release") || tokenHash(suppliedToken) !== challenge.tokenHash
+        || challenge.proofHash !== (observed(proof) ? proof.proofId : null)) {
       throw failure("MANAGED_WORKSPACE_ACTION", "release action token or terminal proof is stale, replayed, or invalid");
     }
     try {
@@ -635,6 +643,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
       releaseManagedGitWorkspace(lease.record, { expectedHead: inspection.headCommit });
       lease = mutate(lease, (record) => {
         if (record.actionChallenge) record.actionChallenge.used = true;
+        if (observed(proof)) record.terminalProof = structuredClone(proof);
         record.state = "released";
         record.cleanupDebt = null;
         record.disposition ??= { action: "discard" };
@@ -653,6 +662,138 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
 
   function releaseOwned({ workspaceId, ownerScope, terminalProof, actionToken: suppliedToken }: ReleaseInput & { ownerScope: WorkspaceOwnerScope }) {
     return releaseForLease(loadOwned(workspaceId, ownerScope), { terminalProof, actionToken: suppliedToken });
+  }
+
+  /** 授权消费和准备记录在 workspace ledger 同一次 CAS 中完成。 */
+  function prepareOwnedDisposition(input: any, context: { settlementId: string; queueItem?: any }) {
+    let lease = loadOwned(input.workspaceId, input.ownerScope);
+    if (storageRepositoryId !== undefined) ledger.load(lease.workspaceId, { originRoot: lease.record.request.originRoot });
+    const operation = input.operation ?? input.disposition;
+    if (!["preserve", "discard", "release"].includes(operation)) throw failure("MANAGED_WORKSPACE_DISPOSITION", "coordinator disposition operation is invalid");
+    if (isPreparedWorkspaceDisposition(lease.record.pendingAction) && lease.record.pendingAction.phase !== "settled") {
+      throw failure("MANAGED_WORKSPACE_RECOVERY", "workspace disposition must finish recovery before accepting another action");
+    }
+    let proof: any;
+    let snapshotHash: string | null;
+    let suppliedToken = input.actionToken;
+    let inspection: any;
+    const legacy = lease.record.state === "disposing" && lease.record.pendingAction
+      && !isPreparedWorkspaceDisposition(lease.record.pendingAction) ? lease.record.pendingAction : null;
+    if (legacy) {
+      // 旧合法 writer 已消费的同一授权可升级；缺原 token 或完整匹配 proof 时保留现场。
+      proof = resolveProof(lease.record, input.terminalProof);
+      if (legacy.disposition !== operation || legacy.executorHead === null || legacy.proofHash !== (observed(proof) ? proof.proofId : null)
+          || (operation !== "preserve" && !observed(proof)) || (operation === "preserve" && legacy.reason !== input.reason)) {
+        throw failure("MANAGED_WORKSPACE_RECOVERY", "legacy disposition lacks its original action and matching proof");
+      }
+      inspection = { headCommit: legacy.executorHead };
+      snapshotHash = legacy.snapshotHash;
+    } else if (operation === "release") {
+      if (!["preserved", "cleanup-debt"].includes(lease.record.state)) throw managedWorkspaceStateFailure(lease.record.state, "release requires preserved or cleanup-debt state");
+      proof = lease.record.run ? resolveProof(lease.record, input.terminalProof) : proofValue(input.terminalProof);
+      if (lease.record.run && !observed(proof)) throw failure("MANAGED_WORKSPACE_TERMINAL", "release requires an observed terminal proof");
+      if (suppliedToken === undefined) {
+        suppliedToken = issueReleaseForLease(lease, { terminalProof: proof }).actionToken;
+        lease = loadOwned(input.workspaceId, input.ownerScope);
+      }
+      inspection = inspectManagedGitWorkspace(lease.record);
+      snapshotHash = null;
+    } else {
+      const snapshot = statusForLease(lease, input);
+      proof = snapshot.terminalProof;
+      inspection = snapshot.inspection;
+      snapshotHash = snapshot.snapshotHash;
+      if (!snapshot.allowedDispositions.includes(operation)) throw failure("MANAGED_WORKSPACE_TERMINAL", "disposition is not allowed by the current terminal proof");
+      assertExpectedHead(inspection, input.expectedHead);
+    }
+    const challenge = lease.record.actionChallenge;
+    if (!challenge || challenge.used !== Boolean(legacy) || !challenge.allowed.includes(operation)
+        || challenge.tokenHash !== tokenHash(suppliedToken) || challenge.snapshotHash !== snapshotHash
+        || challenge.proofHash !== (observed(proof) ? proof.proofId : null)) {
+      throw failure("MANAGED_WORKSPACE_ACTION", "workspace disposition authorization is stale or invalid");
+    }
+    const q = context.queueItem;
+    const binding = {
+      workspaceId: lease.workspaceId, leaseId: lease.leaseId, rootSessionId: lease.record.request.owner.rootSessionId,
+      runId: lease.record.run?.runId ?? null, asyncDir: lease.record.run?.asyncDir ?? null,
+      queueItemId: q?.queueItemId ?? null, queueLeaseId: q?.queueLeaseId ?? null,
+      queueRevision: q?.revision ?? null, admissionGeneration: q?.admissionGeneration ?? null,
+    };
+    if (q && (q.workspaceId !== binding.workspaceId || q.leaseId !== binding.leaseId || q.childRunId !== binding.runId
+        || q.ownerScope?.kind !== "standalone-subagent" || q.ownerScope?.rootSessionId !== binding.rootSessionId)) {
+      throw failure("MANAGED_WORKSPACE_BINDING", "queue item does not match workspace disposition binding");
+    }
+    const prepared: PreparedWorkspaceDispositionV1 = {
+      schemaVersion: DISPOSITION_PREPARE_VERSION, settlementId: context.settlementId, operation,
+      reason: operation === "preserve" ? input.reason : null, binding, authorizedRevision: lease.revision,
+      snapshotHash, proofHash: observed(proof) ? proof.proofId : null, executorHead: inspection.headCommit,
+      phase: "prepared", workspaceReceiptRef: null, queueReceiptRef: null,
+    };
+    if (!isPreparedWorkspaceDisposition(prepared)) throw failure("MANAGED_WORKSPACE_SCHEMA", "workspace disposition prepare is invalid");
+    lease = mutate(lease, record => {
+      if (record.revision !== prepared.authorizedRevision || record.actionChallenge?.used !== Boolean(legacy)
+          || record.actionChallenge?.tokenHash !== challenge.tokenHash) throw failure("MANAGED_WORKSPACE_CAS", "workspace changed before disposition prepare");
+      record.actionChallenge.used = true;
+      if (observed(proof)) record.terminalProof = structuredClone(proof);
+      record.state = "disposing";
+      record.pendingAction = structuredClone(prepared);
+      record.disposition = operation === "preserve" ? { action: "preserve", reason: prepared.reason } : { action: "discard" };
+      return record;
+    });
+    activeFault?.({ operation: "settlement", phase: "after-workspace-prepare", workspaceId: lease.workspaceId });
+    return structuredClone(lease.record.pendingAction) as PreparedWorkspaceDispositionV1;
+  }
+
+  function preparedLease(input: any) {
+    const lease = loadOwned(input.workspaceId, input.ownerScope);
+    if (storageRepositoryId !== undefined) ledger.load(lease.workspaceId, { originRoot: lease.record.request.originRoot });
+    const prepared = lease.record.pendingAction;
+    if (!isPreparedWorkspaceDisposition(prepared) || prepared.settlementId !== input.settlementId || !dispositionBindingMatches(lease.record, prepared)) {
+      throw failure("MANAGED_WORKSPACE_BINDING", "prepared workspace disposition identity changed");
+    }
+    return { lease, prepared };
+  }
+
+  function applyPreparedDisposition(input: any) {
+    const { lease, prepared } = preparedLease(input);
+    if (prepared.phase !== "prepared") return receipt(lease.record);
+    if (prepared.operation !== "preserve") releaseManagedGitWorkspace(lease.record, { expectedHead: prepared.executorHead });
+    else assertExpectedHead(inspectManagedGitWorkspace(lease.record), prepared.executorHead);
+    activeFault?.({ operation: "settlement", phase: "after-workspace-git-before-commit", workspaceId: lease.workspaceId });
+    const next = mutate(lease, record => {
+      if (!same(record.pendingAction, prepared)) throw failure("MANAGED_WORKSPACE_CAS", "prepared workspace changed before effect commit");
+      record.state = prepared.operation === "preserve" ? "preserved" : "released";
+      record.cleanupDebt = null;
+      record.pendingAction.phase = "effect-committed";
+      record.pendingAction.workspaceReceiptRef = `wsr-${prepared.settlementId}`;
+      return record;
+    });
+    activeFault?.({ operation: "settlement", phase: "after-workspace-effect", workspaceId: lease.workspaceId });
+    return receipt(next.record);
+  }
+
+  function readPreparedDisposition(input: any): PreparedWorkspaceDispositionV1 {
+    return structuredClone(preparedLease(input).prepared);
+  }
+
+  function listPreparedDispositions(): readonly PreparedWorkspaceDispositionV1[] {
+    return ledger.list({ storagePartitionOnly: storageRepositoryId !== undefined }).filter(record => isPreparedWorkspaceDisposition(record.pendingAction)
+      && record.pendingAction.phase !== "settled").map(record => structuredClone(record.pendingAction));
+  }
+
+  function markDispositionSettled(input: any) {
+    const { lease, prepared } = preparedLease(input);
+    if (prepared.phase === "settled") {
+      if (prepared.queueReceiptRef !== input.queueReceiptRef) throw failure("MANAGED_WORKSPACE_BINDING", "settlement receipt identity changed");
+      return receipt(lease.record);
+    }
+    if (prepared.phase !== "effect-committed" || input.queueReceiptRef !== `qsr-${prepared.settlementId}`) throw failure("MANAGED_WORKSPACE_RECOVERY", "workspace effect or queue receipt is incomplete");
+    return receipt(mutate(lease, record => {
+      if (!same(record.pendingAction, prepared)) throw failure("MANAGED_WORKSPACE_CAS", "workspace changed before settlement receipt");
+      record.pendingAction.phase = "settled";
+      record.pendingAction.queueReceiptRef = input.queueReceiptRef;
+      return record;
+    }).record);
   }
 
   function listOwned({ ownerScope, runId }: { ownerScope: WorkspaceOwnerScope; runId?: string }) {
@@ -705,8 +846,9 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
       activeAdmissionProbe = options.admissionProbe;
     },
     reserve, ensureAllocated, bindRun, rebindRunForRecovery, recordTerminalProof, listOwned, status, statusOwned, issueDisposition, issueOwnedDisposition, issueAction,
+    prepareOwnedDisposition, readPreparedDisposition, applyPreparedDisposition, listPreparedDispositions, markDispositionSettled,
     publishOwned, applyOwned, discardOwned, dispose, disposeOwned, issueRelease, release, releaseOwned, reconcile,
-    integrationAdmissionFacts, admissionFactsForClaim, prepareIntegrationIntent, completeIntegrationIntent, managedRebase, integrationState, inspectIntegrationCompletion, preserveIntegrationDebt, abandonIntegrationIntent,
+    integrationAdmissionFacts, admissionFactsForClaim, noPayloadFacts, prepareIntegrationIntent, completeIntegrationIntent, managedRebase, integrationState, inspectIntegrationCompletion, preserveIntegrationDebt, abandonIntegrationIntent,
   });
 }
 

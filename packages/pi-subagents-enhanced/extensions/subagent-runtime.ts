@@ -34,6 +34,7 @@ import { createCoordinatorServer } from "../src/workspace/coordinator-server.ts"
 import { createManagedWorkspaceLedger } from "../src/workspace/ledger.ts";
 import { resolveRepositoryIdentity } from "../src/workspace/repository-identity.ts";
 import { createManagedWorkspaceService } from "../src/workspace/service.ts";
+import { createCoordinatorDispositionFacade } from "../src/workspace/disposition-facade.ts";
 import { createWorkspaceCompletionReminder } from "../src/workspace/completion-reminder.ts";
 import { bindManagedWorkspaceServiceSession, unbindManagedWorkspaceServiceSession } from "../src/workspace/registry.ts";
 
@@ -391,6 +392,13 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
             return projectManagedWorkspaceTerminalProof(run, snapshot);
           },
         });
+        workspaceService = coordinatorRuntime?.client
+          ? createCoordinatorDispositionFacade({ localService: workspaceService, coordinatorClient: coordinatorRuntime.client,
+            resolveTerminalProof(run) {
+              const snapshot = run?.runId ? startingBroker.inspectExecutionProof(run.runId) : null;
+              return projectManagedWorkspaceTerminalProof(run, snapshot);
+            } })
+          : workspaceService;
         bindManagedWorkspaceServiceSession(pi, rootSessionId, workspaceService);
         process.env.PI_ROOT_SUBAGENT_BROKER_ENABLED = "1";
         brokerReady = true;

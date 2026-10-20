@@ -32,7 +32,11 @@ const Request = Type.Object({
   role: Type.Union([Type.Literal("root-broker"), Type.Literal("root-host"), Type.Literal("admin"), Type.Literal("coordinator-internal")]),
   capability: Digest, method: Type.String(), params: Type.Record(Type.String(), Type.Unknown()),
 }, { additionalProperties: false });
-const Reply = Type.Object({ protocol: Type.Literal(COORDINATOR_PROTOCOL_VERSION), requestId: Type.String(), repositoryId: Digest, ok: Type.Boolean(), result: Type.Optional(Type.Unknown()), error: Type.Optional(Type.String()) }, { additionalProperties: false });
+const ErrorInfo = Type.Object({
+  code: Type.Optional(Type.String()), keypath: Type.Optional(Type.String()),
+  detail: Type.Optional(Type.Union([Type.String(), Type.Object({ state: Type.String(), allowedActions: Type.Array(Type.String()), nextAction: Type.String() }, { additionalProperties: false })])),
+}, { additionalProperties: false });
+const Reply = Type.Object({ protocol: Type.Literal(COORDINATOR_PROTOCOL_VERSION), requestId: Type.String(), repositoryId: Digest, ok: Type.Boolean(), result: Type.Optional(Type.Unknown()), error: Type.Optional(Type.String()), errorInfo: Type.Optional(ErrorInfo) }, { additionalProperties: false });
 const RegistrationRequest = Type.Object({
   protocol: Type.Literal(COORDINATOR_PROTOCOL_VERSION), requestId: Type.String(), repositoryId: Digest,
   method: Type.Literal("broker.register"), brokerRegistry: Type.Object({
@@ -57,6 +61,7 @@ function strictCheck(schema: any, value: any): boolean {
   if (schema.type === "string") return typeof value === "string" && (!schema.pattern || new RegExp(schema.pattern).test(value));
   if (schema.type === "number") return typeof value === "number" && Number.isFinite(value);
   if (schema.type === "boolean") return typeof value === "boolean";
+  if (schema.type === "array") return Array.isArray(value) && value.every(item => strictCheck(schema.items, item));
   if (schema.anyOf) return schema.anyOf.some((child: any) => strictCheck(child, value));
   return true;
 }

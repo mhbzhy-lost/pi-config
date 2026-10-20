@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { createCoordinatorLedger } from "./coordinator-ledger.ts";
+import { isPreparedWorkspaceDisposition, type PreparedWorkspaceDispositionV1 } from "./disposition-contract.ts";
 import { assertProcessBirthOutput } from "../subagent-dispatch/process-birth-identity.ts";
 import { createIntegrationResumeIntentV1, progressFingerprint } from "../subagent-dispatch/recovery-resume-contract.ts";
 
@@ -355,6 +356,101 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
     if (authorization.authorized !== true) throw new Error("authorized cancel is required");
     return transition(receipt, "cancelled");
   }
+  const settlementIndex = "disposition-settlement-index.json";
+  function settlementFile(settlementId: string) { return `disposition-${id(settlementId, "settlementId")}.json`; }
+  function validateDispositionIntent(value: any, name: string) {
+    if (!value || Object.keys(value).length !== 5 || value.schemaVersion !== "workspace-queue-settlement-intent.v1"
+        || !isPreparedWorkspaceDisposition(value.prepared) || name !== settlementFile(value.prepared.settlementId)
+        || !["authorized", "workspace-committed", "queue-committed", "settled"].includes(value.phase)
+        || value.workspaceReceiptRef !== (value.phase === "authorized" ? null : `wsr-${value.prepared.settlementId}`)
+        || value.queueReceiptRef !== (["queue-committed", "settled"].includes(value.phase) ? `qsr-${value.prepared.settlementId}` : null)) throw new Error("invalid settlement intent");
+    return value;
+  }
+  function listDispositionIntents(): any[] {
+    return ledger.read<string[]>(settlementIndex, []).map(name => {
+      if (typeof name !== "string" || !/^disposition-[A-Za-z0-9._-]+\.json$/.test(name) || name.includes("..")) throw new Error("invalid settlement index");
+      const value = ledger.read<any>(name, null);
+      validateDispositionIntent(value, name);
+      return structuredClone(value);
+    });
+  }
+  function recordDispositionIntent(prepared: PreparedWorkspaceDispositionV1) {
+    if (!isPreparedWorkspaceDisposition(prepared)) throw new Error("invalid prepared disposition");
+    return ledger.withLock(() => {
+      const name = settlementFile(prepared.settlementId);
+      const existing = ledger.read<any>(name, null);
+      if (existing) {
+        validateDispositionIntent(existing, name);
+        const prior = existing.prepared;
+        for (const field of ["settlementId", "operation", "reason", "binding", "authorizedRevision", "snapshotHash", "proofHash", "executorHead"]) {
+          if (JSON.stringify(prior?.[field]) !== JSON.stringify(prepared[field])) throw new Error("settlement intent identity mismatch");
+        }
+      }
+      const next = existing ?? { schemaVersion: "workspace-queue-settlement-intent.v1", prepared: structuredClone(prepared), phase: "authorized", workspaceReceiptRef: null, queueReceiptRef: null };
+      ledger.write(name, next);
+      const names = ledger.read<string[]>(settlementIndex, []);
+      if (!names.includes(name)) ledger.write(settlementIndex, [...names, name]);
+      return structuredClone(next);
+    });
+  }
+  function advanceDispositionIntent(settlementId: string, phase: string) {
+    return ledger.withLock(() => {
+      const name = settlementFile(settlementId);
+      const value = ledger.read<any>(name, null);
+      const phases = ["authorized", "workspace-committed", "queue-committed", "settled"];
+      if (!value || !phases.includes(phase)) throw new Error("settlement intent is unavailable");
+      validateDispositionIntent(value, name);
+      if (phases.indexOf(value.phase) >= phases.indexOf(phase)) return value;
+      if (phases.indexOf(phase) !== phases.indexOf(value.phase) + 1) throw new Error("settlement phase cannot skip an effect");
+      const next = { ...value, phase, workspaceReceiptRef: `wsr-${settlementId}`, queueReceiptRef: ["queue-committed", "settled"].includes(phase) ? `qsr-${settlementId}` : null };
+      ledger.write(name, next);
+      return structuredClone(next);
+    });
+  }
+  function verifyDispositionBinding(prepared: PreparedWorkspaceDispositionV1) {
+    if (!isPreparedWorkspaceDisposition(prepared)) throw new Error("invalid prepared disposition");
+    const b = prepared.binding;
+    if (!b.queueItemId) return;
+    const current = getItem(b.queueItemId);
+    if (!current || current.workspaceId !== b.workspaceId || current.leaseId !== b.leaseId || current.childRunId !== b.runId
+        || current.ownerScope?.rootSessionId !== b.rootSessionId || current.ownerScope?.kind !== "standalone-subagent"
+        || (current.queueLeaseId ?? null) !== b.queueLeaseId || current.admissionGeneration !== b.admissionGeneration
+        || (current.dispositionSettlementId === prepared.settlementId
+          ? current.dispositionReceiptRef !== `qsr-${prepared.settlementId}` || !["completed", "cancelled", "preserved"].includes(current.state)
+          : current.revision !== b.queueRevision)) throw new Error("settlement queue binding or revision mismatch");
+  }
+  function settleDispositionQueue(prepared: PreparedWorkspaceDispositionV1) {
+    return ledger.withLock(() => {
+      verifyDispositionBinding(prepared);
+      const b = prepared.binding;
+      if (!b.queueItemId) return { receiptRef: `qsr-${prepared.settlementId}` };
+      const current = getItem(b.queueItemId);
+      if (!current || current.workspaceId !== b.workspaceId || current.leaseId !== b.leaseId || current.childRunId !== b.runId
+          || current.ownerScope?.rootSessionId !== b.rootSessionId || current.ownerScope?.kind !== "standalone-subagent"
+          || (current.queueLeaseId ?? null) !== b.queueLeaseId || current.admissionGeneration !== b.admissionGeneration) throw new Error("settlement queue binding mismatch");
+      if (current.dispositionSettlementId !== prepared.settlementId) {
+        if (current.revision !== b.queueRevision) throw new Error("settlement queue revision changed");
+        const terminal = ["completed", "cancelled", "preserved"].includes(current.state);
+        save(`${current.queueItemId}.json`, { ...current, state: terminal ? current.state : prepared.operation === "preserve" ? "preserved" : "cancelled",
+          revision: current.revision + 1, dispositionSettlementId: prepared.settlementId, dispositionReceiptRef: `qsr-${prepared.settlementId}` });
+      } else if (current.dispositionReceiptRef !== `qsr-${prepared.settlementId}` || !["completed", "cancelled", "preserved"].includes(current.state)) throw new Error("settlement queue receipt mismatch");
+      // 同一锁下写队列终态和匹配 handoff；单个文件写后崩溃仍由此分支幂等补齐。
+      for (const intent of loadResumeIntentsUnlocked()) {
+        if (intent.queueItemId === b.queueItemId && intent.workspaceId === b.workspaceId && intent.sourceRunId === b.runId
+            && intent.ownerScope?.rootSessionId === b.rootSessionId && RESUME_ACTIVE_STATES.includes(intent.state)) {
+          saveResumeIntentUnlocked({ ...intent, state: "completed", updatedAt: new Date().toISOString() });
+        }
+      }
+      for (const name of recoveryFiles()) {
+        const intent = recoveryLoad(name);
+        if (intent?.queueItemId === b.queueItemId && intent.workspaceId === b.workspaceId && intent.runId === b.runId
+            && intent.ownerScope?.rootSessionId === b.rootSessionId && intent.state === "preserved") {
+          ledger.write(name, { ...intent, state: prepared.operation === "preserve" ? "preserved" : "discarded", delivery: { ...intent.delivery, state: "delivered" }, updatedAt: new Date().toISOString() });
+        }
+      }
+      return { receiptRef: `qsr-${prepared.settlementId}` };
+    });
+  }
   function retryItem(receipt: any) {
     return ledger.withLock(() => {
       const current = load(`${id(receipt.queueItemId, "queueItemId")}.json`);
@@ -373,5 +469,6 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
     if (status.state === "dead" || status.state === "mismatch") { const next = { ...current, state: "queued", revision: current.revision + 1, daemonClaim: undefined, queueLeaseId: undefined, childAdmissionLeaseId: undefined }; save(`${current.queueItemId}.json`, next); recovered.push(next); }
   } return recovered; }); }
   return Object.freeze({ enqueueIntegration, claimNext, getItem, findByBinding, preserveByBinding, prepareCandidate, completePrepared, markResolvingConflict, completeItem, failItem, cancelItem, retryItem, recoverClaims, listQueue, recoveryIntent, listRecoveryIntents, mutateRecovery, markRecoveryDelivery, notificationDeliveryDebt,
-    requestChildResume, promoteRecoverableHead, markResumeDelivery, markResumeStarting, markResumeActivated, completeResumeIntent, failResumeIntent, listResumeIntents, rebindChildRunForRecovery, refreshAuthorizedWorkspaceHead });
+    requestChildResume, promoteRecoverableHead, markResumeDelivery, markResumeStarting, markResumeActivated, completeResumeIntent, failResumeIntent, listResumeIntents, rebindChildRunForRecovery, refreshAuthorizedWorkspaceHead,
+    recordDispositionIntent, advanceDispositionIntent, listDispositionIntents, verifyDispositionBinding, settleDispositionQueue });
 }

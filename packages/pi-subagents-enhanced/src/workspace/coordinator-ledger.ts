@@ -46,6 +46,8 @@ export function createCoordinatorLedger(directory: string) {
     const descriptor = openSync(temporary, "w", 0o600);
     try { writeFileSync(descriptor, `${JSON.stringify(value)}\n`); fsyncSync(descriptor); } finally { closeSync(descriptor); }
     renameSync(temporary, target);
+    const directoryDescriptor = openSync(directory, "r");
+    try { fsyncSync(directoryDescriptor); } finally { closeSync(directoryDescriptor); }
   }
   return Object.freeze({ directory, withLock, read, write, exists: (file: string) => existsSync(path.join(directory, file)) });
 }

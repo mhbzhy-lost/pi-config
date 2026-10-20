@@ -12,6 +12,8 @@ import { canonicalWorkspaceStateRoot } from "./coordinator-registry.ts";
 import { createManagedWorkspaceService } from "./service.ts";
 import { createIntegrationQueue } from "./integration-queue.ts";
 import { auditManagedWorkspaces } from "./administration.ts";
+import { toCoordinatorErrorInfo } from "./coordinator-errors.ts";
+import { createWorkspaceDispositionSettlement } from "./disposition-settlement.ts";
 
 type CoordinatorFault = (event: { operation: string; phase: string; queueItemId?: string; workspaceId?: string }) => void;
 type CoordinatorDiagnostic = (entry: unknown) => void;
@@ -27,6 +29,7 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
   const brokerCapabilities = new Map<string, string>();
   const socketCapabilities = new Map<net.Socket, Set<string>>();
   const clients = new Set<net.Socket>(); let active = 0; let retained = 0; let timer: NodeJS.Timeout | undefined;
+  let startupReady = false;
   // The durable queue, ledger records and proof outbox must share the ledger's
   // canonical partition; a symlinked alias would otherwise split the bucket.
   const declaredStateRoot = options.stateRoot ?? process.env.PI_CODING_WORKSPACE_DIR;
@@ -44,6 +47,8 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
   const proofOutbox = proofOutboxDirectory ? createCoordinatorProofOutbox(proofOutboxDirectory) : undefined;
   const processBirthIdentity = createHash("sha256").update(execFileSync("/bin/ps", ["-ww", "-p", String(process.pid), "-o", "lstart=", "-o", "command="], { encoding: "buffer" })).digest("hex");
   const daemonIdentity = { instanceId, pid: process.pid, birthIdentity: processBirthIdentity };
+  const dispositionSettlement = workspaceService && integrationQueue
+    ? createWorkspaceDispositionSettlement({ workspaceService, integrationQueue, fault: options.fault }) : undefined;
 
   function assertChildBinding(item: any, binding: any) {
     if (!item || binding?.workspaceId !== item.workspaceId || binding?.leaseId !== item.leaseId
@@ -125,6 +130,18 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
     workspaceService.abandonIntegrationIntent(item, binding);
     const preserved = integrationQueue.failItem({ queueItemId: item.queueItemId, queueLeaseId: item.queueLeaseId, revision: item.revision });
     return input.retry === true ? integrationQueue.retryItem({ queueItemId: preserved.queueItemId, queueLeaseId: preserved.queueLeaseId, revision: preserved.revision }) : preserved;
+  }
+
+  function settleOwnedDisposition(input: any, operation: "preserve" | "discard" | "release") {
+    if (!workspaceService || !integrationQueue || !dispositionSettlement) throw new Error("coordinator settlement is unavailable");
+    const entry = workspaceService.listOwned({ ownerScope: input.ownerScope }).find(candidate => candidate.workspaceId === input.workspaceId);
+    if (!entry) throw Object.assign(new Error("workspace does not belong to this owner"), { code: "MANAGED_WORKSPACE_OWNER_SCOPE" });
+    const binding = { workspaceId: entry.workspaceId, leaseId: entry.leaseId, runId: entry.run?.runId ?? null, ownerScope: input.ownerScope };
+    const queueItem = integrationQueue.findByBinding(binding);
+    const prepared = workspaceService.prepareOwnedDisposition({ ...input, operation }, { settlementId: randomUUID(), queueItem });
+    const result = dispositionSettlement.settlePrepared(prepared);
+    void pumpResumeIntents().catch(error => diagnose({ version: 1, phase: "coordinator-settlement-pump-failed", error, cause: error?.cause }));
+    return result;
   }
 
   function trustedWorkspace(binding: any) {
@@ -284,10 +301,28 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
   }
   async function deliverTerminalProof(proof: any) {
     const { workspaceId, ownerScope: proofOwnerScope, ...terminalProof } = proof;
-    const item = integrationQueue?.listQueue().find((entry: any) => entry.workspaceId === workspaceId);
+    const item = integrationQueue?.listQueue().filter((entry: any) => entry.workspaceId === workspaceId
+      && entry.childRunId === terminalProof.runId && entry.ownerScope?.kind === proofOwnerScope?.kind
+      && entry.ownerScope?.rootSessionId === proofOwnerScope?.rootSessionId).at(-1);
+    if (item?.dispositionSettlementId && ["cancelled", "preserved"].includes(item.state)) {
+      const prepared = workspaceService!.readPreparedDisposition({ workspaceId, ownerScope: proofOwnerScope, settlementId: item.dispositionSettlementId });
+      if (prepared.phase !== "settled" || prepared.proofHash !== terminalProof.proofId
+          || prepared.binding.runId !== terminalProof.runId || prepared.binding.asyncDir !== terminalProof.asyncDir
+          || prepared.queueReceiptRef !== item.dispositionReceiptRef) throw new Error("terminal proof does not match settled disposition receipt");
+      integrationQueue!.verifyDispositionBinding(prepared);
+      const receipt = workspaceService!.markDispositionSettled({ workspaceId, ownerScope: proofOwnerScope, settlementId: prepared.settlementId, queueReceiptRef: prepared.queueReceiptRef });
+      return { accepted: true, proofId: terminalProof.proofId, receipt };
+    }
     if (item && item.state !== "completed") {
       if (item.childRunId !== terminalProof.runId || item.ownerScope?.rootSessionId !== proofOwnerScope?.rootSessionId) {
         throw new Error("terminal proof does not match trusted child binding");
+      }
+      workspaceService!.recordTerminalProof({ workspaceId, ownerScope: proofOwnerScope, proof: terminalProof });
+      const binding = { workspaceId, leaseId: item.leaseId, runId: terminalProof.runId, ownerScope: proofOwnerScope };
+      if (item.state === "queued" && workspaceService!.noPayloadFacts(binding).eligible) {
+        const issued = workspaceService!.issueOwnedDisposition({ workspaceId, ownerScope: proofOwnerScope, terminalProof });
+        const receipt = settleOwnedDisposition({ workspaceId, ownerScope: proofOwnerScope, terminalProof, actionToken: issued.actionToken }, "discard");
+        return { accepted: true, proofId: terminalProof.proofId, receipt };
       }
       // child 在 integration 完成前退出：proof 保持 pending，同时创建/更新
       // durable resume intent；队首 intent 升级后只发送主 Agent 接管提示，
@@ -354,9 +389,16 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
       if (!trusted) throw new Error("trusted run binding is unavailable");
       return structuredClone(trusted);
     };
+    const publicBinding = () => {
+      const entry = workspaceService?.listOwned({ ownerScope }).find((candidate: any) => candidate.workspaceId === input.workspaceId);
+      if (!entry) throw Object.assign(new Error("workspace does not belong to this owner"), { code: "MANAGED_WORKSPACE_OWNER_SCOPE" });
+      return { workspaceId: entry.workspaceId, leaseId: entry.leaseId, runId: entry.run?.runId ?? null, ownerScope };
+    };
     const binding = ["prepare_auto_integration", "inspect_auto_integration", "advance_auto_integration"].includes(params.operation)
       ? registeredBinding()
-      : { workspaceId: input.workspaceId, leaseId: input.leaseId, runId: input.runId, ownerScope };
+      : ["dispose", "release"].includes(params.operation) && (!input.leaseId || !input.runId)
+        ? publicBinding()
+        : { workspaceId: input.workspaceId, leaseId: input.leaseId, runId: input.runId, ownerScope };
     switch (params.operation) {
       case "reserve": return workspaceService.reserve({ ...input, owner: { ...(input.owner ?? {}), kind: ownerScope.kind, rootSessionId: ownerScope.rootSessionId } });
       case "ensureAllocated": return workspaceService.ensureAllocated({ ...input, owner: { ...(input.owner ?? {}), kind: ownerScope.kind, rootSessionId: ownerScope.rootSessionId } });
@@ -368,8 +410,11 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
       case "listOwned": return workspaceService.listOwned(ownedInput);
       case "statusOwned": return workspaceService.statusOwned(ownedInput);
       case "issueDisposition": return workspaceService.issueOwnedDisposition(ownedInput);
-      case "dispose": return workspaceService.disposeOwned(ownedInput);
-      case "release": return workspaceService.releaseOwned(ownedInput);
+      case "dispose": {
+        if (input.disposition === "integrate") return workspaceService.disposeOwned(ownedInput);
+        return settleOwnedDisposition(ownedInput, input.disposition);
+      }
+      case "release": return settleOwnedDisposition(ownedInput, "release");
       case "reconcile": return workspaceService.reconcile(input);
       case "enqueueIntegration": {
         if (integrationQueue?.findByBinding(binding)?.autoManaged === true) throw new Error("auto integration generation rejects manual mutation");
@@ -444,12 +489,10 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
       }
       case "recovery.discard":
         if (typeof input.actionToken !== "string" || !input.terminalProof) throw new Error("discard recovery requires action token and terminal proof");
-        workspaceService!.statusOwned({ workspaceId: input.workspaceId, ownerScope: binding.ownerScope, terminalProof: input.terminalProof, expectedHead: input.expectedHead });
-        return workspaceService!.disposeOwned({ workspaceId: input.workspaceId, ownerScope: binding.ownerScope, terminalProof: input.terminalProof, expectedHead: input.expectedHead, disposition: "discard", actionToken: input.actionToken });
+        return settleOwnedDisposition(ownedInput, "discard");
       case "recovery.release":
         if (typeof input.actionToken !== "string" || !input.terminalProof) throw new Error("release recovery requires action token and terminal proof");
-        workspaceService!.statusOwned({ workspaceId: input.workspaceId, ownerScope: binding.ownerScope, terminalProof: input.terminalProof, expectedHead: input.expectedHead });
-        return workspaceService!.releaseOwned({ workspaceId: input.workspaceId, ownerScope: binding.ownerScope, terminalProof: input.terminalProof, actionToken: input.actionToken });
+        return settleOwnedDisposition(ownedInput, "release");
       default: throw new Error("unsupported coordinator operation");
     }
   }
@@ -481,11 +524,12 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
           const registration = registrations.get(parsed.capability);
           if (!registration) throw new TypeError("Coordinator registration capability mismatch");
           const request = authorizeCoordinatorRequest(parsed, registration);
+          if (!startupReady && !["workspace.status", "receipt.query", "queue.audit"].includes(request.request.method)) throw Object.assign(new Error("coordinator recovery is not ready"), { code: "COORDINATOR_RECOVERY_NOT_READY" });
           active++; handling = true;
           const result = await handle({ ...request, registration });
           socket.write(`${JSON.stringify({ protocol: raw.protocol, requestId, repositoryId: options.repositoryId, ok: true, result })}\n`);
         } catch (error) {
-          socket.write(`${JSON.stringify({ protocol: "repository-workspace-coordinator.v1", requestId, repositoryId: options.repositoryId, ok: false, error: String((error as any)?.message || error) })}\n`);
+          socket.write(`${JSON.stringify({ protocol: "repository-workspace-coordinator.v1", requestId, repositoryId: options.repositoryId, ok: false, error: String((error as any)?.message || error), errorInfo: toCoordinatorErrorInfo(error) })}\n`);
         } finally { if (handling) active--; }
       }
     }); socket.on("close", () => {
@@ -521,15 +565,17 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
     server.listen(options.endpoint);
   });
   function beginActivity() { retained++; if (timer) { clearTimeout(timer); timer = undefined; } let released = false; return () => { if (released) return; released = true; retained--; schedule(); }; }
+  async function finishStartupRecovery() {
+    startupReady = false;
+    dispositionSettlement?.replay();
+    await replayTerminalProofs();
+    await pumpResumeIntents();
+    startupReady = true;
+  }
   async function listen() {
     try {
       await listenOnEndpoint();
-      // Startup replay closes the crash window between durable enqueue and
-      // coordinator availability; failed delivery remains pending.
-      await replayTerminalProofs().catch((error) => { diagnose({ version: 1, phase: "coordinator-proof-replay-failed", error, cause: error?.cause }); });
-      // 启动时升级并投递 crash 前遗留的队首 resume intent；已 delivered 的
-      // intent 不重复投递，投递失败记 debt 由后续触发重放。
-      await pumpResumeIntents().catch((error) => { diagnose({ version: 1, phase: "coordinator-resume-pump-failed", error, cause: error?.cause }); });
+      await finishStartupRecovery();
     } catch (error: any) {
       if (error?.code !== "EADDRINUSE") throw error;
       // A killed daemon can leave the UNIX socket inode behind. Probe it
@@ -542,6 +588,7 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
       if (live) throw error;
       await unlink(options.endpoint).catch(() => undefined);
       await listenOnEndpoint();
+      await finishStartupRecovery();
     }
   }
   const internal = workspaceService && integrationQueue ? Object.freeze({ workspaceService, integrationQueue, enqueueIntegration, awaitIntegrationAdmission, publishRebasedCandidate, reportResolvingConflict, abandonIntegration, inspectIntegrationState, prepareAutoIntegration, inspectAutoIntegration, advanceAutoIntegration, preserveIntegrationDebt, reconcileIntegrations }) : undefined;

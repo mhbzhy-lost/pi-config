@@ -1,6 +1,7 @@
 import net from "node:net";
 import { randomUUID } from "node:crypto";
 import { parseCoordinatorReply } from "./coordinator-protocol.ts";
+import { fromCoordinatorFailure } from "./coordinator-errors.ts";
 import type { CoordinatorMetadata } from "./coordinator-registry.ts";
 export type RepositoryCoordinatorClient = {
   request: (value: any) => Promise<any>;
@@ -51,7 +52,7 @@ export async function connectRepositoryCoordinator(identity: any, brokerRegistra
   const failPending = (error: Error) => { for (const waiter of pending.values()) waiter.reject(error); pending.clear(); };
   const connect = () => new Promise<void>((resolve, reject) => { socket = net.createConnection(endpoint, () => { connected = true; resolve(); }); socket.setEncoding("utf8"); socket.on("data", (chunk) => { buffer += chunk; let i; while ((i = buffer.indexOf("\n")) >= 0) { const line = buffer.slice(0, i); buffer = buffer.slice(i + 1); try { const reply = parseCoordinatorReply(JSON.parse(line)); const waiter = pending.get(reply.requestId); if (waiter) { if (reply.repositoryId !== metadata.repositoryId) waiter.reject(new Error("Coordinator reply repository identity mismatch")); else waiter.resolve(reply); pending.delete(reply.requestId); } } catch (cause) { const error = new Error("Coordinator reply is malformed", { cause }); error.code = "COORDINATOR_PROTOCOL_MALFORMED_REPLY"; failPending(error); socket?.destroy(error); } } }); socket.on("error", (error: Error) => { if (!connected) reject(error); else { const failure = new Error(`Coordinator transport failed: ${error.message}`, { cause: error }); failure.code = "COORDINATOR_TRANSPORT_FAILED"; failPending(failure); } }); socket.on("close", () => failPending(new Error("Coordinator connection closed"))); });
   await connect();
-  const send = (value: any) => { const requestId = value.requestId || randomUUID(); return new Promise<any>((resolve, reject) => { if (!socket || socket.destroyed || !socket.writable) { reject(new Error("Coordinator connection closed")); return; } pending.set(requestId, { resolve: (reply: any) => reply.ok ? resolve(reply.result) : reject(new Error(reply.error || "Coordinator request failed")), reject }); socket.write(`${JSON.stringify({ ...value, requestId })}\n`, (error) => { if (error) { pending.delete(requestId); reject(error); } }); }); };
+  const send = (value: any) => { const requestId = value.requestId || randomUUID(); return new Promise<any>((resolve, reject) => { if (!socket || socket.destroyed || !socket.writable) { reject(new Error("Coordinator connection closed")); return; } pending.set(requestId, { resolve: (reply: any) => reply.ok ? resolve(reply.result) : reject(fromCoordinatorFailure(reply.error || "Coordinator request failed", reply.errorInfo)), reject }); socket.write(`${JSON.stringify({ ...value, requestId })}\n`, (error) => { if (error) { pending.delete(requestId); reject(error); } }); }); };
   const registration = await send({ protocol: "repository-workspace-coordinator.v1", repositoryId: identity.repositoryId, method: "broker.register", brokerRegistry: brokerRegistration });
   if (!registration || !/^[a-f0-9]{64}$/.test(registration.capability) || registration.instanceId !== metadata.instanceId
       || registration.endpoint !== metadata.endpoint || registration.role !== "root-broker"

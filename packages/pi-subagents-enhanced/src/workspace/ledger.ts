@@ -23,6 +23,10 @@ import path from "node:path";
 import {
   createManagedWorkspaceRequestV2,
 } from "./contract.ts";
+import {
+  isPreparedWorkspaceDisposition,
+  dispositionBindingMatches,
+} from "./disposition-contract.ts";
 
 const RECORD_SCHEMA_V2 = "managed-workspace-ledger.v2";
 const LOCK_SCHEMA = "managed-workspace-lock.v1";
@@ -303,6 +307,7 @@ function validateActionChallenge(value) {
 }
 
 function validatePendingAction(value) {
+  if (isPreparedWorkspaceDisposition(value)) return true;
   return value === null || (exactKeys(value, ["disposition", "strategy", "reason", "snapshotHash", "proofHash", "executorHead"])
     && ["integrate", "discard", "preserve"].includes(value.disposition)
     && (value.disposition === "integrate" ? ["cherry-pick", "merge"].includes(value.strategy) : value.strategy === null)
@@ -365,6 +370,10 @@ function validateRecordEnvelope(value, filenameWorkspaceId?: string) {
       || !validateRecoveryChallenge(value.recoveryChallenge)
       || (value.recoveryPlan !== null && !SHA256.test(value.recoveryPlan))) {
     throw failure("MANAGED_WORKSPACE_SCHEMA", "managed workspace record schema is invalid");
+  }
+  if (isPreparedWorkspaceDisposition(value.pendingAction) && (!dispositionBindingMatches(value, value.pendingAction)
+      || value.pendingAction.authorizedRevision >= value.revision)) {
+    throw failure("MANAGED_WORKSPACE_SCHEMA", "prepared disposition does not match its workspace authority");
   }
   return createManagedWorkspaceRequestV2(value.request);
 }
@@ -567,11 +576,11 @@ export function createManagedWorkspaceLedger({ stateRoot = process.env.PI_CODING
     return records.sort((left, right) => left.workspaceId.localeCompare(right.workspaceId)).map((record) => structuredClone(record));
   }
 
-  function list({ originRoot }: LoadOptions = {}) {
+  function list({ originRoot, storagePartitionOnly = false }: LoadOptions & { storagePartitionOnly?: boolean } = {}) {
     const records = [];
     const scopes = originRoot
       ? [managedWorkspacePaths({ stateRoot: root, originRoot, workspaceId: "inventory", storageRepositoryId }).repositoryDir]
-      : scopeDirectories(root);
+      : scopeDirectories(root).filter(directory => !storagePartitionOnly || path.basename(directory) === storageRepositoryId);
     for (const repositoryDir of scopes) {
       const recordsDir = path.join(repositoryDir, "records");
       if (!existsSync(recordsDir)) continue;

@@ -326,6 +326,14 @@ function sequencerActive(cwd) {
     .some((name) => existsSync(path.join(gitDir, name)));
 }
 
+/** 仅以不可变 allocation base 判断空交付，零净差异提交也不能被当成空交付。 */
+export function inspectManagedNoPayload(record: ManagedWorkspaceRecord & { integrationIntent?: unknown; integrationReceipt?: unknown }) {
+  const inspection = inspectManagedGitWorkspace(record);
+  return Object.freeze({ ...inspection, eligible: inspection.clean && inspection.descendant
+    && inspection.headCommit === record.request.baseCommit && inspection.aheadCount === 0
+    && !sequencerActive(record.path) && !record.integrationIntent && !record.integrationReceipt });
+}
+
 const managedGitEnvironment = () => {
   const env = { ...process.env };
   for (const name of Object.keys(env)) {

@@ -496,7 +496,7 @@ test("owner scope gates listOwned and every scoped operation before inspection o
   assert.deepEqual(ledger.load(ownA.workspaceId).record, ownBeforeForeignToken, "cross-session token rejection must precede pending intent");
   const preserved = service.disposeOwned({ workspaceId: ownA.workspaceId, ownerScope: own, terminalProof, disposition: "preserve", reason: "same session", actionToken: issued.actionToken });
   assert.equal(preserved.state, "preserved");
-  assert.equal(service.releaseOwned({ workspaceId: ownA.workspaceId, ownerScope: own }).state, "released");
+  assert.equal(service.releaseOwned({ workspaceId: ownA.workspaceId, ownerScope: own, terminalProof }).state, "released");
   assert.equal(service.statusOwned({ workspaceId: ownZ.workspaceId, ownerScope: own }).receipt.state, "active");
 });
 

@@ -193,7 +193,7 @@ test("Root broker rich terminal snapshot reaches managed workspace status throug
     registerAuthorizedRun(authorization) { registered.push(authorization); return broker.registerAuthorizedRun(authorization); },
   });
 
-  const spawned = await execute(tools[0], codingContract(f.originRoot), f.originRoot);
+  const spawned = await execute(tools.find(tool => tool.name === "subagent_start"), codingContract(f.originRoot), f.originRoot);
   assert.equal(spawned.isError, false, spawned.content[0]?.text);
   f.workspaceIds.add(spawned.details.workspace_id);
   assert.deepEqual(bound.map(({ ticket, binding }) => [ticket.goalId, binding.runId, binding.asyncDir]), [["fixture-goal", "leaf-run", join(f.originRoot, "async-leaf")]]);
@@ -244,7 +244,7 @@ test("typed coding facade allocates, binds, reports, discards, and releases thro
     registerAuthorizedRun: strictAuthorizationRegistrar("coding", registered),
   });
 
-  const spawned = await execute(tools[0], codingContract(f.originRoot), f.originRoot);
+  const spawned = await execute(tools.find(tool => tool.name === "subagent_start"), codingContract(f.originRoot), f.originRoot);
   assert.equal(spawned.isError, false, spawned.content[0]?.text);
   f.workspaceIds.add(spawned.details.workspace_id);
   assert.equal(spawned.details.workspace_state, "active");
@@ -261,22 +261,20 @@ test("typed coding facade allocates, binds, reports, discards, and releases thro
   await writeFile(join(spawned.details.dispatch_cwd, "allowed.txt"), "integrated\n");
   git(spawned.details.dispatch_cwd, "add", "allowed.txt");
   git(spawned.details.dispatch_cwd, "commit", "-m", "child change");
-  const status = await execute(tools[1], { action: "status", workspace_id: spawned.details.workspace_id }, f.originRoot);
+  const status = await execute(tools.find(tool => tool.name === "managed_workspace_status"), { workspace_id: spawned.details.workspace_id }, f.originRoot);
   // v2 workspaces own integration in the child queue; the root tool only
   // offers destructive or preserving dispositions plus release.
   assert.equal(status.details.allowed_dispositions.includes("integrate"), false);
   assert.ok(status.details.allowed_dispositions.includes("discard"));
   assert.ok(status.details.allowed_dispositions.includes("preserve"));
-  const childOwned = await execute(tools[1], {
-    action: "dispose",
+  const childOwned = await execute(tools.find(tool => tool.name === "managed_workspace_dispose"), {
     workspace_id: spawned.details.workspace_id,
     disposition: "integrate",
     action_token: status.details.action_token,
   }, f.originRoot);
   assert.equal(childOwned.isError, true);
   assert.equal(childOwned.details.code, "CHILD_OWNS_INTEGRATION");
-  const disposed = await execute(tools[1], {
-    action: "dispose",
+  const disposed = await execute(tools.find(tool => tool.name === "managed_workspace_dispose"), {
     workspace_id: spawned.details.workspace_id,
     disposition: "discard",
     action_token: status.details.action_token,
@@ -299,23 +297,22 @@ test("typed generic facade preserves and explicitly releases through the same se
     registerAuthorizedRun: strictAuthorizationRegistrar("generic", registered),
   });
 
-  const spawned = await execute(tools[0], { agent: "reviewer", title: "Review", task: "Inspect.", cwd: f.originRoot, worktree: true }, f.originRoot);
+  const spawned = await execute(tools.find(tool => tool.name === "subagent_start"), { agent: "reviewer", title: "Review", task: "Inspect.", cwd: f.originRoot, worktree: true }, f.originRoot);
   assert.equal(spawned.isError, false, spawned.content[0]?.text);
   assert.equal(Object.hasOwn(f.service.status({ workspaceId: spawned.details.workspace_id }).receipt.run, "kind"), false);
   assert.equal(Object.hasOwn(spawned.details, "kind"), false);
   assert.deepEqual(registered[0].capabilities, []);
   assert.equal(registered[0].binding.agentProfile, "reviewer");
   f.workspaceIds.add(spawned.details.workspace_id);
-  const status = await execute(tools[1], { action: "status", workspace_id: spawned.details.workspace_id }, f.originRoot);
+  const status = await execute(tools.find(tool => tool.name === "managed_workspace_status"), { workspace_id: spawned.details.workspace_id }, f.originRoot);
   assert.equal(status.details.allowed_dispositions.includes("integrate"), false);
-  const preserved = await execute(tools[1], {
-    action: "dispose",
+  const preserved = await execute(tools.find(tool => tool.name === "managed_workspace_dispose"), {
     workspace_id: spawned.details.workspace_id,
     disposition: "preserve",
     action_token: status.details.action_token,
   }, f.originRoot);
   assert.equal(preserved.details.workspace_state, "preserved");
-  const released = await execute(tools[1], { action: "release", workspace_id: spawned.details.workspace_id }, f.originRoot);
+  const released = await execute(tools.find(tool => tool.name === "managed_workspace_release"), { workspace_id: spawned.details.workspace_id }, f.originRoot);
   assert.equal(released.details.workspace_state, "released");
   assert.equal(existsSync(spawned.details.dispatch_cwd), false);
 });
@@ -335,7 +332,7 @@ test("typed coding facade canonicalizes composite Host tool call identities for 
   });
 
   const hostToolCallId = `call_${"a".repeat(100)}|fc_${"b".repeat(100)}`;
-  const single = await execute(tools[0], codingContract(f.originRoot), f.originRoot, hostToolCallId);
+  const single = await execute(tools.find(tool => tool.name === "subagent_start"), codingContract(f.originRoot), f.originRoot, hostToolCallId);
   assert.equal(single.isError, false, single.content[0]?.text);
   f.workspaceIds.add(single.details.workspace_id);
   const singleOwner = f.service.status({ workspaceId: single.details.workspace_id }).receipt.owner.toolCallId;
@@ -346,8 +343,8 @@ test("typed coding facade canonicalizes composite Host tool call identities for 
   const firstHostToolCallId = `call_${"c".repeat(100)}|fc_${"d".repeat(100)}`;
   const secondHostToolCallId = `call_${"e".repeat(100)}|fc_${"f".repeat(100)}`;
   const [first, second] = await Promise.all([
-    execute(tools[0], codingContract(f.originRoot), f.originRoot, firstHostToolCallId),
-    execute(tools[0], codingContract(f.originRoot), f.originRoot, secondHostToolCallId),
+    execute(tools.find(tool => tool.name === "subagent_start"), codingContract(f.originRoot), f.originRoot, firstHostToolCallId),
+    execute(tools.find(tool => tool.name === "subagent_start"), codingContract(f.originRoot), f.originRoot, secondHostToolCallId),
   ]);
   for (const result of [first, second]) {
     assert.equal(result.isError, false, result.content[0]?.text);
@@ -364,7 +361,7 @@ test("typed coding facade canonicalizes composite Host tool call identities for 
   assert.equal(registered.length, 3);
   assert.ok(registered.every((authorization) => authorization.capabilities.includes("root.subscribe")));
 
-  const empty = await execute(tools[0], codingContract(f.originRoot), f.originRoot, "");
+  const empty = await execute(tools.find(tool => tool.name === "subagent_start"), codingContract(f.originRoot), f.originRoot, "");
   assert.equal(empty.isError, true);
   assert.equal(empty.details.code, "WORKSPACE_TOOL_CALL_ID_UNAVAILABLE");
 });
@@ -392,7 +389,7 @@ test("standalone coding and generic dispatch allocate managed-workspace-ledger.v
     registerAuthorizedRun: registerEitherAuthorization,
   });
 
-  const coding = await execute(tools[0], codingContract(f.originRoot), f.originRoot, "v2-coding");
+  const coding = await execute(tools.find(tool => tool.name === "subagent_start"), codingContract(f.originRoot), f.originRoot, "v2-coding");
   assert.equal(coding.isError, false, coding.content[0]?.text);
   f.workspaceIds.add(coding.details.workspace_id);
   const codingRecord = ledger.load(coding.details.workspace_id).record;
@@ -403,7 +400,7 @@ test("standalone coding and generic dispatch allocate managed-workspace-ledger.v
     writePaths: ["allowed.txt"],
   });
 
-  const generic = await execute(tools[0], { agent: "reviewer", title: "Review", task: "Inspect.", cwd: f.originRoot, worktree: true }, f.originRoot, "v2-generic");
+  const generic = await execute(tools.find(tool => tool.name === "subagent_start"), { agent: "reviewer", title: "Review", task: "Inspect.", cwd: f.originRoot, worktree: true }, f.originRoot, "v2-generic");
   assert.equal(generic.isError, false, generic.content[0]?.text);
   f.workspaceIds.add(generic.details.workspace_id);
   const genericRecord = ledger.load(generic.details.workspace_id).record;
