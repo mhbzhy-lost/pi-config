@@ -84,7 +84,7 @@ function notifyProviderSource(contract) {
           const users = messages.filter((message) => message?.role === "user").map(text);
           const toolResults = messages.filter((message) => message?.role === "toolResult");
           const lastUser = users.at(-1) ?? "";
-          const dispatched = toolResults.find((message) => message.toolName === "subagent" && /Started /.test(text(message)));
+          const dispatched = toolResults.find((message) => message.toolName === "subagent_start" && /Started /.test(text(message)));
           let tool;
           let output;
           if (lastUser.includes(${JSON.stringify(CHILD_OBJECTIVE_MARKER)})) {
@@ -95,7 +95,7 @@ function notifyProviderSource(contract) {
             // convertToLlm 以 user 消息进入模型上下文），返回 NOTIFIED 终态标记。
             output = lastUser.startsWith("Background task") ? "NOTIFY_PARENT_NOTIFIED" : "NOTIFY_PARENT_DISPATCHED";
           } else if (lastUser.includes(${JSON.stringify(PARENT_PROMPT)})) {
-            tool = { name: "subagent", arguments: contract };
+            tool = { name: "subagent_start", arguments: contract };
           } else {
             output = "NOTIFY_PROVIDER_FALLBACK";
           }
@@ -130,7 +130,7 @@ function parentProbeSource() {
   return `
     export default function (pi) {
       pi.on("session_start", () => {
-        pi.setActiveTools([...new Set([...pi.getActiveTools(), "subagent"])]);
+        pi.setActiveTools([...new Set([...pi.getActiveTools(), "subagent_start"])]);
       });
     }
   `;
@@ -346,7 +346,7 @@ extensions: ${provider}
   let handle;
   const dispatchDeadline = Date.now() + 60_000;
   while (!handle && Date.now() < dispatchDeadline) {
-    const dispatch = host.records.find((record) => record.type === "tool_execution_end" && record.toolName === "subagent");
+    const dispatch = host.records.find((record) => record.type === "tool_execution_end" && record.toolName === "subagent_start");
     if (dispatch?.result?.details?.runId) handle = dispatch.result.details;
     else await delay(50);
   }

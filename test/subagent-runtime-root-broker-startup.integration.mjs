@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, cp, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+
+import { createIsolatedHostRepository } from "./helpers/pi-runtime.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const piBinary = process.env.PI_REAL_BIN;
@@ -27,7 +29,12 @@ function withoutSubagentEnvironment(env) {
 
 test("persisted root session shares its broker registry with an independent Jiti extension", { timeout: 30_000 }, async (t) => {
   assert.ok(piBinary, "PI_REAL_BIN must point to the real Pi binary");
-  const root = await mkdtemp(path.join(os.tmpdir(), "pi-root-broker-registry-"));
+  // Host 必须在独立 Git common-dir 内启动：仓库自身带有 live coordinator，其记录的
+  // state root 与本 fixture 的临时 PI_CODING_WORKSPACE_DIR 不一致会触发
+  // "Coordinator state root scope mismatch" 并 fail closed。
+  const isolated = await createIsolatedHostRepository("pi-root-broker-registry-");
+  const root = isolated.root;
+  const hostCwd = isolated.repository;
   const sessions = path.join(root, "sessions");
   const runtimeTmp = path.join(root, "tmp");
   const agentDir = path.join(root, "agent");
@@ -37,6 +44,10 @@ test("persisted root session shares its broker registry with an independent Jiti
   try {
     await mkdir(agentDir);
     await cp(path.join(repoRoot, "pi", "agents"), path.join(agentDir, "agents"), { recursive: true });
+    // runtime 要求 agents-shared 作为 required child extension 可从可信 agent dir 解析；
+    // 只复制 agents/ 会在 session_start 抛 ENOENT，fixture 必须与生产绑定一致。
+    await mkdir(path.join(agentDir, "extensions"), { recursive: true });
+    await symlink(path.join(repoRoot, "pi", "extensions", "agents-shared.ts"), path.join(agentDir, "extensions", "agents-shared.ts"));
     const result = spawnSync(piBinary, [
       "--mode", "rpc", "--session-dir", sessions, "--session-id", sessionId,
       "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes",
@@ -44,7 +55,7 @@ test("persisted root session shares its broker registry with an independent Jiti
       "-e", provider, "-e", runtime, "-e", probe,
       "--provider", "fake", "--model", "fake/deterministic",
     ], {
-      cwd: repoRoot,
+      cwd: hostCwd,
       encoding: "utf8",
       timeout: 20_000,
       input: `${JSON.stringify({ id: "root-broker-registry-commands", type: "get_commands" })}\n`,
@@ -69,8 +80,10 @@ test("persisted root session shares its broker registry with an independent Jiti
     assert.equal(facts.brokerMarker, "1", JSON.stringify(facts));
     assert.equal(facts.getSessionId, sessionId, JSON.stringify(facts));
     assert.notEqual(facts.getSessionId, facts.getSessionFile, JSON.stringify(facts));
-    assert.ok(facts.allToolNames.includes("subagent"), JSON.stringify(facts));
-    assert.ok(facts.activeToolNames.includes("subagent"), JSON.stringify(facts));
+    // S4 之后注册面是 14 个独立工具；旧 union `subagent` 不得再出现。
+    assert.ok(facts.allToolNames.includes("subagent_start"), JSON.stringify(facts));
+    assert.ok(facts.activeToolNames.includes("subagent_start"), JSON.stringify(facts));
+    assert.equal(facts.allToolNames.includes("subagent"), false, `旧 union 工具不得注册：${JSON.stringify(facts.allToolNames)}`);
     assert.equal(facts.error, null, JSON.stringify(facts));
     assert.equal(facts.brokerRootSessionId, sessionId, JSON.stringify(facts));
     assert.equal(facts.brokerLifecycleSessionId, facts.getSessionFile, JSON.stringify(facts));

@@ -14,7 +14,9 @@ const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 
 async function fixture(t) {
-  const root = await mkdtemp(join(tmpdir(), "coordinator-identity-"));
+  // macOS 的 TMPDIR 本身是 symlink（/var/folders → /private/var）；身份合同要求 canonical
+  // realpath，fixture 根先规范化，避免断言随 TMPDIR 形态漂移。
+  const root = await realpath(await mkdtemp(join(tmpdir(), "coordinator-identity-")));
   const origin = join(root, "origin");
   const linked = join(root, "linked");
   const clone = join(root, "clone");
@@ -41,9 +43,13 @@ test("common-dir identity shares the canonical main-worktree storage partition",
   assert.equal(linked.originRoot, main.originRoot);
   assert.equal(linked.storageRepositoryId, main.storageRepositoryId);
   assert.notEqual(otherClone.repositoryId, main.repositoryId);
-  // macOS 上 tmpdir() 返回 /tmp（symlink），git worktree list 返回 realpath 形态 /private/tmp；
-  // 身份哈希本就要求 canonical realpath（见下个用例），期望值必须同样规范化。
-  assert.equal(main.originRoot, await realpath(f.origin));
+  // originRoot 是**展示路径**：production 的 displayPath 在 darwin 上会剥掉 `/private` 前缀
+  // （`repository-identity.ts:16`），而身份哈希 `storageRepositoryId` 用 canonical realpath。
+  // 断言必须区分这两者，否则期望值会随 TMPDIR 是否为 /var symlink 而漂移。
+  const canonicalOrigin = await realpath(f.origin);
+  const displayOrigin = process.platform === "darwin" ? canonicalOrigin.replace(/^\/private(?=\/var\/)/, "") : canonicalOrigin;
+  assert.equal(main.originRoot, displayOrigin);
+  assert.equal(main.storageRepositoryId, sha256(canonicalOrigin), "身份哈希必须基于 canonical realpath 而非展示路径");
 });
 
 test("identity fails closed for non-Git, missing, and symlink cwd values", async (t) => {

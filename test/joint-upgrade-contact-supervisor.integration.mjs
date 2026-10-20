@@ -9,7 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 // 全链入口为官方physical CLI + 正式typed runtime + actual detached child，不手写消息/proof。
 for (const scenario of ['ask','interview','progress','timeout','managed','stop','duplicate','ceiling','empty','invalid-reply','repeat-question','child-mcp','two-asks']) test('真实physical parent/Node detached supervisor: '+scenario, { timeout: 60000 }, async t => {
- const repo=resolve(import.meta.dirname,'..'); const host=process.env.PI_TEST_CODING_AGENT_ROOT;
+ const repo=resolve(import.meta.dirname,'..'); const host=process.env.PI_TEST_CODING_AGENT_ROOT?.trim()||join(repo,'node_modules/@earendil-works/pi-coding-agent');
  const root=await mkdtemp(join(tmpdir(),'joint-contact-e2e-'));const agent=join(root,'agent');const cwd=join(root,'cwd');const capture=join(root,'capture.jsonl');
  await mkdir(join(agent,'agents'),{recursive:true});await mkdir(cwd);await mkdir(join(root,'home'));await mkdir(join(root,'tmp'));
  await mkdir(join(agent,'extensions'),{recursive:true});await symlink(join(repo,'pi/extensions/agents-shared.ts'),join(agent,'extensions/agents-shared.ts'));
@@ -56,7 +56,7 @@ if(scenario==='child-mcp') {
  const childStart=events.find(e=>e.child&&e.type==='start');assert.ok(childStart.tools.some(t=>t.name==='codemode'));assert.ok(!childStart.tools.some(t=>t.name==='mcp__fixture__forbidden'));
  const output=await readFile(status.outputFile,'utf8');assert.match(output,/child-mcp-allowed/);assert.match(output,/denied:/);const calls=(await readFile(join(root,'child-mcp.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);assert.deepEqual(calls.filter(c=>c.type==='call').map(c=>c.name),['echo']);return;
 }
-if(scenario==='empty') {const childStart=events.find(e=>e.child&&e.type==='start');assert.deepEqual(childStart.tools,[],'空allowedTools应等于实际零工具');assert.deepEqual(status.launchResolvedExtensions.required,['root-session-owner','integration-queue']);return;}
+if(scenario==='empty') {const childStart=events.find(e=>e.child&&e.type==='start');assert.deepEqual(childStart.tools,[],'空allowedTools应等于实际零工具');assert.deepEqual(status.launchResolvedExtensions.required,['root-session-owner','integration-queue','agents-shared']);return;}
  if(scenario==='ceiling'){assert.deepEqual(events.find(e=>e.child&&e.type==='start').tools.map(t=>t.name).sort(),['contact_supervisor','read']);}
  const childResult=events.find(e=>e.child&&e.message?.toolName==='contact_supervisor');
  if(scenario!=='stop') assert.ok(childResult,'真实child没有contact工具结果');
@@ -99,7 +99,7 @@ if(scenario==='empty') {const childStart=events.find(e=>e.child&&e.type==='start
 // request注册时必须绑定正在运行的canonical child，而非terminal时才信任status路径。
 
 test('C8 fresh parent稳定拒绝旧关闭generation的ask，不误写消费或双投递', {timeout:60000}, async t=>{
- const repo=resolve(import.meta.dirname,'..'),host=process.env.PI_TEST_CODING_AGENT_ROOT,root=await mkdtemp(join(tmpdir(),'joint-contact-restart-'));
+ const repo=resolve(import.meta.dirname,'..'),host=process.env.PI_TEST_CODING_AGENT_ROOT?.trim()||join(repo,'node_modules/@earendil-works/pi-coding-agent'),root=await mkdtemp(join(tmpdir(),'joint-contact-restart-'));
  const agent=join(root,'agent'),cwd=join(root,'cwd'),capture=join(root,'capture.jsonl'),provider=fileURLToPath(new URL('./fixtures/joint-upgrade/contact-provider.mjs',import.meta.url));
  await mkdir(join(agent,'agents'),{recursive:true});await mkdir(cwd);await mkdir(join(root,'home'));await mkdir(join(root,'tmp'));
  await mkdir(join(agent,'extensions'),{recursive:true});await symlink(join(repo,'pi/extensions/agents-shared.ts'),join(agent,'extensions/agents-shared.ts'));
@@ -141,7 +141,7 @@ test('C10两个fresh父Host共享native临时通路，同名child与reply UUID�
 
 
 for(const lifecycle of ['root-close','lease-expire']) test('C9 managed真实root.subscribe生命周期 '+lifecycle,{timeout:100000},async t=>{
- const repo=resolve(import.meta.dirname,'..'),host=process.env.PI_TEST_CODING_AGENT_ROOT,root=await mkdtemp(join(tmpdir(),'joint-root-lifecycle-'));const agent=join(root,'agent'),cwd=join(root,'repo'),capture=join(root,'capture.jsonl'),provider=join(repo,'test/fixtures/joint-upgrade/contact-provider.mjs');
+ const repo=resolve(import.meta.dirname,'..'),host=process.env.PI_TEST_CODING_AGENT_ROOT?.trim()||join(repo,'node_modules/@earendil-works/pi-coding-agent'),root=await mkdtemp(join(tmpdir(),'joint-root-lifecycle-'));const agent=join(root,'agent'),cwd=join(root,'repo'),capture=join(root,'capture.jsonl'),provider=join(repo,'test/fixtures/joint-upgrade/contact-provider.mjs');
  await mkdir(join(agent,'agents'),{recursive:true});await mkdir(cwd);await mkdir(join(root,'tmp'));await mkdir(join(root,'home'));
  await mkdir(join(agent,'extensions'),{recursive:true});await symlink(join(repo,'pi/extensions/agents-shared.ts'),join(agent,'extensions/agents-shared.ts'));
  execFileSync('git',['init','-b','main'],{cwd,stdio:'ignore'});execFileSync('git',['config','user.name','隔离测试'],{cwd});execFileSync('git',['config','user.email','fixture@example.invalid'],{cwd});await writeFile(join(cwd,'base.txt'),'base\n');execFileSync('git',['add','base.txt'],{cwd});execFileSync('git',['commit','-m','test(fixture): 创建生命周期基线'],{cwd,stdio:'ignore'});

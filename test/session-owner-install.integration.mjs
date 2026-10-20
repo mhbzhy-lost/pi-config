@@ -198,7 +198,9 @@ async function verifyInstalled(state) {
   assert.equal(invocation.sessionDir, join(state.root, "isolated-sessions"));
   assert.ok(typeof invocation.ownerId === "string" && invocation.ownerId.length >= 8);
   assert.equal(invocation.registry, state.registry);
-  assert.deepEqual(invocation.argv, ["-e", join(await realpath(state.repo), "pi", "extensions", "session-owner.ts"), "--no-skills", "--tui-mode", "fullscreen", "--no-extensions", "--", "fresh-install"]);
+  // 普通入口不再隐式传 --no-skills（scripts/pi-shell.zsh:11-12：使用 Pi 原生 Skill 发现，
+  // 用户显式 --no-skills 才转发；只有 pi-lite 分支固定禁用）。
+  assert.deepEqual(invocation.argv, ["-e", join(await realpath(state.repo), "pi", "extensions", "session-owner.ts"), "--tui-mode", "fullscreen", "--no-extensions", "--", "fresh-install"]);
 }
 
 test("fresh init installs an idempotent owner-wrapper shell entrypoint", async () => {

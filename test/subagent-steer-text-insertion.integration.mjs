@@ -12,7 +12,7 @@ import { buildTopLevelRuntimeEnv, SUPPORTED_PI_VERSIONS } from "../scripts/probe
 // 主动 steer 文本插入守卫（用户报告：旧仓 runtime 下主动 steer 无法向 subagent 插入文本）。
 //
 // 场景：父 Host 经 typed subagent 派发一个 async child；child 第一回合执行 `sleep`
-// 保持存活，父在 child 运行中主动 subagent({action:"steer", runId, message})。
+// 保持存活，父在 child 运行中主动 subagent_run_steer({ runId, message })。
 // 断言 steer 文本真正插入 child 会话（child 会话 jsonl 出现该文本），且 child
 // 消费后在后续回合回显——即完整走生产 steer 路径：
 //   extension.executeControl → supervisor 控制面 → rpc.steer → child steering inbox
@@ -69,7 +69,7 @@ function providerSource(contract) {
           const users = messages.filter((m) => m?.role === "user").map(text);
           const lastUser = users.at(-1) ?? "";
           const toolResults = messages.filter((m) => m?.role === "toolResult");
-          const subagentResults = toolResults.filter((m) => m.toolName === "subagent");
+          const subagentResults = toolResults.filter((m) => m.toolName === "subagent_start");
           let tool; let output;
           if (allText.includes(${JSON.stringify(STEER_MARKER)})) {
             // child：上下文中已出现 steer 注入文本 → 回显收到。
@@ -82,9 +82,9 @@ function providerSource(contract) {
             output = ${JSON.stringify(CHILD_FALLBACK)} + childReport;
           } else if (subagentResults.length === 1 && subagentResults[0]?.details?.runId) {
             // 父第二回合：已派发一个 child 且运行中 → 主动 steer 注入标记文本。
-            tool = { name: "subagent", arguments: { action: "steer", runId: subagentResults[0].details.runId, message: ${JSON.stringify(STEER_MARKER)} } };
+            tool = { name: "subagent_run_steer", arguments: { runId: subagentResults[0].details.runId, message: ${JSON.stringify(STEER_MARKER)} } };
           } else if (lastUser.includes(${JSON.stringify(PARENT_PROMPT)}) && subagentResults.length === 0) {
-            tool = { name: "subagent", arguments: contract };
+            tool = { name: "subagent_start", arguments: contract };
           } else {
             output = "STEER_PARENT_DONE";
           }
@@ -274,18 +274,18 @@ extensions: ${provider}
     let handle;
     const dispatchDeadline = Date.now() + 60_000;
     while (!handle && Date.now() < dispatchDeadline) {
-      const dispatch = host.records.find((record) => record.type === "tool_execution_end" && record.toolName === "subagent" && record.result?.details?.runId);
+      const dispatch = host.records.find((record) => record.type === "tool_execution_end" && record.toolName === "subagent_start" && record.result?.details?.runId);
       if (dispatch) handle = dispatch.result.details;
       else await delay(50);
     }
     assert.ok(handle?.runId, `typed subagent dispatch receipt is missing\n${host.diagnostics()}`);
 
-    // 等待 steer 控制调用出现（父第二回合发起 action:"steer"）。
+    // 等待 steer 控制调用出现（父第二回合发起 subagent_run_steer）。
     let steerCall;
     const steerDeadline = Date.now() + 60_000;
     while (!steerCall && Date.now() < steerDeadline) {
-      steerCall = host.records.find((record) => record.type === "tool_execution_start" && record.toolName === "subagent" && record.args?.action === "steer")
-        ?? host.records.find((record) => record.type === "tool_execution_end" && record.toolName === "subagent" && record.result !== undefined && record.result?.details === undefined && record.args?.action === "steer");
+      steerCall = host.records.find((record) => record.type === "tool_execution_start" && record.toolName === "subagent_run_steer")
+        ?? host.records.find((record) => record.type === "tool_execution_end" && record.toolName === "subagent_run_steer");
       if (!steerCall) await delay(50);
     }
 
@@ -293,13 +293,13 @@ extensions: ${provider}
     const terminal = await waitForStatus(handle.asyncDir, (status) => status.state !== "running" && status.state !== "queued")
       .catch((error) => { throw new Error(`${error.message}\n${host.diagnostics()}`); });
     // 诊断：抓取 parent 侧所有 subagent 工具调用（spawn + steer）的起止与结果。
-    const subagentToolRecords = host.records.filter((record) => record.toolName === "subagent" && (record.type === "tool_execution_start" || record.type === "tool_execution_end"));
-    const steerEnd = subagentToolRecords.find((record) => record.type === "tool_execution_end" && record.args?.action === "steer");
+    const subagentToolRecords = host.records.filter((record) => ["subagent_start", "subagent_run_steer"].includes(record.toolName) && (record.type === "tool_execution_start" || record.type === "tool_execution_end"));
+    const steerEnd = subagentToolRecords.find((record) => record.type === "tool_execution_end" && record.toolName === "subagent_run_steer");
     const steerSummary = JSON.stringify({
       childSteering: terminal.steering,
       steerIssued: Boolean(steerEnd),
       steerResult: steerEnd?.result,
-      subagentCalls: subagentToolRecords.map((record) => ({ type: record.type, action: record.args?.action, isError: record.result?.isError, text: record.result?.content?.[0]?.text?.slice(0, 200), details: record.result?.details })),
+      subagentCalls: subagentToolRecords.map((record) => ({ type: record.type, tool: record.toolName, isError: record.result?.isError, text: record.result?.content?.[0]?.text?.slice(0, 200), details: record.result?.details })),
     }, null, 2);
     assert.equal(terminal.state, "complete", `child terminal state\n${steerSummary}\n${host.diagnostics()}`);
 

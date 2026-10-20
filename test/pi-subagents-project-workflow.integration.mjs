@@ -95,7 +95,7 @@ export function providerSource(contract) {
           const stream = createAssistantMessageEventStream();
           const user = text(context);
           const results = (context?.messages ?? []).filter((message) => message?.role === "toolResult");
-          const dispatch = results.find((message) => message.toolName === "subagent");
+          const dispatch = results.find((message) => message.toolName === "subagent_start");
           const probe = results.find((message) => message.toolName === "compat_project_probe");
           let tool;
           let output;
@@ -113,11 +113,11 @@ export function providerSource(contract) {
               diffSummary: "README.md marker commit.",
             }) + "\\n" + String.fromCharCode(96,96,96);
           } else if (Array.isArray(contract) && (user.includes("PROJECT_TYPED_PARENT") || projectStep > 0)) {
-            if (projectStep < contracts.length) tool = { name: "subagent", arguments: contracts[projectStep++] };
+            if (projectStep < contracts.length) tool = { name: "subagent_start", arguments: contracts[projectStep++] };
             else if (projectStep === contracts.length) { projectStep += 1; tool = { name: "compat_project_probe", arguments: {} }; }
             else output = "PROJECT_TYPED_PARENT_DONE";
           } else if (user.includes("PROJECT_TYPED_PARENT") || projectStep > 0) {
-            if (projectStep++ === 0) tool = { name: "subagent", arguments: contract };
+            if (projectStep++ === 0) tool = { name: "subagent_start", arguments: contract };
             else if (projectStep === 2) { projectStep += 1; probeIssued = true; tool = { name: "compat_project_probe", arguments: {} }; }
             else if (contract.worktree && !probeIssued) { probeIssued = true; tool = { name: "compat_project_probe", arguments: {} }; }
             else output = "PROJECT_TYPED_PARENT_DONE";
@@ -217,7 +217,7 @@ export function dispatchProbeSource() {
         description: "Return observed public-tool lifecycle facts.",
         parameters: { type: "object", properties: {}, additionalProperties: false },
         async execute() {
-          const dispatches = executionEnds.filter((event) => event?.toolName === "subagent");
+          const dispatches = executionEnds.filter((event) => event?.toolName === "subagent_start");
           const handles = dispatches.map((event) => event?.result?.details).filter((handle) => handle?.runId);
           if (handles.length === 0) throw new Error("public subagent handle did not include runId: " + JSON.stringify(dispatches));
           const terminal = await Promise.all(handles.map(async (handle) => {
@@ -233,7 +233,7 @@ export function dispatchProbeSource() {
           return { content: [{ type: "text", text: "project workflow probe complete" }], details: { starts, completions, completion: terminal[0].completion, executionEnds: executionEnds.map((event) => ({ toolName: event?.toolName })), proof: terminal[0].proof, terminal } };
         },
       });
-      pi.on("session_start", () => pi.setActiveTools(["subagent", "compat_project_probe"]));
+      pi.on("session_start", () => pi.setActiveTools(["subagent_start", "compat_project_probe"]));
     }
   `;
 }
@@ -319,7 +319,7 @@ Return the deterministic child marker without modifying files.
     assert.equal(result.error, undefined, `${result.error?.message}\n${result.stderr}\n${result.stdout}`);
     assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
     assert.ok(result.records.some((record) => assistantText(record).includes("PROJECT_TYPED_PARENT_DONE")), result.stdout);
-    const dispatch = result.records.find((record) => record.type === "tool_execution_end" && record.toolName === "subagent");
+    const dispatch = result.records.find((record) => record.type === "tool_execution_end" && record.toolName === "subagent_start");
     const probe = result.records.find((record) => record.type === "tool_execution_end" && record.toolName === "compat_project_probe");
     assert.ok(dispatch?.result?.details, result.stdout);
     assert.ok(probe?.result?.details, result.stdout);
@@ -337,12 +337,12 @@ Return the deterministic child marker without modifying files.
     assert.equal(proof.binding.agentProfile, "executor");
     assert.ok(proof.terminal?.proof?.instances.length > 0, JSON.stringify(proof));
 
-    const disposition = result.records.filter((record) => record.type === "tool_execution_end" && record.toolName === "subagent").at(-1);
+    const disposition = result.records.filter((record) => record.type === "tool_execution_end" && record.toolName === "subagent_start").at(-1);
     assert.equal(disposition.result.isError, false, JSON.stringify(disposition));
     assert.equal(probe.result.details.starts.some((event) => (event?.runId ?? event?.id) === handle.runId && event?.asyncDir === handle.asyncDir), true);
     assert.equal(probe.result.details.completion?.runId, handle.runId);
     assert.equal(probe.result.details.completions.some((event) => event?.runId === handle.runId), true);
-    assert.equal(probe.result.details.executionEnds.some((event) => event?.toolName === "subagent"), true);
+    assert.equal(probe.result.details.executionEnds.some((event) => event?.toolName === "subagent_start"), true);
 
     const terminal = JSON.parse(await readFile(join(handle.asyncDir, "status.json"), "utf8"));
     assert.equal(terminal.state, "complete", JSON.stringify(terminal));
@@ -437,7 +437,7 @@ Return the deterministic child marker without modifying files.
 
     assert.equal(result.error, undefined, `${result.error?.message}\n${result.stderr}\n${result.stdout}`);
     assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
-    const dispatch = result.records.find((record) => record.type === "tool_execution_end" && record.toolName === "subagent");
+    const dispatch = result.records.find((record) => record.type === "tool_execution_end" && record.toolName === "subagent_start");
     assert.equal(dispatch?.result?.isError, false, JSON.stringify(dispatch));
     assert.equal(typeof dispatch?.result?.details?.runId, "string");
     assert.equal(typeof dispatch?.result?.details?.asyncDir, "string");
