@@ -154,7 +154,6 @@ async function runScenario(mode) {
 
   try {
     await mkdir(join(projectRoot, ".pi", "agents"), { recursive: true });
-    await mkdir(join(packageRoot, "sessions"), { recursive: true });
     await mkdir(join(configRoot, "agents"), { recursive: true });
     await writeFile(join(projectRoot, ".pi", "agents", "compat-worker.md"), `---
 name: compat-worker
@@ -372,10 +371,7 @@ Use the deterministic compatibility marker from the assigned task.
     const result = await runRpcUntil(
       piBinary,
       [
-        // 现行合同要求 spawn 具备 rpc:v1/session：session 身份只从 Host session manager
-        // 投影、不从 cwd 猜测（compat/pi-subagents-0.75.ts:17），因此 top-level lane 必须
-        // 带持久 session 目录；--no-session 下 ping 无 session 身份，派发会 fail closed。
-        "--mode", "rpc", "--session-dir", join(packageRoot, "sessions"), "--no-extensions",
+        "--mode", "rpc", "--no-session", "--no-extensions",
         "-e", providerExtension,
         "-e", extension,
         "-e", probe,

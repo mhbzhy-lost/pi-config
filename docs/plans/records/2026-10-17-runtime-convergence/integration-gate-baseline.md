@@ -87,3 +87,19 @@ wrapper exit 0，**`GATE_EXIT=1`**，约 1031 秒：`tests 342 / pass 304 / fail
 - top-level RPC 两条 lane：先前“是否退役/排除/改生产”的三选一是基于错误假设（以为要保 upstream 兼容面）。取证后确认本仓 runtime 本来就 bootstrap upstream（`extensions/subagent-runtime.ts:319` `bootstrap: upstreamSubagentRuntime`），而生产合同要求 spawn 具备 `rpc:v1/session`，session 身份只从 Host session manager 投影、不从 cwd 猜测（`compat/pi-subagents-0.75.ts:17`、`subagent-dispatch/extension.ts:545`）。lane 用 `--no-session` 启动，因此 ping 无 session 身份 → `no_active_session` / `CAPABILITY_NEGOTIATION_FAILED`。处置改为 fixture 迁移：`--no-session` → `--session-dir <临时目录>`，不动生产、不退役、不排除门禁。
 - 验证运行：job `fcde6205-efcb-466b-85b0-dc15867db508`（`test/pi-subagents-045-workflow.integration.mjs` + `test/pi-subagents-runtime.integration.mjs`），日志 `/tmp/rc-rpc-lane-session.log`。结果以完成通知为准；若仍失败则按现场重新分类，不假定 session 就是唯一偏离点。
 - 同一 `rpc:v1/session` 假设也适用于 project-workflow / completion-notification / steer-text-insertion 三条 lane（它们同样只设 `PI_CODING_AGENT_SESSION_DIR` 而未传 `--session-dir`）；待本轮结果确认后再统一迁移，不提前批量改。
+
+## 实验结果：session 假设被否证（job `fcde6205-…`）
+
+`/tmp/rc-rpc-lane-session.log`：**6 tests / 4 pass / 2 fail**。
+
+- `pi-subagents 0.62.0 rejects clarify and correlates a public workflow leaf` **通过**（8.2s，含从官方 registry 安装 `pi-subagents@0.62.0`）→ 用户裁决正确：`0.87.1` pin 是唯一障碍，改为接受 `SUPPORTED_PI_VERSIONS`（1.0.4）或显式 `PI_HISTORICAL_REAL_BIN` 后该 lane 在 1.0.4 Host + upstream 0.62 组合下真实通过。
+- 两条 top-level RPC lane 在补 `--session-dir` 后**仍以完全相同形态失败**：`compat_spawn failed: No active extension context for subagent RPC.`（1.1s）与 60s RPC 超时。因此“缺 session 身份”不是首个偏离点，该假设被否证；`--session-dir` 改动已回退，避免留下与结论不符的 fixture 差异。
+
+当前可证事实：错误来自 upstream `extension/rpc.js:583-587`（`options.getContext()` 为空即抛 `no_active_session`，`ping` 例外），而本仓 runtime 通过 `bootstrap: upstreamSubagentRuntime`（`extensions/subagent-runtime.ts:319`）装载 upstream，并在 `runtime-membrane.ts` 拦截其工具注册。也就是说：本仓自有 typed 派发路径不依赖 upstream bridge 的 active context（其它真实 Host lane 的派发均成功），该 lane 验的是 upstream 顶层 RPC 兼容面本身。
+
+结论保持“需产品裁决”，但选项含义已更精确：
+1. **退役该 lane**：承认本仓不再承诺 upstream 顶层 RPC bridge 的 active context；
+2. **门禁登记排除**：保留文件作为已知未验证面，门禁不红；
+3. **生产激活 upstream bridge context**：让 `getContext()` 在本仓 Host 内返回真实 session context（生产改动，需评估与 typed 路径/membrane 的重叠）。
+
+未选 1/2/3 前不改生产、不删用例、不登记排除。project-workflow / completion-notification / steer-text-insertion 三条 lane 的 `rpc:v1/session` 缺失**不能**沿用本次已被否证的 session 假设，需各自取证。
