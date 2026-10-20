@@ -9,20 +9,28 @@
 | R01 | 主会话空闲系统通知 | deferred-user；实现未开始，接口资格仍有缺口 | 用户解除暂缓后，重新冻结run登记、完整ID状态与通知代际合同，再实现/验收 |
 | R02 | 纯派发回执选择性关闭triggerTurn | blocked-upstream；未实施 | 取得发送前稳定结构化关联接口；只调整无增量派发通知的唤醒，不丢消息 |
 | R03 | resume(model)真正换模型 | deferred-user；待独立立项 | 解决上游参数过滤/启动/合同血缘，不用warning、hard reject或fresh spawn冒充换模 |
-| R04 | scheduler store/lock并发 | independent-not-started | 独立诊断与最小修复；只读observer/显示绿色不代表跨Host互斥正确 |
-| R05 | 历史RPC rpc:v1/session个案归因 | blocked-evidence | 使用已有诊断取得同次失败的非敏感字段，再做来源分类；不预加fallback |
-| R06 | 历史supervisor reply/pending/消费视图个案 | blocked-evidence | 精确请求、回执与消费顺序取证；G2策略修复不等于该历史个案已归因 |
+| R04 | scheduler store/lock并发 | upstream-production-defect；用户已裁决移出本批 | 同 repository/session 双实例共享文件时可触发；双 Host 同 session 已被 session-owner 前置阻断，不围绕未证拓扑设计修复。来源与开放语义见 `scheduler-provenance.md` |
+| R05 | 历史RPC rpc:v1/session个案归因 | blocked-evidence | 使用已有诊断取得同次失败的非敏感字段，再做来源分类；不预加fallback。边界见 `historical-provenance.md` |
+| R06 | 历史supervisor reply/pending/消费视图个案 | blocked-evidence | 精确请求、回执与消费顺序取证；G2策略修复与本轮 H1/M1 不等于该历史个案已归因。边界见 `historical-provenance.md` |
 | R07 | Supervisor inspect/clear逃生口 | blocked-upstream | exact absence无法证明，C1/C2/C3清理部分不实现、不签token；待合法接口解阻 |
-| R08 | Heartbeat其它拓扑和边界覆盖 | coverage-unverified | generic/binding-failed/detached/bash后代、多child等分别证明，不外推managed coding实验 |
-| R09 | 旧heartbeat实验workspace/证据根清理 | blocked-recovery | 旧owner已死且无当前合法public处置出口；保护现场，不raw删除/猜token |
-| R10 | Heartbeat fixture正常child报告结算 | fixture-followup | `commandsRun: []`仍在；需fixture-only修正并选择性验收，不能伪造命令证据 |
-| R11 | Session-owner剩余验证边界 | coverage-unverified | 真实SessionManager.open失败、跨进程真并发同目标等按合法公开链补证，不扩独占保证 |
-| R12 | 独立工具迁移后的真实integration调用者 | migration-pending | 分组改旧工具名/位置依赖，跑对应合同与获授权的integration；历史记录不重写 |
-| R13 | ceiling-runtime既有3项失败 | reproduced-baseline；根因待独立分类 | 不能仅因测试红认定production缺陷；检查入口/身份/顺序，再决定只修fixture还是修生产 |
-| R14 | resource-isolation既有1项失败 | stale-description-assertion-followup | 已见旧英文description断言；先修测试合同，不凭此扩大生产资源隔离修复 |
-| R15 | Gate计划V/Z与架构/链接一致性 | pending-doc-reconciliation | G2 acceptance已经存在；仅补计划状态/架构/引用一致性，不重复列“创建验收记录” |
+| R08 | Heartbeat其它拓扑和边界覆盖 | coverage-unverified | managed coding + worktree:true 父死核心验收通过；generic、binding-failed、detached、bash后代、多child、长续租仍未外推。见 `lifecycle-boundaries.md` |
+| R09 | 旧heartbeat实验workspace/证据根清理 | blocked-recovery | 旧owner已死且无当前合法public处置出口；本会话 `managed_workspace_list` 只投影 A8F3，未见其它 owner 的旧实验 workspace；不raw删除 |
+| R10 | Heartbeat fixture正常child报告结算 | fixture-code-updated/behavior-unverified | 已迁移新工具名并用实际 read 证据生成 commandsRun；正常结算端到端尚未重跑。见 `fixture-inventory.md` |
+| R11 | Session-owner剩余验证边界 | coverage-unverified | CLI 5/5 与已证P3边界保留；真实 open failure/跨进程竞争/外部import无header仍未证。见 `lifecycle-boundaries.md` |
+| R12 | 独立工具迁移后的真实integration调用者 | migration-verified（除孤立 fixture） | 位置依赖与旧工具名已按 `fixture-inventory.md` 迁移并实跑关键组（含 merge-queue probe 43/43）；`scripted-model-server.mjs` 全仓无消费方，无法行为验证，历史记录不重写 |
+| R13 | ceiling-runtime既有3项失败 | existing-checks-passed | 本轮3项生命周期检查通过，保留原基线为历史；不扩大 capability ceiling |
+| R14 | resource-isolation既有1项失败 | fixture-contract-fixed | 旧英文 description 断言按现行中文合同迁移，focused 通过；生产隔离未放宽 |
+| R15 | Gate计划V/Z与架构/链接一致性 | doc-reconciled；S6 清单 evidence-gap | 架构与引用已补；S6 精确 24 文件清单确认不可还原（现存 TAP 日志无文件路径），保留历史 492/492 报告值 |
 
 **这15项是工程/功能待办。** 下方的用户后验、环境部署、现场保护和广域回归不与它们混算。
+
+## 本轮执行证据
+
+当前命令与未覆盖范围见 [current-validation.md](../plans/records/2026-10-17-runtime-convergence/current-validation.md)。scheduler 并发触发条件与首个偏离见 [scheduler-provenance.md](../plans/records/2026-10-17-runtime-convergence/scheduler-provenance.md)。用户最新要求不再处理 `pi -c` 锁阻塞，未删除或隔离其现场。
+
+本批逐项收口状态见 [closure-matrix.md](../plans/records/2026-10-17-runtime-convergence/closure-matrix.md)，交付门禁核对见 [acceptance.md](../plans/records/2026-10-17-runtime-convergence/acceptance.md)，fixture 迁移清单见 [fixture-inventory.md](../plans/records/2026-10-17-runtime-convergence/fixture-inventory.md)，新 settlement 窗口覆盖缺口见 [settlement-window-audit.md](../plans/records/2026-10-17-runtime-convergence/settlement-window-audit.md)。
+
+**本批新增项已按用户裁决收口（不并入上述 15 项工程待办）：** `pi/agents/*.md` 的 frontmatter 改动确认为用户手动修改。① `contact_supervisor` 不写进 profile `tools` 是正确做法——上游 child runtime 按 supervisor channel metadata 注册它，且属不可被 permission gate 的 INTERNAL_TOOL；`pi/AGENTS_GLOBAL.md` 与既有 guidance 断言已按该事实更新，12/12 通过。② `qoder-pool/DeepSeek-Flash` 启用，用户已自行删除 `pi/AGENTS_SHARED.md` 的 deepseek 禁令；生产 `providerBlacklist=["deepseek"]` 只匹配 provider 段，不拦该 pool 别名，保留不变。事实与源码依据见 [agent-profile-drift.md](../plans/records/2026-10-17-runtime-convergence/agent-profile-drift.md)。
 
 ## 2. 产品功能与独立修复
 
@@ -99,10 +107,13 @@ R12–R15的详细文件路径与边界继续维护在 `docs/todos/2026-10-16-su
 | P3与heartbeat类型尾项 | 已过，不再列未授权/待执行 |
 | TUI L3 | 用户后验；发现问题按新bug，不是当前阻塞验收 |
 | Skills偶发不可见 | 用户重试恢复，未稳定复现、无根因证明；不改配置、不保留活跃修复任务，复发另报bug |
-| 全仓npm test/all-integration | 本批未跑，不宣称全仓全绿；如需广域回归先审计危险/网络/敏感配置读取入口，不直接开glob |
+| 全仓npm test/all-integration | 本批未跑，不宣称全仓全绿；已跑的是 `fixture-inventory.md`/`current-validation.md` 列出的聚焦组合。如需广域回归先审计危险/网络/敏感配置读取入口，不直接开glob |
+| 真实旧 workspace `a8f3cdf0-…` | 已用当次 status token `preserve` 成功（state=preserved）；`release` 因缺 observed terminal proof fail-closed。不是已回收，也不是缺陷。见 `current-workspace-settlement.md` |
 | 当前物理Host依赖 | lock/override不代表当前node_modules已重装；未来受控维护/fresh Host验证，禁止热替换运行中依赖 |
 | push | 未执行；本机提交不等于远端同步，也不自动授权push |
 | 外部models备份 | 保护 `pi/models.json.bak-qoder-thinking-20261016161901`，不读、不提交、不自动删；不是业务bug |
+| 非隔离 top-level RPC 兼容 lane | `test/pi-subagents-runtime.integration.mjs` 两个 live-state lane 失败（上游 `no_active_session`、RPC 60s 超时）；历史已判为环境受限，保持 blocked-evidence，不延长 timeout、不加 fallback、不重复运行。见 `compat-lane-provenance.md` |
+| Agent profile frontmatter | 用户手动改动并已裁决：`contact_supervisor` 由 child runtime 注册、profile 不声明；deepseek 禁令已由用户删除，`qoder-pool/DeepSeek-Flash` 可用。GLOBAL 与既有断言已同步，12/12 通过。见 `agent-profile-drift.md` |
 
 ## 6. 证据入口与维护规则
 

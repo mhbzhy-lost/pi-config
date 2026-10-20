@@ -9,12 +9,17 @@
 | 编号 | 事项 | 状态 | 下一步 |
 |---|---|---|---|
 | F1 | Supervisor clear/inspect 分支 | blocked-upstream | 等上游提供可证明的 exact absence / root 归属，或另行批准上游协作方案 |
-| F2 | Supervisor gate V/Z 文档 | pending-doc | 补独立 gate acceptance / architecture 记录，保留 clear blocked |
-| F3 | 真实 integration fixture 旧工具名迁移 | pending | 逐组迁移旧 `subagent` / `subagent_worktree` / `subagent_supervisor` 调用并运行对应 integration |
-| F4 | ceiling-runtime 既有失败 | pre-existing-failure | 单独归因和立项；不归因于独立工具改造 |
-| F5 | resource-isolation 既有失败 | pre-existing-failure | 单独归因和立项；不归因于独立工具改造 |
+| F2 | Supervisor gate V/Z 文档 | architecture-updated；S6 精确清单 evidence-gap（不可还原） | 架构已补，既有 G2 acceptance 复用；现存 TAP 日志无文件路径，保留历史 492/492 报告值，不重跑猜测 |
+| F3 | 真实 integration fixture 旧工具名迁移 | migration-verified（除孤立 fixture） | contact/heartbeat/注册/managed-worktree/model-selection/real-git 已迁移并实跑；`repository-merge-queue-acceptance/root-provider.mjs` 由 probe 合同测试 43/43 验证；`recovery-resume/scripted-model-server.mjs` 全仓无消费方，无法行为验证。清单见 `fixture-inventory.md` |
+| F4 | ceiling-runtime 既有失败 | existing-checks-passed | 3 个既有生命周期 case 本轮通过，见当前验证记录 |
+| F5 | resource-isolation 既有失败 | fixture-contract-fixed | 旧英文描述断言迁移后 focused 通过，未改生产隔离 |
+| F8 | 五-child 真实验收改为“主 Agent 接管”姿势 | not-started（独立立项） | 用户裁决 child 完成即正常退出，原“五 child 全部自发布 + 4 冲突续跑”场景 obsolete（三跑证据见 `acceptance-probe-taskid.md`）。若要真实模型验收接管路径，需设计 handoff → `subagent_run_resume` → `recovery.activate-resume` → resumed child 解决冲突并发布的 probe，并预算 4 次额外真实模型续跑；未获授权前不实施 |
 | F6 | TUI L3 观感 | user-post-check | 用户发现问题后按新 bug 处理，不重开 closeout |
 | F7 | 外部 models 备份 | protected-local-artifact | 不读取、不提交、不删除；由用户自行决定处置 |
+
+## 当前增量证据
+
+本轮结果与精确命令、未覆盖范围见 [当前验证记录](../plans/records/2026-10-17-runtime-convergence/current-validation.md)。下文早期失败与迁移清单保留为来源，不再代表全部当前状态。Supervisor architecture 已存在：[架构](../architecture/supervisor-gate-recovery.md)；G2 acceptance 原本已存在，不需要重新创建。
 
 ## F1：Supervisor clear/inspect blocked 分支
 
@@ -75,14 +80,11 @@ S4/S6 已验证 fresh synthetic SDK 工具面，但以下真实 fixture 仍需�
 
 ### 已发现的重点路径
 
-- `test/fixtures/heartbeat-parent-host.ts`
-- `test/fixtures/heartbeat-provider.ts`
-- `test/fixtures/joint-upgrade/contact-provider.mjs`
-- `test/fixtures/deterministic-provider-state.mjs`
-- `test/fixtures/recovery-resume/scripted-model-server.mjs`
-- `test/fixtures/repository-merge-queue-acceptance/root-provider.mjs`
-- `test/subagent-managed-worktree.integration.mjs`（存在 `tools[1]` 位置依赖）
-- 其他真实 `.integration.mjs` 中按旧工具名或工具数组位置消费的调用者
+- 已迁移并实跑：`test/fixtures/heartbeat-provider.ts`、`test/fixtures/joint-upgrade/contact-provider.mjs`、`test/fixtures/deterministic-provider-state.mjs`、`test/subagent-managed-worktree.integration.mjs`、`test/subagent-model-selection.integration.mjs`（21 处位置依赖）、`test/subagent-auto-integration-real-git.integration.mjs`（1 处位置依赖）、`test/pi-runtime.integration.mjs`。
+- 只改名、端到端未跑：`test/fixtures/recovery-resume/scripted-model-server.mjs`、`test/fixtures/repository-merge-queue-acceptance/root-provider.mjs`。
+- 有意保留旧名（负例/上游兼容面，不得迁移）：`workspace-operation-tools`、`subagent-operation-tools`、`supervisor-operation-tools`、`operation-guidance-contract`、`joint-upgrade-model-only`、`deterministic-provider`。
+- 仍未处理的死路径诊断：`scripts/probes/dispatch-branch-probe.ts` 的 `action` 分支；非 runtime 可达文本，保留并由 owner 决定。
+- 逐项状态、命令与日志见 `docs/plans/records/2026-10-17-runtime-convergence/fixture-inventory.md`。
 
 ### 迁移原则
 
