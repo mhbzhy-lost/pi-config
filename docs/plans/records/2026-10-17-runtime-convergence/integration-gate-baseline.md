@@ -167,3 +167,11 @@ contact-supervisor lane 同样以 `--mode rpc --no-session` 启动 Host，其经
 新的首个偏离点：`test/pi-subagents-runtime.integration.mjs:429` 的 `assert.ok(details.activeTools.includes("subagent_supervisor"))`，两条 lane 均在此失败。实际 activeTools 含全部新名工具（`supervisor_request_pending/status/reply`、`subagent_start`、`subagent_run_*`、`managed_workspace_*` 等）但**不含** legacy 名 `subagent_supervisor`。定性为**类别 2 的过期断言**，不是缺件也不是生产缺陷：`src/subagent-dispatch/runtime-membrane.ts:174-179` 拦截上游 `registerTool`，对 `name === "subagent_supervisor"` 只 bind `execute` 进 adapter、不注册为可见工具，`:187-189` 的 `getAllTools` 代理显式 filter 掉该名字；模型面替代物见 `supervisor-operation-tools.ts:5`，legacy→新名的一次性映射权威定义在 `pi/AGENTS_GLOBAL.md:82`。
 
 处置：已授权该 child 把断言迁移为表达当前合同且更严的形式（legacy 名必须**不在**、`supervisor_request_*` 三者必须**在**、保留原有其它检查、旁注 membrane 坐标），并同文件内一并迁移其它引用 legacy 名之处；仍禁止改生产、禁止放宽、禁止 skip/only、禁止自行 commit。复跑日志 `/tmp/rpc-lane-fix2.log`。
+
+## 复跑全绿（child `b5c99195-26ed-4c17-8932-1931fe106669`）
+
+`/tmp/rpc-lane-fix2.log`：**EXIT=0，tests 5 / pass 5 / fail 0 / skipped 0**，duration 6023.86ms（两条 RPC lane 2135ms、2815ms）。累计改动只有 `test/pi-subagents-runtime.integration.mjs`（+15/-3），生产文件零改动（已用 `git diff --stat` 与 `git status --porcelain` 自证）。
+
+断言迁移内容：probe 的 `setActiveTools` 移除 legacy 名 `subagent_supervisor`（其余观测能力全部保留）；`:429` 处由 1 条正向包含检查改为 **1 条 legacy 名负向断言 + 3 条 `supervisor_request_pending/status/reply` 正向断言**，并保留 `bg_wait` 在、旧 union `subagent` 不在；旁注 membrane 坐标（`runtime-membrane.ts:174-179`、`:187-189`）与映射权威（`supervisor-operation-tools.ts:5`、`pi/AGENTS_GLOBAL.md:82`），注明“不是 fixture 缺件，勿再按缺件排查”。严格性净提升，未放宽任何断言、未 skip/only、未改生产。
+
+据此，门禁 28 项失败中由本 lane 贡献的 2 项已消除（045 lane 1 项此前已消除）。该 child 的 run 状态在报告后显示 failed，但结论已由日志与 git 状态独立复核，不再续跑。

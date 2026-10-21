@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -155,6 +155,11 @@ async function runScenario(mode) {
   try {
     await mkdir(join(projectRoot, ".pi", "agents"), { recursive: true });
     await mkdir(join(configRoot, "agents"), { recursive: true });
+    // 与 contact-supervisor lane 对齐：configRoot 缺 agents-shared 扩展会让 typed
+    // extension 的 session_start 链在 required-child 校验处失败（fixture 环境缺件），
+    // 因此以 symlink 指向仓内同一权威来源提供该扩展，不复制内容、不新建实现。
+    await mkdir(join(configRoot, "extensions"), { recursive: true });
+    await symlink(join(repoRoot, "pi", "extensions", "agents-shared.ts"), join(configRoot, "extensions", "agents-shared.ts"));
     await writeFile(join(projectRoot, ".pi", "agents", "compat-worker.md"), `---
 name: compat-worker
 description: legacy project fixture profile; admission must ignore it
@@ -356,7 +361,6 @@ Use the deterministic compatibility marker from the assigned task.
             "compat_inspect_nested_events",
             "compat_pause",
             "bg_wait",
-            "subagent_supervisor",
           ])]);
         });
         pi.on("tool_call", (event) => event.toolName === "subagent"
@@ -421,7 +425,15 @@ Use the deterministic compatibility marker from the assigned task.
       assert.ok(details.ping.methods.includes(method), `missing RPC method: ${method}`);
     }
     assert.ok(details.activeTools.includes("bg_wait"), JSON.stringify(details.activeTools));
-    assert.ok(details.activeTools.includes("subagent_supervisor"), JSON.stringify(details.activeTools));
+    // legacy 名 subagent_supervisor 被 membrane 有意隐藏：registerTool 拦截仅 bind
+    // execute（runtime-membrane.ts:174-179），getAllTools 代理显式 filter 该名
+    // （runtime-membrane.ts:187-189）；模型面替代物为 supervisor_request_*
+    // （supervisor-operation-tools.ts:5；pi/AGENTS_GLOBAL.md:82 一次性映射），
+    // 这不是 fixture 缺件，勿再按缺件排查。
+    assert.ok(!details.activeTools.includes("subagent_supervisor"), JSON.stringify(details.activeTools));
+    for (const supervisorTool of ["supervisor_request_pending", "supervisor_request_status", "supervisor_request_reply"]) {
+      assert.ok(details.activeTools.includes(supervisorTool), `${supervisorTool} missing: ${JSON.stringify(details.activeTools)}`);
+    }
     assert.ok(!details.activeTools.includes("subagent"), JSON.stringify(details.activeTools));
     assert.equal(typeof details.workflowRoot?.runId, "string");
     assert.equal(typeof details.spawned?.runId, "string");
