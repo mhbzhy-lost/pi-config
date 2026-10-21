@@ -37,3 +37,23 @@ node 测试 `:222-241`（`:233 runOfficialFreshZsh` → `:234 assertCompleted` �
 3. 实验 1（仅在前两者不足时）：复刻 `:163-172` 的 expect 程序并 `2>&1 | tee /tmp/so-pty.log` 抓 pty 侧真实输出。
 
 若实验 2 转绿，还需回答正确修法是“gate runner（`scripts/run-integration-gate.ts`）导出该 ambient 变量”还是“fixture 自足（`:146-153` 不依赖 ambient、`makeFixture` 自带 physical host 形状）”，以及 helper 诊断缺陷的最小修法——**只建议，不实施**，由主会话决策。
+
+## 实验结果：类别 3 收敛为**类别 2**（child `cfe69aef-1027-45be-a193-124547f97b93`）
+
+三个实验严格串行完成，取证日志：`/tmp/so-exp2.log`、`/tmp/so-exp2-control.log`、`/tmp/so-fixture.6eHDpw/{out.txt,err.txt,out2.txt,err2.txt}`（临时夹具目录未清理）。
+
+- **实验 3（Tcl flush）**：`/usr/bin/expect -c 'spawn -noecho /bin/sh -c {printf x; printf err >&2; exit 1}; expect eof; exit 1' | od -c | head` → `x e r r`。管道场景下 expect 完整转出 pty 输出 ⇒ `result.stdout` 是可信观测量，**父会话“stdout 也为空”的前提被否证**。
+- **实验 2（A/B 决定性）**：A 组补 ambient → `✔ fresh zsh wrapper …（4573ms）`，tests 1/pass 1/fail 0；B 组 `env -u PI_TEST_CODING_AGENT_ROOT`（门禁真实条件）→ `✖ …（1813ms）`，`:235` `1 !== 0`。同机同命令、唯一差异是该 ambient 变量 ⇒ **因果锁定**。
+- **实验 1（最小等价版）**：按 `makeFixture:63-68` 复刻临时仓库、只跑 `pi-launcher.zsh` 预检层，`env -i` 只给 fixture 会提供的变量：无 `PI_HOST_ROOT` → `exit=1`、stdout 空、stderr `ENOENT: no such file or directory, lstat '/private/tmp/so-fixture.6eHDpw/installed-pi-config/node_modules'`；补上真实 physical 根 → `exit=0`、stdout `1.0.4`、stderr 空。两流分工正是机制预言：wrapper 失败文本在 stderr → 被 pty 合并 → 落在 expect 的 stdout → 进 `result.stdout`，而 `result.stderr` 恒空。
+
+完整因果链（九层）：`:148` 传 `undefined` → Node 丢弃 `undefined` env 项（且 `:27-45` env 从零构造）→ 子 env 无 `PI_HOST_ROOT` → `scripts/pi-launcher.zsh:13` 回落到 `$root/node_modules/@earendil-works/pi-coding-agent` → `:74-78` 的 `npm` 是只写日志 stub 且 `:63-68` 拷贝清单不含 `node_modules`，该路径永不存在 → `scripts/resolve-physical-pi.ts:5` `realpathSync` ENOENT + `exitCode=1` → `pi-launcher.zsh:14` `|| exit 1` → zsh 退出 1（版本串从未打印）→ expect `:167 eof { exit 1 }`（`set timeout 20` 未触发）→ `:235` `1 !== 0` 且消息为空、`:236` 不可达。
+
+与 production 事实的差异：真实安装里 `init-pi.sh:34-35` 先 `export PI_HOST_ROOT=$SCRIPT_DIR/node_modules/@earendil-works/pi-coding-agent` 并真的执行 `npm ci --prefix "$SCRIPT_DIR"`，所以 `pi-launcher.zsh:13` 的回落路径在 production 中**必然存在**；测试把 `npm` 换成 stub、只拷源码树，造出 production 不可达的状态（仓库缺 physical 依赖），却让 wrapper 以“物理 Host 缺失”的 fail-closed 分支承担失败。**类别 1 不成立，不需要任何 production 兼容/防御/fallback 分支。**
+
+## 主会话对 child 一处结论的否证（方法论文正）
+
+child 报告称“同一次门禁里 joint-upgrade 13 项失败的首个偏离点也是 `PI_TEST_CODING_AGENT_ROOT` 未设”，并据此认为方案 A（gate runner 导出）能一处治好 14 项。**该说法被 grep 否证**：`rg -n 'PI_TEST_CODING_AGENT_ROOT'` 显示其它 lane 都自带缺省或经权威 helper 解析——`test/joint-upgrade-contact-supervisor.integration.mjs:12`/`:102`/`:144` 是 `process.env.PI_TEST_CODING_AGENT_ROOT?.trim() || join(repo,'node_modules/@earendil-works/pi-coding-agent')`，`test/helpers/joint-upgrade-session.mjs:9`、`test/doctor-pi-peer-runtime.test.mjs:12-14`、`test/joint-upgrade-rpc.test.mjs:16`  likewise；`test/helpers/pi-runtime.mjs:23-38` 的 `resolvePiCodingAgentRoot` 才是仓内权威解析入口（显式 pin 优先、缺省本仓物理 SDK、缺失直接抛错不回退 global），已有 10+ 调用方。真正的离群点只有 `test/session-owner-install.integration.mjs:144-153`（直接传 `process.env.X`，无缺省）。
+
+因此裁决：**驳回方案 A**（`scripts/run-integration-gate.ts:46` 是 `env: { ...process.env, TMPDIR: … }`，为单个测试注入私有 fixture 变量违反既有约定，且并无 13 项可顺带治好）；**采用方案 B（fixture 自足）**，并且不新造内联缺省，而是消费既有权威 helper `resolvePiCodingAgentRoot`，同时把 `PI_REAL_BIN` 改为“显式优先、缺省 `join(hostRoot,"dist/cli.js")`”。helper 诊断缺陷（`:235` 只用恒空的 `result.stderr`、`:236`/`:194`/`:227`/`:47-50` 同类）一并修，属测试侧可诊断性，不改生产。
+
+已派 executor `2f6ba9e6-…`（见 handoff）实施，验收要求三份验证：`env -u` 自足性、全文件 3 用例、显式 pin 路径；并明令不得跑 `npx tsc --noEmit`（另有 child 正在改 TS，并发 typecheck 会产生不属于该任务的错误）。
