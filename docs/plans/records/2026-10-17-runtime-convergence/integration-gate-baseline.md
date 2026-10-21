@@ -270,3 +270,26 @@ child 按裁决删除了 header 身份行并端到端删除 `metaLabel`，但同
 已消除 **10 项**（045 ×1、top-level RPC ×2、completion-notification ×1、project-workflow ×2、session-owner ×1、contact-supervisor ×2、root-broker-startup ×1）；待定 1 项（steer 合同同步中，child `ee588091-2eff-4401-bb46-10b893767ba1`，在途 diff 为 `src/subagent-dispatch/{extension.ts,operation-tools.ts}` + `test/subagent-operation-tools.test.mjs` + `test/subagent-steer-text-insertion.integration.mjs`）。首跑 28 项中其余未逐项定位的失败，待两项落地后用全量门禁复跑统一对照。
 
 方法论更正（必须记住）：**不得用首跑日志或基线对照日志判定当前 HEAD 的绿/红**。`/tmp/rc-integration-gate-full.log` 是首跑现场（早于 `f211702`），`/tmp/rc-baseline-compare.log` 是基线生产树 `92b0302` 配当前测试的对照，两者都只能用于“是否本批引入”的归因，不能当作当前状态。任何“已修”结论都必须有一次针对当前 HEAD 的单独复跑证据。
+
+## 全量门禁复跑（job `ca52e033-5707-4cbf-9188-110afc7a945a`，HEAD `cd06cf9`）
+
+`/tmp/rc-gate-rerun.log`：`running 42 integration files` → **344 tests / 332 pass / 2 fail / 10 skipped**，duration 813812ms（对比首跑 342/304/28/10，**消除 26 项失败**）。注意 `EXIT=1` 而 async 回执 `exitCode:0`：命令尾部是 `echo "EXIT=$?" | tee -a`，作业退出码取自 `tee`，门禁自身退出码只在日志文本里。
+
+两项失败都在 `test/background-activity-runtime.integration.mjs`，且都由本批展示层提交 `6b1827e`（详情面身份行改由 footer 承载）引入 —— 门禁把自伤抓了出来：
+
+| 失败 | 坐标 | 定性 | 首个偏离点 |
+| --- | --- | --- | --- |
+| `owner-first：package 唯一安装 footer，三 source 同 scope 握手，根只发布 factory` | test `:359`，断言 `:400` `assert.match(detailRendered(), /›/)` | **断言过期**，非渲染回归 | `detail-controller.ts:709-729`（header 只剩 `:717` 滚动信息行）对照 `6b1827e^` 的 `:704-709`（身份行是 `›` 的唯一渲染来源）。`›` 现只属主视图选择 cell（`layout.ts:90`、`:299-301`），而 detail 模式 footer 已换成详情 footer（`presenter.ts:349-351` → `:303-336`，首行 `:317` `n/N glyph label · state[ · metaLabel]`） |
+| `late detail：旧选择在途详情返回后不覆盖新选择，旧组件被 dispose` | test `:695`，断言 `:704` `assert.match(detailRendered(), /printf fixture-one/)` | **断言对象过期**，非渲染回归；该断言此前从未验证正文，而是命中被删的身份行（其中含 `entry.label` = bash 命令原文） | `detail-controller.ts:762`（`if (this.requestInFlight) return ["加载中…"]`）：测试在 `handleInput` 后**同步**断言，此时 `requestDetail()`（`:514-553`）的 `promise.then`（`:546`）尚未进入 `settleSuccess`（`:556`）。`bodyContent`/`requestDetail` 在 `6b1827e` 中未被改动 |
+
+排除 `headerRows`（2→1）造成视口错位的直接证据：加一次 `flush()` 屏障后正文完整渲染 7 行且位置自洽（`行 1-7/7`，高度 19 = 24 − 4 `DETAIL_RESERVED_BOTTOM_ROWS` − 1 新 headerRows）；若视口错位应出现 `行 1-18/7` 之类错值或缺行，实测没有。
+
+处置（child `77bbb6c5-8366-472a-aa24-c9f51e149412`，只改 `test/background-activity-runtime.integration.mjs`，+51/−8；`src`/`packages` 零改动）：
+- `:400` 迁移为“header 不含 `›` 且只剩滚动信息行” + “详情 footer 首行严格等于 `2/2 ⏱ 每日巡检 · 等待触发`”。后者比原 `›` **更强**：分母 2 = subagent 行 + scheduler 行合并后的同一 registry，握手少一个 source 分母就不是 2，因此同时钉住“统一详情看的是三 source 合并后的同一 registry”。
+- `:704` 迁移为“footer 首行承载当前选择身份（`1/2 ⌘ printf fixture-one · running`）+ 切换瞬间正文为 `加载中…`（预期中间态）+ `flush()` 后正文 `command: printf fixture-one`”，并**新增真实迟回场景**：先 RIGHT 到 scheduler（deferred 在途）→ LEFT 回 bash → flush → `settleDetail()`，断言旧选择的迟到详情不覆盖新选择正文、不出现 `受控详情`、选择仍是 bash。
+- “旧组件被 dispose”在集成层不可观测（真实 source 返回 pi-tui `Text`，无 `dispose` 方法，`component.dispose?.()` 结构性 no-op，迁移前也未断言）；保留可观测后果“迟回组件不得被应用”，dispose 计数由 `test/background-activity-details.test.mjs:664` 精确断言（`disposed === 1`）。
+- **非空洞性证明（变异测试，已还原）**：去掉 `settleSuccess` 的 `record !== this.currentRequest` fence → `late detail` 在“旧选择的迟到详情不得覆盖新选择正文”处失败；把 `presenter.ts:317` 首行 label 截断为 2 字符 → `owner-first` 在身份断言处失败。两处变异均已按原文还原（`git diff --stat -- src packages` 为空）。
+
+主会话独立复核：`node --test test/background-activity-runtime.integration.mjs` → **13/13 绿**（1028ms）；改动面仅该文件（+51/−8）；child 侧另有 79/79（四个 TUI 单测文件）与 `npx tsc --noEmit` 零错误。
+
+另记一项事实：门禁 runner 按 glob 选文件，**未跟踪文件也会被执行**——本次 `running 42 integration files`（此前 41）且日志含 `[rpc-bridge-observation]` 输出，即两个未跟踪的观测文件已进入门禁（tests 342→344 的来源），每次多启动 2 次真实 Host 且 form1 会故意复现“bridge 未 primed”形态，而它们的断言几乎为空、无回归价值。是否删除或移至 `scripts/probes/` 待用户裁决。
