@@ -188,3 +188,33 @@ contact-supervisor lane 同样以 `--mode rpc --no-session` 启动 Host，其经
 方法论要点（必须记住，否则会误判）：**`Required child extensions 'agents-shared' … ENOENT` 原文不会出现在这些 lane 的 TAP 日志里**，因为 lane 不回显 Host 的 stdout/stderr；上一轮能看到该行是因为观测 harness 自行捕获了 Host 输出。因此判定同根因应使用上表两类**效果签名**，而不是 grep ENOENT 原文。据此已 steer 该 child（request `38e3692e-111a-4565-90af-a36b5546590c`，排队不等于已消费），澄清“签名缺失”不构成“非同一根因”，并授权按效果签名继续修复；若补 symlink 后效果签名仍在，才是新根因。
 
 同批取证进行中：`/tmp/completion-notification-before.log`（`async typed dispatch delivers the upstream subagent-notify custom message into the main session log` 60596ms 失败，与门禁记录一致）。
+
+## 三个同构 lane 修复结果（child `d5045380-fb5b-4c59-9ee7-e547d5291fcf`）
+
+修复前取证（效果签名，均无 `agents-shared` 字样——这些 lane 的 TAP 不回显 Host 输出，属预期，不作反证）：
+
+| lane | 日志 | `WORKSPACE_SERVICE_UNAVAILABLE` | `missing: rpc:v1/session` | 失败坐标 |
+| --- | --- | --- | --- | --- |
+| project-workflow | `/tmp/project-workflow-before.log` | 1（test1） | 1（test2） | test `:241`→断言 `:326`；test `:359`→断言 `:441` |
+| completion-notification | `/tmp/completion-notification-before.log` | 0（该 lane `worktree:false`） | 1 | test `:258`→断言 `:353`（`dispatch receipt is missing`，60596ms 打满等待） |
+| steer-text-insertion | `/tmp/steer-text-insertion-before.log` | 0 | 3 | test `:196`→断言 `:281`（同上，60627ms） |
+
+修复：三个文件各补 `mkdir(configRoot/extensions)` + `symlink(repoRoot/pi/extensions/agents-shared.ts → configRoot/extensions/agents-shared.ts)`（project-workflow 两处 scenario `:286`/`:408`，completion-notification `:323`，steer `:252`，另各加 `symlink` import）。无内容复制、无新实现、无断言改动。已提交。
+
+修复后复跑：三个 lane 的 `WORKSPACE_SERVICE_UNAVAILABLE` / `rpc:v1/session` / `no_active_session` 计数**全部为 0**，派发恢复正常。
+
+| lane | 日志 | tests/pass/fail | 结果 |
+| --- | --- | --- | --- |
+| completion-notification | `/tmp/completion-notification-after.log` | 2/2/0（5804ms） | **全绿** |
+| project-workflow | `/tmp/project-workflow-after4.log`（4 次一致） | 2/1/1（13170ms + 35168ms） | test2 ✔；test1 新偏离点 |
+| steer-text-insertion | `/tmp/steer-text-insertion-after.log` | 1/0/1（8139ms） | 新偏离点 |
+
+### 新偏离点 A：project-workflow test1（类别 2，断言相对当前生命周期过期）
+
+`:355` `readFile(handle.dispatch_cwd/README.md)` → `ENOENT …/workspaces/repositories/6ad34b7…/worktrees/e41b05e2-…/README.md`。旁路 watcher 抓到的 managed workspace ledger 记录：`state: "released"`、`disposition.action: "discard"`、`integrationReceipt: {candidateHead: 52bf66a7…, targetRef: refs/heads/main, completedAt: …}`；`project` 仓侧 `git log` = `8703f14 child-marker` / `6d5f22d fixture`，`project/README.md` 末行含 `PROJECT_TYPED_CHILD_COMMIT`。即 Auto Integration 已把 child 提交并入 main，随后 release 按现行生命周期删除 worktree 目录，而 `:355`/`:357`（同一已删除 cwd 上的 `git status --porcelain`）仍在读 worktree ⇒ 断言过期，不是生产缺陷、也不是缺件。授权迁移方向：改断 `projectRoot/README.md` 含 marker、`projectRoot` 工作树干净、并以 ledger `state === "released"` + `integrationReceipt` 作为 release 证据。
+
+### 新偏离点 B：steer-text-insertion（疑似类别 1：schema 与执行期强制不一致）
+
+`:319` 失败原文：`child hit the no-steer fallback path (STEER_CHILD_FALLBACK) — steer text was not inserted`，`steerResult.text = "SUPERVISOR_STEER_CHILD_AMBIGUOUS: Supervisor control request blocked."`、`details.code` 同名，`childSteering` 全 0（requested/scheduled/pending/delivered/failed）。`subagent_start` 已 `isError:false`，偏离点前移到 steer 投递：fixture 的 steer 调用（`:85`）只传 `{ runId, message }`，而生产在缺 `index` 时硬拒绝（`src/subagent-dispatch/extension.ts:1479`、`supervisor-control-plane.ts:300`、`supervisor-gate-policy.ts:558`），但工具 schema 把 `index` 声明为**可选**（`operation-tools.ts:40`、`:248`，描述“可选定位”）。
+
+主会话本会话内的独立复现支持“类别 1”方向：对 `d5045380` 执行 steer 时只给 `runId` 即被 `SUPERVISOR_STEER_CHILD_AMBIGUOUS` 拒（该 run 的 fan-out 是 1/1，只有一个 child），补 `index: 0` 后才投递成功；而 upstream 状态回执自己给出的提示是 `subagent({action:"steer", id:"…", message:"…"})`（不含 index）。因此“模型按公开合同只给 runId 就会被拒”是可从合法 typed 入口产生的事实，不是测试制造的非法组合。已派只读诊断确定各定位组合（id-only / runId-only / index-only / dir）的确切解析语义与首个偏离点，再决定修生产解析、修 schema/描述、还是修 fixture；判定前不改任何一侧。
