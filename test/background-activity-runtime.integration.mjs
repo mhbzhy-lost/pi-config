@@ -397,9 +397,23 @@ test("owner-first：package 唯一安装 footer，三 source 同 scope 握手，
   assert.equal(host.record.customCalls[0].options.overlay, true);
   assert.deepEqual(host.record.customCalls[0].options.overlayOptions.margin, { bottom: 4 });
   assert.notEqual(host.record.editor, host.record.originalEditor);
-  assert.match(host.detailRendered(), /›/);
+  // 新合同（6b1827e）：overlay header 只剩滚动信息行，身份/选择标记不再进 header，
+  // 改由详情 footer 首行承载（presenter.renderDetailFooterLines：
+  // `n/N glyph label · state · metaLabel`）；`›` 只属于主视图活动 footer 的选择 cell
+  // （layout.ts SELECTED_MARKER），详情模式 footer 已换成详情 footer，故此处不得再期望 `›`。
+  const overlayHeader = host.detailRendered().split("\n")[0] ?? "";
+  assert.equal(overlayHeader.includes("›"), false, `overlay header 不再渲染身份行：${overlayHeader}`);
+  assert.ok(
+    overlayHeader.includes("行 1-") && overlayHeader.includes("跟随底部") && overlayHeader.includes("x 展开"),
+    `overlay header 只剩滚动信息行：${overlayHeader}`,
+  );
+  // 身份改由详情 footer 首行承载；`n/N` 取自 registry 合并后的条目总数（subagent 行 +
+  // scheduler 行 = 2），因此这条断言同时把「统一详情看的是三 source 合并后的同一
+  // registry」钉住：握手少一个 source，分母就不是 2。
+  const detailFooter = host.rendered().split("\n");
+  assert.equal(detailFooter[0], "2/2 ⏱ 每日巡检 · 等待触发", "身份由详情 footer 首行承载（n/N glyph label · state）");
   // 详情模式 footer 固定最多 3 行导航。
-  assert.ok(host.rendered().split("\n").length <= 3);
+  assert.ok(detailFooter.length <= 3);
 });
 
 test("source-first：publisher 先加载也能握手，owner 回答 request 后补 snapshot", async (t) => {
@@ -698,13 +712,24 @@ test("late detail：旧选择在途详情返回后不覆盖新选择，旧组件
   host.bash().launch("job-1", "printf fixture-one");
   await host.altO();
   assert.equal(host.record.customCalls.length, 1);
+  // 新合同：身份不再进 overlay header，当前选择由详情 footer 首行承载
+  // （`n/N glyph label · state`）；正文内容要等 async detail resolve（flush）后才可断言，
+  // 切换瞬间的 `加载中…` 是预期的在途中间态。
   // F5b 语义：选中项黏着稳定 key（首次 registry 失效时就已选中当时条目），因此用左移
   // 确定性地定位到 bash 条目，不假设初始下标。
-  for (let step = 0; step < 3 && !/printf fixture-one/.test(host.detailRendered()); step += 1) host.overlayInput("\x1b[D");
-  assert.match(host.detailRendered(), /printf fixture-one/);
+  const detailFooter = () => host.rendered().split("\n");
+  for (let step = 0; step < 3 && !/printf fixture-one/.test(detailFooter()[0] ?? ""); step += 1) {
+    host.overlayInput("\x1b[D");
+  }
+  assert.match(detailFooter()[0] ?? "", /^1\/2 ⌘ printf fixture-one · running$/, "详情 footer 首行承载当前选择身份");
+  assert.match(host.detailRendered(), /加载中/, "bash 详情在途（切换瞬间的预期中间态）");
+  await flush();
+  assert.match(host.detailRendered(), /command: printf fixture-one/, "新选择的正文确实渲染出来");
+
   host.overlayInput("\x1b[C");
-  assert.match(host.detailRendered(), /每日巡检/);
+  assert.match(detailFooter()[0] ?? "", /^2\/2 ⏱ 每日巡检 · 等待触发$/, "身份随选择切到 scheduler");
   assert.match(host.detailRendered(), /加载中/, "scheduler 详情在途");
+  assert.doesNotMatch(host.detailRendered(), /command: printf fixture-one/, "正文不残留旧选择内容");
 
   host.scheduler().settleDetail("task-1");
   await flush();
@@ -712,13 +737,31 @@ test("late detail：旧选择在途详情返回后不覆盖新选择，旧组件
   // 仍在 scheduler 选择上：迟到的详情属于当前选择，可显示（不丢合法结果）。
   assert.match(host.detailRendered(), /受控详情 task-1/);
 
-  // 选中项切回 bash 后再让一次迟到返回发生：不得覆盖新选择。
+  // 选中项切回 bash：正文换成新选择的内容。
   host.overlayInput("\x1b[D");
-  assert.match(host.detailRendered(), /printf fixture-one/);
+  await flush();
+  assert.match(detailFooter()[0] ?? "", /^1\/2 ⌘ printf fixture-one · running$/);
+  assert.match(host.detailRendered(), /command: printf fixture-one/);
+
+  // 制造「旧选择的在途详情」：先切回 scheduler（detail deferred 在途），再切回 bash，
+  // 然后才让旧选择那次请求 resolve —— 迟回不得覆盖新选择。
+  host.overlayInput("\x1b[C");
+  assert.match(detailFooter()[0] ?? "", /每日巡检/, "在途请求属于 scheduler 选择");
+  host.overlayInput("\x1b[D");
+  await flush();
+  assert.match(host.detailRendered(), /command: printf fixture-one/, "新选择正文已渲染");
+  host.scheduler().settleDetail("task-1");
+  await flush();
+  await flush();
+  assert.match(host.detailRendered(), /command: printf fixture-one/, "旧选择的迟到详情不得覆盖新选择正文");
+  assert.doesNotMatch(host.detailRendered(), /受控详情/, "迟回的旧组件不得被应用");
+  assert.match(detailFooter()[0] ?? "", /^1\/2 ⌘ printf fixture-one · running$/, "选择仍是 bash");
+
+  // 原 invalidate 路径：scheduler 失效通知不得把 bash 选择换回 scheduler 详情。
   host.scheduler().notify();
   await flush();
   await flush();
-  assert.match(host.detailRendered(), /printf fixture-one/);
+  assert.match(host.detailRendered(), /command: printf fixture-one/);
   assert.doesNotMatch(host.detailRendered(), /受控详情/);
   assert.deepEqual(host.record.errors, []);
 });
