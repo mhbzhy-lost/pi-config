@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { chmod, cp, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -9,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { createRegistryStore, listLiveRecords } from "../src/session-owner/registry.ts";
 
 import { physicalLauncherFixture } from "./helpers/physical-launcher-fixture.mjs";
+import { resolvePiCodingAgentRoot } from "./helpers/pi-runtime.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const systemPath = process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
@@ -44,9 +46,31 @@ function environment(state, extra = {}) {
   return env;
 }
 
+// expect 用 pty 合并子进程两流并重写到自己 stdout，`result.stderr` 只装 expect/Tcl 自身诊断，
+// 对任何 wrapper 失败结构性恒空；因此失败消息必须同时带 status/stdout/stderr，
+// 否则 wrapper 失败只表现为“无信息”。
+function describeFailure(result, transcriptPath) {
+  const parts = [
+    `status=${String(result.status)}`,
+    `signal=${String(result.signal)}`,
+    `stdout=${JSON.stringify(result.stdout ?? "")}`,
+    `stderr=${JSON.stringify(result.stderr ?? "")}`,
+  ];
+  if (transcriptPath) parts.push(`ptyLog=${JSON.stringify(readPtyTranscript(transcriptPath))}`);
+  return parts.join(" ");
+}
+
+function readPtyTranscript(path) {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return `<no pty transcript at ${path}>`;
+  }
+}
+
 function assertCompleted(result, label) {
-  assert.equal(result.error, undefined, `${label} failed: ${result.error?.message ?? result.stderr}`);
-  assert.notEqual(result.signal, "SIGTERM", `${label} timed out: ${result.stderr}`);
+  assert.equal(result.error, undefined, `${label} failed: ${result.error?.message ?? describeFailure(result)}`);
+  assert.notEqual(result.signal, "SIGTERM", `${label} timed out: ${describeFailure(result)}`);
 }
 
 async function makeFixture() {
@@ -141,26 +165,44 @@ exit $status
 // （PI_PACKAGE_DIR 会改写包根：pi 会话内的 ambient 探测会拿到工作区版本而非 homebrew 实际版本）。
 // 期望值必须在 wrapper 同款隔离 env 下运行时探测 PI_REAL_BIN --version 构造，
 // 既避免版本演进再红，也避免本进程 ambient env 重定向探测结果。
-const officialPiBin = process.env.PI_REAL_BIN;
+// 官方 Host 根走仓内权威 helper（test/helpers/pi-runtime.mjs）：显式 PI_TEST_CODING_AGENT_ROOT
+// （含首尾空白容忍）仍作为 pin 优先，缺省解析本仓物理 SDK；物理根缺失时 helper 直接抛错
+// （前置 fail-fast），绝不回退 global。解析放在用例运行时，避免把“本机缺物理 SDK”
+// 变成整个文件的加载期前置条件。显式 ambient PI_REAL_BIN 仍优先，缺省取同一解析结果下的
+// 物理入口（与 test/joint-upgrade-contact-supervisor.integration.mjs:12 的缺省写法同构）；
+// PI_HOST_ROOT 与 PI_PACKAGE_DIR 必须来自同一个解析结果。
+function officialLauncherPaths() {
+  const hostRoot = resolvePiCodingAgentRoot();
+  const realBin = process.env.PI_REAL_BIN?.trim() || join(hostRoot, "dist", "cli.js");
+  return { hostRoot, realBin };
+}
+
+function officialPtyLog(state) {
+  return join(state.root, "official-pty.log");
+}
 
 function officialEnvironment(state) {
-  return environment(state, {
-    PI_HOST_ROOT: process.env.PI_TEST_CODING_AGENT_ROOT, PI_PACKAGE_DIR: process.env.PI_TEST_CODING_AGENT_ROOT, PI_HOST_NODE: process.execPath, PI_REAL_BIN: officialPiBin,
+  const { hostRoot, realBin } = officialLauncherPaths();
+  const env = environment(state, {
+    PI_HOST_ROOT: hostRoot, PI_PACKAGE_DIR: hostRoot, PI_HOST_NODE: process.execPath, PI_REAL_BIN: realBin,
     ISOLATED_AGENT_DIR: join(state.root, "official-agent-dir"),
     ISOLATED_SESSION_DIR: join(state.root, "official-sessions"),
     ISOLATED_REGISTRY: state.registry,
+    PTY_LOG: officialPtyLog(state),
   });
+  return env;
 }
 
 function officialPiVersionPattern(env) {
-  const probe = spawnSync(officialPiBin, ["--version"], { encoding: "utf8", env, timeout: 20_000, maxBuffer: 1024 * 1024 });
-  assert.equal(probe.status, 0, probe.stderr);
+  const probe = spawnSync(env.PI_REAL_BIN, ["--version"], { encoding: "utf8", env, timeout: 20_000, maxBuffer: 1024 * 1024 });
+  assert.equal(probe.status, 0, `official pi --version probe failed: ${describeFailure(probe)}`);
   return probe.stdout.trim().replaceAll(".", "\\.");
 }
 
 function runOfficialFreshZsh(state) {
   const officialEnv = officialEnvironment(state);
-  const program = `set timeout 20
+  const program = `log_file -a $env(PTY_LOG)
+set timeout 20
 spawn -noecho /bin/zsh -f -c {source "$ZDOTDIR/.zshrc"; export PI_CODING_AGENT_DIR="$ISOLATED_AGENT_DIR" PI_CODING_AGENT_SESSION_DIR="$ISOLATED_SESSION_DIR" PI_SESSION_OWNER_REGISTRY="$ISOLATED_REGISTRY"; pi --version}
 expect {
   -re {${officialPiVersionPattern(officialEnv)}} {}
@@ -191,7 +233,7 @@ async function verifyInstalled(state) {
   await stat(join(state.repo, "pi", "extensions", "session-owner.ts"));
   const result = runFreshZsh(state);
   assertCompleted(result, "fresh zsh");
-  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.status, 0, describeFailure(result));
   assert.match(await readFile(join(await realpath(state.root), "type-pi.txt"), "utf8"), /pi is a shell function/);
   const invocation = JSON.parse(await readFile(state.marker, "utf8"));
   assert.equal(invocation.agentDir, await realpath(join(state.repo, "pi")));
@@ -224,7 +266,7 @@ test("fresh zsh wrapper invokes official Pi version in an isolated environment a
   try {
     const init = runInit(state);
     assertCompleted(init, "init-pi.sh");
-    assert.equal(init.status, 0, init.stderr);
+    assert.equal(init.status, 0, describeFailure(init));
     await Promise.all([
       mkdir(join(state.root, "official-agent-dir"), { recursive: true, mode: 0o700 }),
       mkdir(join(state.root, "official-sessions"), { recursive: true, mode: 0o700 }),
@@ -232,7 +274,7 @@ test("fresh zsh wrapper invokes official Pi version in an isolated environment a
     ]);
     const result = runOfficialFreshZsh(state);
     assertCompleted(result, "official fresh zsh");
-    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.status, 0, describeFailure(result, officialPtyLog(state)));
     assert.match(result.stdout, new RegExp(officialPiVersionPattern(officialEnvironment(state))));
     assert.deepEqual(await listLiveRecords(createRegistryStore(state.registry)), []);
   } finally {
