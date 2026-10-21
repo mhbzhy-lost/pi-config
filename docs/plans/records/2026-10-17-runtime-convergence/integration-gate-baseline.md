@@ -250,3 +250,21 @@ durable 权威面印证零投递：`xlUbIK/workspace/supervisor-control/supervis
 child 按裁决删除了 header 身份行并端到端删除 `metaLabel`，但同时上报：`footer-runtime.ts:705-724 installFooter()` 在 presenter 挂载时把 footer 换成 `view.createFooter`，而 presenter 的 meta 只来自**父 ctx**（`presenter.ts:176-204 projectActivityFooterMeta(ctx)` 读 `ctx.model`/`ctx.thinkingLevel`），详情 footer 只渲染 `n/N glyph label · state`（`presenter.ts:299-313`）⇒ `footer-runtime.ts:407` 的 child 模型分支只在 **fallback/standalone** 路径成立。主会话核实属实。因此“删首行 + 删 metaLabel”会让选中 child 的模型/thinking 在 presenter 路径下**无处显示**，与用户“都放到 footer 去”的意图相反（等于重新引入 `docs/bugs/2026-10-19-subagent-detail-model-label-lost.md` 的症状）。
 
 处置：已 resume 该 child 补第二步——恢复 `ActivityRow.metaLabel` 作为**只读展示投影**承载字段（仍由 `formatChildModelLabel` 生成、未知则不设），改由 `presenter.ts renderDetailFooterLines` 首行渲染（`n/N glyph label · state · 模型`，遵守宽度截断与 `DETAIL_FOOTER_MAX_ROWS`），header 保持无身份行、`过期观察` 仍留在滚动信息行（依据：overlay 打开时主 footer 的 stale 状态行不渲染，`presenter.ts:340-343`），主视图 entry 块保持现状不拥挤。断言随之迁移为新合同。其 stale 处置与“空态不占 header 行”的论证已采纳。
+
+## 当前失败清单状态（截至 `b559cd6`，逐项对照首跑 28 项中已定位的部分）
+
+| 项 | 首跑形态 | 分类 | 处置 | 验证证据 |
+| --- | --- | --- | --- | --- |
+| `pi-subagents-045-workflow` 历史版本 pin | 构造上必红（pin `0.87.1`） | 类别 2 | 改为接受 `SUPPORTED_PI_VERSIONS`（1.0.4）或显式 `PI_HISTORICAL_REAL_BIN` | `/tmp/rc-rpc-lane-session.log`：该用例 ✔（8.2s，含从官方 registry 安装 `pi-subagents@0.62.0`） |
+| `pi-subagents-runtime` top-level RPC ×2 | `no_active_session` / 60s 超时 | 类别 2（fixture 缺 `agents-shared`）+ 一条过期工具面断言 | 补 symlink（`9a41518`）+ 断言迁移为“legacy 名必须不在、`supervisor_request_*` 三个必须在” | `/tmp/rpc-lane-fix2.log`：**EXIT=0，5/5 绿**（6023ms），主会话已复核 |
+| `subagent-completion-notification` | `dispatch receipt is missing`（60596ms） | 类别 2（同根因） | 补 symlink（`eef71e8`） | `/tmp/completion-notification-after.log`：**2/2 绿**（5804ms） |
+| `pi-subagents-project-workflow` ×2 | `WORKSPACE_SERVICE_UNAVAILABLE` / `missing: rpc:v1/session` | 类别 2（同根因）+ test1 断言相对 release 生命周期过期 | 补 symlink（`eef71e8`）+ 迁移已释放 worktree 断言为主仓 marker/整洁 + ledger `released`/`integrationReceipt`（`39c1852`） | `/tmp/project-workflow-migrated.log`：**EXIT=0，2/2 绿**（46739ms），覆盖加强（新增 `git log -S` 与 durable release 证据） |
+| `session-owner-install` zsh wrapper | `:235` `1 !== 0`、断言消息空（约 1.8s） | 类别 2（fixture 不自足，依赖 ambient `PI_TEST_CODING_AGENT_ROOT`） | 改用权威 helper `resolvePiCodingAgentRoot` + `PI_REAL_BIN` 缺省 + `describeFailure`/`log_file` 取证（`99a0a01`） | `/tmp/so-fix-full.log`：**3/3 绿**（8492ms）；`env -u` 无 ambient 亦绿；负向对照证明 pin 被消费且消息自带 ENOENT 原文 |
+| `joint-upgrade-contact-supervisor` `invalid-reply` | 期望 3× `NOT_PENDING`，实际 1× `NOT_PENDING` + 2× Host schema 拒绝 | 类别 2（断言要求非法调用穿透 Host 校验，设计上不可达） | 按回执顺序迁移断言 + 新增零投递覆盖（`b559cd6`） | `/tmp/contact-supervisor-migrated.log`：**EXIT=0，17/17 绿**（114188ms），`invalid-reply` 3973ms ✔ |
+| `joint-upgrade-contact-supervisor` `empty` | 首跑失败集内 | 同上 lane | 随 `b559cd6` 一并复跑 | 同上：`empty` 2551ms ✔ |
+| `subagent-runtime-root-broker-startup` | 旧日志为 `agents-shared` ENOENT（`lstat …/agent/extensions`） | **待定** | 该 ENOENT 出自首跑旧现场，早于修复提交 `f211702`（当前 `:45-50` 已有 symlink）；此后从无针对性复跑，`/tmp/rc-baseline-compare.log` 跑的是基线生产树 `92b0302`，不代表当前 HEAD | child `b91be3d3-4125-4cbf-8f45-3378c7d158fb` 单跑验证中 |
+| `subagent-steer-text-insertion` | `STEER_CHILD_FALLBACK`（60599ms） | **类别 1（生产合同缺陷）** | 裁决为选项 2+3：把 steer 的 `index` 同步为合同必填 + 描述/错误文案同步 + fixture `:85` 补 `index: 0`；不做唯一候选推断（完整性无 public 证明源） | child `ee588091-2eff-4401-bb46-10b893767ba1` 实施中；lane 复跑待 Host 槽位 |
+
+已消除 **9 项**（045 ×1、top-level RPC ×2、completion-notification ×1、project-workflow ×2、session-owner ×1、contact-supervisor ×2）；待定 2 项（root-broker-startup 验证中、steer 合同同步中）。首跑 28 项中其余未逐项定位的失败，待两项落地后用全量门禁复跑统一对照。
+
+方法论更正（必须记住）：**不得用首跑日志或基线对照日志判定当前 HEAD 的绿/红**。`/tmp/rc-integration-gate-full.log` 是首跑现场（早于 `f211702`），`/tmp/rc-baseline-compare.log` 是基线生产树 `92b0302` 配当前测试的对照，两者都只能用于“是否本批引入”的归因，不能当作当前状态。任何“已修”结论都必须有一次针对当前 HEAD 的单独复跑证据。
