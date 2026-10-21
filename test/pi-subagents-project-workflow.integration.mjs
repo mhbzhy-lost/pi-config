@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 import { buildTopLevelRuntimeEnv, SUPPORTED_PI_VERSIONS } from "../scripts/probes/pi-subagents-compat.ts";
+import { createManagedWorkspaceLedger } from "../packages/pi-subagents-enhanced/src/workspace/ledger.ts";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = resolve(import.meta.dirname, "..");
@@ -352,10 +353,27 @@ Return the deterministic child marker without modifying files.
     const terminal = JSON.parse(await readFile(join(handle.asyncDir, "status.json"), "utf8"));
     assert.equal(terminal.state, "complete", JSON.stringify(terminal));
     assert.equal(terminal.runId, handle.runId);
-    const managedReadme = await readFile(join(handle.dispatch_cwd, "README.md"), "utf8");
-    assert.match(managedReadme, /PROJECT_TYPED_CHILD_COMMIT/);
-    const managedStatus = (await execFileAsync("git", ["status", "--porcelain"], { cwd: handle.dispatch_cwd, encoding: "utf8" })).stdout;
-    assert.equal(managedStatus, "", `managed workspace must be clean: ${managedStatus}`);
+    // 一次性位移：当前生命周期在 Auto Integration 并入 main 之后按 discard 释放 workspace，
+    // worktree 目录（handle.dispatch_cwd）此时已被删除，因此任何读取 worktree 内文件/在其内跑
+    // git 的观测都必然 ENOENT。改为对等强度的权威事实观测：主仓工作树内容与其整洁性、
+    // 以及 durable ledger 的 release 证据（只读载入，不写入任何 durable 状态）。
+    const integratedReadme = await readFile(join(projectRoot, "README.md"), "utf8");
+    assert.match(integratedReadme, /PROJECT_TYPED_CHILD_COMMIT/);
+    const integratedStatus = (await execFileAsync("git", ["status", "--porcelain"], { cwd: projectRoot, encoding: "utf8" })).stdout;
+    assert.equal(integratedStatus, "", `project workspace must be clean: ${integratedStatus}`);
+    // marker 必须来自一次真实提交（而非工作树内的未提交改动），因此检查历史中引入该字符串的提交。
+    const markerCommits = (await execFileAsync("git", ["log", "--format=%s", "-S", "PROJECT_TYPED_CHILD_COMMIT", "--"], { cwd: projectRoot, encoding: "utf8" })).stdout;
+    assert.match(markerCommits, /child-marker/);
+
+    // release 证据：只读载入 managed workspace ledger 记录（ledger.load 仅 locate + 读取 + 校验，
+    // 不获取锁、不写记录）；坐标见 PI_CODING_WORKSPACE_DIR=join(root, "workspaces")。
+    const workspaceRecord = createManagedWorkspaceLedger({ stateRoot: join(root, "workspaces") }).load(handle.workspace_id).record;
+    assert.equal(workspaceRecord.workspaceId, handle.workspace_id);
+    assert.equal(workspaceRecord.state, "released", JSON.stringify({ state: workspaceRecord.state, disposition: workspaceRecord.disposition }));
+    const integrationReceipt = workspaceRecord.integrationReceipt;
+    assert.ok(integrationReceipt, JSON.stringify(workspaceRecord.disposition));
+    assert.match(integrationReceipt.candidateHead, /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/);
+    assert.equal(integrationReceipt.targetRef, "refs/heads/main");
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
