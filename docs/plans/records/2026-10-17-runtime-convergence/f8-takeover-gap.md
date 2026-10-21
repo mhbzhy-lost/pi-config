@@ -38,6 +38,14 @@ fail-closed 前置（非穷尽）：observed terminal proof 且身份匹配（`c
 
 合规替代：保留现场、报告 F8 阻塞，先补生产恢复入口或修时序，再从新的隔离现场重跑。不得让 fixture 直接调内部 activation、伪造 proof、延长等待或 raw git 集成。
 
+## 身份语义更正（2026-10-21 追加，实施前必读）
+
+后续取证（见 `contact-supervisor-runid-triage.md`）确立了权威身份事实，本文件中涉及 runId 的设计必须按此修正：
+
+- **完成通知不带机器可读 runId**：`notify.js:421-434` 的 `sendCompletion` 只发 `{customType, content, display}`，无 `details`；runId 只在正文文本（`notify.js:120-131`、`:175-182`），正文回读解析器是 `notify.js:255 parseSubagentNotifyContent`。因此“root 从 handoff/通知里取 runId 再 resume”的设计不成立，root 侧新身份只能取自 **typed 工具回执 `details.runId ?? details.asyncId`**（上游 `subagent-executor.js:1665`、enhanced `extension.ts:1531`）或事件 payload（`result-watcher.js:517-522` 的 `subagent:async-complete`：顶层 `runId` 是 wrapper run，子 run 在 `results[].runId`）。
+- **不存在 `rcp-`/`rsm-` 前缀与 superseded/active 双记录语义**；durable 目录名就是裸 UUID runId。观测到的两个 runId 是父 wrapper run 与子 run 两个角色，均 active。本文件与既往记录中任何基于该语义的推断作废。
+- **resume 的唯一身份拒绝路径是 host session 绑定**：`async-resume.js:491-495`（判据 `status.sessionId !== options.sessionId`），不是 runId 版本比较。因此“resumed child 能否沿用原 workspace/lease”取决于 session 绑定与 coordinator activation（本文第 5、6 节的缺口），而不是身份漂移。
+
 ## 未验证项
 
 未运行任何测试/probe/Host/provider/模型，未联网；未读真实 session 正文、authority/state、凭据正文；未动态确认 runner `process.exit(0)` 与三次轮询的连接时序；未穷尽 recovery sink 字段转换、全部 session-owner 前置阻断、upstream resume 的 launch/extension binding 继承；未验证真实 root 是否收到原 handoff、resumed child 能否过 owner/gate、冲突能否被模型解决、五项是否各发布一次进入 main。
