@@ -131,3 +131,29 @@ contact-supervisor lane 同样以 `--mode rpc --no-session` 启动 Host，其经
 ### 下一步（单一有界实验，未执行）
 
 在该 lane 的 Host 里加一个只读观测扩展，记录三件事：`session_start` 是否触发及其 ctx 是否存在、`subagents:rpc:v1:ready` 是否发出（`rpc.js:712` `emitReady` 会带 `pingData(ctx ?? getContext())`）、以及 `ping` 回执里 `session` 投影是否非空；同时对 contact-supervisor lane 做同一观测。两边对照即可在 H1/H2 之间判定，无需改生产。判定前不加兼容分支、不放宽断言、不登记门禁排除。
+
+## 观测实验判定（child `88284cdc-4765-47d0-9601-f945da2ad7db`）：H1/H2 均否证，第三解释成立
+
+原始记录：`/tmp/rpc-obs-run3.log`（测试输出内 `FORM1/FORM2 OBSERVATION` 段）；async dir `/var/folders/27/6bnn8n7d4px6s33fvdpns89c0000gn/T/pi-subagents-uid-501/async-subagent-runs/88284cdc-4765-47d0-9601-f945da2ad7db`；session `var/sessions/2026-10-17T04-49-51-175Z_01a14831-e247-7044-a36d-676dd611aed1/99adc873-002a-4d17-a7ed-3480f5a78324/run-0/session.jsonl`。
+
+| 观测项 | 形态一（失败 lane Host） | 形态二（contact-supervisor 成功 Host） |
+| --- | --- | --- |
+| `session_start` | 触发，ctx 存在、sessionManager 可用（sessionId `01a15cab-c972…`，sessionFile null） | 触发，ctx 存在、sessionManager 可用（`01a15cab-ce0f…`） |
+| `subagents:rpc:v1:ready` | **从未发出**（`readyEvents: []`） | 发出 1 次，session 投影非空 `{cwd, sessionId, sessionFile: null}` |
+| ping 回执 | success，methods 9、capabilities 全量，但 **`session: {}` 空** | success，同上但 session 投影非空 |
+| request 通道监听者 | load 1 / session_start 1 | load 1 / session_start 1 |
+
+形态一 stdout 的决定性错误：`extension_error … subagent-runtime.ts … event:"session_start" error:"Required child extensions 'agents-shared' is not an importable file: ENOENT …/config/extensions"`。
+
+判定：
+- **H2 否证**：两形态监听者恒为 1，不存在多实例 bridge。
+- **H1 否证**：失败 lane 的 `session_start` 确实触发且 ctx 完好；形态二的成功派发**就是**经这条 bridge（单实例、已 primed），不是绕行 in-process。
+- **第三解释（成立）**：typed extension 的 session_start 链中，`registerRequiredChildExtensions` 校验（`packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts:2102`）先于 `await beforeSessionStart(event, ctx)`（`:2113`）；该 lane 的 `PI_CODING_AGENT_DIR`（configRoot）缺 `extensions/agents-shared.ts` → 在 `node_modules/pi-subagents/src/shared/required-child-extensions.js:36` 抛错 → upstream 的 session_start handler（含 `resetSessionState` `index.js:816-845` 与 `emitReady` `index.js:1041`）**从未执行** → `state.lastUiContext` 保持 null → ready 不发、ping 的 session 投影为 `{}`、spawn 在 `rpc.js:585` 抛 `no_active_session`。
+
+首个偏离点：
+- 环境层：`test/pi-subagents-runtime.integration.mjs:157-178`（configRoot 无 `extensions/agents-shared.ts`）对照 `test/joint-upgrade-contact-supervisor.integration.mjs:15`（symlink 提供该扩展）。
+- 代码层：抛错顺序 `src/subagent-dispatch/extension.ts:2102` 早于 `:2113`；要求该文件存在的绑定是 `extensions/subagent-runtime.ts:216-218`。
+
+分类与处置：门禁这两项失败属 **类别 2（测试制造的非预期数据）**——合法生产形态的 agentDir 都带 `agents-shared`（`subagent-runtime.ts:216-218` 明确要求），缺它的 agentDir 由 fixture 造成；修法是给该 lane 的 configRoot 补同样的 symlink，**不需要生产兼容分支**。
+
+另记一个**独立的、需用户裁决的设计问题**（本次不实施）：当 required child extension 缺失时，我们的校验先抛错会让 upstream 的 session_start 整体不执行，外部可见症状退化成难以定位的 `no_active_session`（bridge 静默未 primed），而不是明确的“缺 agents-shared”。是否要调整顺序（把 required-child 校验移到 `beforeSessionStart` 之后）或降级为非致命 + 明确诊断，属生产可诊断性决策；在裁决前保持现状 fail-closed。
