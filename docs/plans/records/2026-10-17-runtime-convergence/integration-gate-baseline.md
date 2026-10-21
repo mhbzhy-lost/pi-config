@@ -218,3 +218,35 @@ contact-supervisor lane 同样以 `--mode rpc --no-session` 启动 Host，其经
 `:319` 失败原文：`child hit the no-steer fallback path (STEER_CHILD_FALLBACK) — steer text was not inserted`，`steerResult.text = "SUPERVISOR_STEER_CHILD_AMBIGUOUS: Supervisor control request blocked."`、`details.code` 同名，`childSteering` 全 0（requested/scheduled/pending/delivered/failed）。`subagent_start` 已 `isError:false`，偏离点前移到 steer 投递：fixture 的 steer 调用（`:85`）只传 `{ runId, message }`，而生产在缺 `index` 时硬拒绝（`src/subagent-dispatch/extension.ts:1479`、`supervisor-control-plane.ts:300`、`supervisor-gate-policy.ts:558`），但工具 schema 把 `index` 声明为**可选**（`operation-tools.ts:40`、`:248`，描述“可选定位”）。
 
 主会话本会话内的独立复现支持“类别 1”方向：对 `d5045380` 执行 steer 时只给 `runId` 即被 `SUPERVISOR_STEER_CHILD_AMBIGUOUS` 拒（该 run 的 fan-out 是 1/1，只有一个 child），补 `index: 0` 后才投递成功；而 upstream 状态回执自己给出的提示是 `subagent({action:"steer", id:"…", message:"…"})`（不含 index）。因此“模型按公开合同只给 runId 就会被拒”是可从合法 typed 入口产生的事实，不是测试制造的非法组合。已派只读诊断确定各定位组合（id-only / runId-only / index-only / dir）的确切解析语义与首个偏离点，再决定修生产解析、修 schema/描述、还是修 fixture；判定前不改任何一侧。
+
+## session-owner lane 修复结果（child `781f57d8-3f78-4bef-af33-9ca9123efd2e`，已提交 `99a0a01`）
+
+改动只在 `test/session-owner-install.integration.mjs`（+53/−11）：导入权威 helper `resolvePiCodingAgentRoot`（`test/helpers/pi-runtime.mjs:29-38`），把 `officialPiBin` 常量换成运行时解析的 `officialLauncherPaths()`（`PI_REAL_BIN` 显式优先含 trim、缺省 `join(hostRoot,"dist/cli.js")`；`PI_HOST_ROOT`/`PI_PACKAGE_DIR` 共用同一 `hostRoot`；解析放在用例运行期而非模块加载期）；新增 `describeFailure(result, transcriptPath)` 统一断言消息（status/signal/stdout/stderr + pty 日志），覆盖 `assertCompleted`、`verifyInstalled` 的 `runFreshZsh`、`init` 与原 `:235` 四条；expect 程序首行加 `log_file -a $env(PTY_LOG)`（`<state.root>/official-pty.log`），不改行为语义。
+
+主会话独立复核：`git diff --stat` 只有该文件（53/11）；`/tmp/so-fix-full.log` 尾部 `tests 3 / pass 3 / fail 0`（8492ms）；`/tmp/so-fix-noenv.log`（`env -u PI_TEST_CODING_AGENT_ROOT`）`pass 1 / fail 0`；`grep -c 'process\.env\.PI_TEST_CODING_AGENT_ROOT'` = **0**；负向对照 `/tmp/so-fix-pin-bogus.log`（pin 指向不存在路径）预期红，且断言消息首次自带首个偏离点原文：`status=1 signal=null stdout="ENOENT: … lstat '/private/tmp/definitely-missing-pi-root'" stderr="" ptyLog="同一段原文"` —— 同时实证了诊断修复与 `log_file` 生效。child 另验证首尾空白容忍 pin 绿、双变量全缺省绿。
+
+## `invalid-reply` 定性（child `ae2253b7-14c9-4132-b65f-f75034e5833e`）：**类别 2**，并更正本文件 `:42` 的记录
+
+**更正**：本文件 `:42` 记的“实际不成立”形态不完整，我后来在派发里写的“2 次成功投递 + 1 次 `NOT_PENDING`”**在两个现场里都不存在**。真实形态是 **3/3 `isError=true`**：
+
+| 次序 | 请求参数原文 | 回执 |
+| --- | --- | --- |
+| 1 | `{"replyTo":"unknown-request","message":"bad"}` | `isError:true`、`details:{code:"SUPERVISOR_REQUEST_NOT_PENDING"}` |
+| 2 | `{"to":"executor","message":"bad"}` | `isError:true`、`details:{}`、text `Validation failed for tool "supervisor_request_reply": - replyTo: must have required properties replyTo …` |
+| 3 | `{"message":"bad"}` | 同上（`Received arguments: {"message":"bad"}`） |
+
+durable 权威面印证零投递：`xlUbIK/workspace/supervisor-control/supervisor-4451029c….json` → `requests=[{state:"expired"}]`、**`receipts` 为空**。所以“成功投递”是把 Host schema 校验拒绝误读成投递成功。
+
+机制：Host 在 tool 执行**前**做 schema 校验并直接拒绝——上游 `prepareToolCall`（`node_modules/@earendil-works/pi-coding-agent/dist/bundle/chunks/chunk-H33F2TZD.js`，`validateToolArguments` → `createErrorToolResult`，`kind:"immediate"`）调用 `node_modules/@earendil-works/pi-ai/dist/utils/validation.js:280`（`validateToolCall` 见 `:266`），顺序在 `config.beforeToolCall` 与 `prepared.tool.execute(...)` 之前。因此参数**根本没到**我们的 typed 工具：本仓二层校验 `supervisor-operation-tools.ts:64-70`（`SUPERVISOR_OPERATION_REQUIRED_FIELD`、`keypath:$.replyTo`）未执行（现场 `details:{}` 即证据），membrane 的 `executeReply`/`commitDelivery`（`extension.ts:1568-1620`）未执行（无 receipts）。`replyTo` 确实必填：`supervisor-operation-tools.ts:93`/`:151` `required:["replyTo","message"]`、`:95` `minLength:1`；`to` 只是无控制面/控制面停用路径的 native 兜底（`:97`、`:108`），受控路径不消费 ⇒ “有 `to` 无 `replyTo`”是**非法工具调用**，不是“待决请求不存在”。fixture 也未绕过校验：`contact-provider.mjs` 经 `stream.push({type:'toolcall_end', toolCall})` 产出普通 assistant toolCall，走 Host 标准通道，不是 legacy `subagent_supervisor` union 面。
+
+判定：`test/joint-upgrade-contact-supervisor.integration.mjs:69` 要求三次坏 reply 全部 `SUPERVISOR_REQUEST_NOT_PENDING`，等于要求“非法调用穿透 Host 校验进入控制面”，是 S0 冻结合同下**设计上不可达**的状态组合 ⇒ **类别 2（过期断言）**；生产侧无缺失，反而按设计 fail closed。**不需要任何 production 兼容分支。**
+
+已授权的最小修法（保留“schema 非法调用不得投递”这条有价值覆盖）：`:69` 保留 `replies.length===3` 与 `every(isError===true)`；按回执顺序改为 `replies[0].details.code==='SUPERVISOR_REQUEST_NOT_PENDING'`，`replies[1]`/`replies[2]` 断言 `details.code===undefined` 且 `content[0].text` 匹配 `/must have required properties replyTo/`；可选强化：读 `workspace/supervisor-control/*.json` 断言 `receipts` 不含 `consumed===true`（零投递）。**不采纳**改 fixture 让三次都进控制面的方案（会牺牲上述覆盖，语义不同）。
+
+附带事实（供后续断言/渲染参考）：Host 校验失败的 toolResult `details` 是**空对象**，任何依赖 `details.code` 的断言或渲染都必须容忍“无 code”的错误形态（这不是缺陷，`compact-rendering.ts:252-268` 已按“缺结构化凭据”分支处理）。
+
+## TUI 详情首行删除的口径差（child `71a01c1c-e776-4b33-8bcf-b5473ff75d78` 上报，主会话已独立核实）
+
+child 按裁决删除了 header 身份行并端到端删除 `metaLabel`，但同时上报：`footer-runtime.ts:705-724 installFooter()` 在 presenter 挂载时把 footer 换成 `view.createFooter`，而 presenter 的 meta 只来自**父 ctx**（`presenter.ts:176-204 projectActivityFooterMeta(ctx)` 读 `ctx.model`/`ctx.thinkingLevel`），详情 footer 只渲染 `n/N glyph label · state`（`presenter.ts:299-313`）⇒ `footer-runtime.ts:407` 的 child 模型分支只在 **fallback/standalone** 路径成立。主会话核实属实。因此“删首行 + 删 metaLabel”会让选中 child 的模型/thinking 在 presenter 路径下**无处显示**，与用户“都放到 footer 去”的意图相反（等于重新引入 `docs/bugs/2026-10-19-subagent-detail-model-label-lost.md` 的症状）。
+
+处置：已 resume 该 child 补第二步——恢复 `ActivityRow.metaLabel` 作为**只读展示投影**承载字段（仍由 `formatChildModelLabel` 生成、未知则不设），改由 `presenter.ts renderDetailFooterLines` 首行渲染（`n/N glyph label · state · 模型`，遵守宽度截断与 `DETAIL_FOOTER_MAX_ROWS`），header 保持无身份行、`过期观察` 仍留在滚动信息行（依据：overlay 打开时主 footer 的 stale 状态行不渲染，`presenter.ts:340-343`），主视图 entry 块保持现状不拥挤。断言随之迁移为新合同。其 stale 处置与“空态不占 header 行”的论证已采纳。
