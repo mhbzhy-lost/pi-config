@@ -10,6 +10,10 @@
 // - footer 组件：main mode 调用 `renderActivityLayout`（meta 从 ctx.cwd/model/
 //   getContextUsage()/thinkingLevel 投影；source availability 经 registry.sourceSnapshot
 //   出独立状态行），detail mode 固定最多 3 行导航；不改写任何 raw 行对象。
+//   detail mode 首行承载选中项身份（`n/N glyph label · state`），并把行上的
+//   只读展示投影 `metaLabel`（如 subagent 的模型/thinking）追加在同一行（详情面
+//   首行已不再渲染身份行，信息搬到 footer）；超宽由 renderActivityDetailTextLine
+//   按终端列截断，不挤掉后两行（位置行 + 键位提示）。
 // - openDetails：terminalRows<=4 不挂 overlay、不改 editor/draft（shell 标记 too-small，
 //   恢复尺寸后可重开）；否则保存 editor/draft（错误隔离，任一获取/替换失败保持关闭并
 //   固定文案 notify 一次），经 `ctx.ui.custom` 以静态 overlay options（margin.bottom=4、
@@ -305,10 +309,14 @@ export function createActivityPresenter(
       lines.push("当前无后台活动");
     } else {
       const entry = entries[index];
+      // `metaLabel` 是行上的只读展示投影（如 subagent 的模型/thinking）；只有存在时
+      // 才追加 ` · <meta>`，避免尾部悬空分隔符。
+      const metaLabel =
+        typeof entry.metaLabel === "string" && entry.metaLabel !== "" ? ` · ${entry.metaLabel}` : "";
       lines.push(
         `${index + 1}/${entries.length} ${ACTIVITY_KIND_GLYPHS[entry.kind] ?? "◇"} ${
           entry.label
-        } · ${entry.stateLabel}`,
+        } · ${entry.stateLabel}${metaLabel}`,
       );
     }
     const position = shell.position();

@@ -55,9 +55,10 @@ export function subagentActivityLabel(child: Pick<BrowserChild, "runId" | "label
 
 /**
  * 行 metaLabel：该 subagent 实际使用的模型与 thinking（纯展示投影）。
- * 统一详情壳重做后，旧 browser footer 右侧的 child 模型标签丢失；这里把同一
- * 事实以可选 row 字段提供给详情 chrome，不改写 raw status，也不参与行身份。
- * 模型与 thinking 都未知时返回 undefined，不在 chrome 里堆 “no-model” 噪声。
+ * 详情面首行身份行已删除，此字段供**详情 footer**（presenter.renderDetailFooterLines）
+ * 在 `n/N glyph label · state` 后追加模型段；不改写 raw status，不参与行身份，
+ * 也不进入 session/tool result/event payload。模型与 thinking 都未知时不设该字段，
+ * 避免 footer 堆 “no-model” 噪声或尾巴悬空的 `·`。
  */
 export function subagentActivityMetaLabel(child: Pick<BrowserChild, "model" | "thinking">): string | undefined {
   const thinking = typeof child.thinking === "string" && child.thinking.trim() ? child.thinking.trim() : undefined;

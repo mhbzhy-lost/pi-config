@@ -29,11 +29,7 @@ import type {
   DetailComponent,
   HostScope,
 } from "pi-subagents-enhanced/tui/background-activity";
-import {
-  ACTIVITY_KIND_GLYPHS,
-  ACTIVITY_KIND_ORDER,
-  DETAIL_RESERVED_BOTTOM_ROWS,
-} from "./layout.ts";
+import { ACTIVITY_KIND_ORDER, DETAIL_RESERVED_BOTTOM_ROWS } from "./layout.ts";
 import type { ActivityTheme } from "./layout.ts";
 
 /** 详情壳注入的 pi-tui 输入/宽度工具（与 package FooterTuiBindings 同源的 DI 端口）。 */
@@ -628,7 +624,8 @@ class ActivityDetailShellController implements ActivityDetailShell {
   private scrollBounds(): { height: number; lineCount: number } {
     const rows = this.readTerminalRows();
     const bodyBudget = Math.max(0, rows - DETAIL_RESERVED_BOTTOM_ROWS);
-    const headerRows = bodyBudget >= 2 ? 2 : bodyBudget >= 1 ? 1 : 0;
+    // 标题只剩滚动信息 1 行，且无条目时不留行（与 renderHeaderLines 的实际行数一致）。
+    const headerRows = bodyBudget >= 1 && this.shellEntries.length > 0 ? 1 : 0;
     const height = Math.max(0, bodyBudget - headerRows);
     const lineCount = Math.max(0, this.bodyContent(this.lastRenderWidth).length);
     return { height, lineCount };
@@ -698,30 +695,33 @@ class ActivityDetailShellController implements ActivityDetailShell {
 
   // —— 内部：渲染 ——
 
+  /**
+   * overlay 内公共标题：只有滚动信息 1 行。
+   * 身份行（`› glyph label · state · metaLabel`）整条删除（展示层精简）：同一事实搬到
+   * footer——glyph/label/state 由活动 footer 的 entry 块（layout.ts）与详情 footer 首行
+   * （presenter.renderDetailFooterLines）承载，模型/thinking 也由该首行追加 `· metaLabel`
+   * 承载（行字段只作只读展示投影，不进 raw/session）。
+   * 空态（无条目）不给标题留行，把整块预算让给正文的「当前无后台活动」（footer 另有一行
+   * 空态提示），因此小终端下正文预算不被标题侵占。
+   * `过期观察` 仍保留在本行：footer 的 stale/unavailable 独立状态行只在主视图 footer 出现，
+   * 详情 overlay 打开时 footer 切换为详情模式，故该事实必须在 overlay 内可见。
+   */
   private renderHeaderLines(width: number, bodyBudget: number, theme: ActivityTheme | undefined): string[] {
-    const lines: string[] = [];
+    if (bodyBudget < 1 || this.shellEntries.length === 0) return [];
+    const position = this.position();
+    const follow = position.autoFollow ? "跟随底部" : "手动滚动";
     const entry = this.currentEntry();
-    const identity = entry
-      ? `› ${ACTIVITY_KIND_GLYPHS[entry.kind] ?? "◇"} ${entry.label} · ${entry.stateLabel}${
-          entry.metaLabel ? ` · ${entry.metaLabel}` : ""
-        }${this.staleKeys.has(entry.key) ? " · 过期观察" : ""}`
-      : "当前无后台活动";
-    lines.push(renderActivityDetailTextLine(identity, width, theme, this.tui));
-    if (bodyBudget >= 2) {
-      const position = this.position();
-      const follow = position.autoFollow ? "跟随底部" : "手动滚动";
-      lines.push(
-        renderActivityDetailTextLine(
-          `行 ${position.start}-${position.end}/${position.total} · ${follow} · x ${
-            this.expandedState ? "收起" : "展开"
-          }`,
-          width,
-          theme,
-          this.tui,
-        ),
-      );
-    }
-    return lines;
+    const stale = entry !== undefined && this.staleKeys.has(entry.key) ? " · 过期观察" : "";
+    return [
+      renderActivityDetailTextLine(
+        `行 ${position.start}-${position.end}/${position.total} · ${follow} · x ${
+          this.expandedState ? "收起" : "展开"
+        }${stale}`,
+        width,
+        theme,
+        this.tui,
+      ),
+    ];
   }
 
   private renderBodyLines(width: number, height: number): string[] {

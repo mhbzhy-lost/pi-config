@@ -544,13 +544,13 @@ test("打开中变小：正文空数组、关闭输入仍可用、无负高度�
   await fixture.view.openDetails();
   subagent.resolveNext(createCountedComponent(10, "A1").component);
   await flush();
-  // 24 行终端：terminalRows-4=20（2 标题 + 18 正文），不得再扣详情 footer 3 行。
+  // 24 行终端：terminalRows-4=20（1 滚动信息行 + 19 正文），不得再扣详情 footer 3 行。
   assert.equal(fixture.overlayCalls[0].component.render(80).length, 20, "高度 = terminalRows-4，不双扣");
   // resize 变小：每 render 实时适应，不 remount。
   fixture.terminal.rows = 10;
-  assert.equal(fixture.overlayCalls[0].component.render(80).length, 6, "10 行终端 → 6 行（8-4-2 标题）");
+  assert.equal(fixture.overlayCalls[0].component.render(80).length, 6, "10 行终端 → 6 行（bodyBudget 6：1 滚动信息行 + 5 正文）");
   fixture.terminal.rows = 5;
-  assert.equal(fixture.overlayCalls[0].component.render(80).length, 1, "5 行终端 → 仅标题 1 行");
+  assert.equal(fixture.overlayCalls[0].component.render(80).length, 1, "5 行终端 → 仅滚动信息行 1 行");
   fixture.terminal.rows = TOO_SMALL_TERMINAL_ROWS;
   assert.deepEqual(fixture.overlayCalls[0].component.render(80), [], "4 行终端 → 正文空（无负高度）");
   assert.equal(fixture.overlayCalls.length, 1, "resize 不触发 remount");
@@ -624,6 +624,9 @@ test("空 registry：open 显示空状态、Esc 可关、不虚构任务", async
   assert.equal(fixture.overlayCalls.length, 1);
   const lines = fixture.overlayCalls[0].component.render(80);
   assert.ok(lines.some((line) => line.includes("当前无后台活动")), "空状态正文");
+  assert.ok(lines[0].includes("当前无后台活动"), `空态时 header 不留行，首行就是正文空态：${lines[0]}`);
+  assert.equal(lines.length, 24 - DETAIL_RESERVED_BOTTOM_ROWS, "空态也按 terminalRows-4 铺满（不双扣 footer）");
+  assert.equal(lines[0].includes("行 "), false, `空态不得渲染滚动信息行（无可滚动内容）：${lines[0]}`);
   assert.ok(footer.render(80)[0].includes("当前无后台活动"), "detail footer 空状态行");
   fixture.overlayCalls[0].component.handleInput(ESC);
   assert.equal(fixture.overlayCalls[0].done, 1, "空状态仍可关闭");
@@ -687,7 +690,7 @@ test("x 展开重取：同 key 新请求 expanded=true、旧组件保留到新�
   const first = createCountedComponent(30, "A1");
   subagent.resolveNext(first.component);
   await flush();
-  assert.equal(fixture.shell.position().start, 13, "30 行内容 autoFollow 底部（1-based）");
+  assert.equal(fixture.shell.position().start, 12, "30 行内容 autoFollow 底部（1-based）");
   fixture.shell.handleInput(HOME);
   assert.equal(fixture.shell.position().start, 1, "手动滚动到顶部");
   assert.equal(fixture.shell.position().autoFollow, false);
@@ -747,17 +750,17 @@ test("registry invalidate 重取保 anchor；同 kind source 对象替换同 key
   subagent.resolveNext(first.component);
   await flush();
   fixture.overlayCalls[0].component.handleInput(HOME);
-  assert.ok(footer.render(80)[1].includes("行 1-18/30"), `anchor 到顶：${footer.render(80)[1]}`);
+  assert.ok(footer.render(80)[1].includes("行 1-19/30"), `anchor 到顶：${footer.render(80)[1]}`);
   // source invalidate → registry notify → presenter 转发 shell 重取。
   subagent.invalidate();
   await flush();
   assert.equal(subagent.calls.length, 2, "invalidate 触发重取");
-  assert.ok(footer.render(80)[1].includes("行 1-18/30"), "重取请求在途时 anchor 保持");
+  assert.ok(footer.render(80)[1].includes("行 1-19/30"), "重取请求在途时 anchor 保持");
   const second = createCountedComponent(30, "A2");
   subagent.resolveNext(second.component);
   await flush();
   assert.equal(first.disposed, 1, "替换 dispose 一次");
-  assert.ok(footer.render(80)[1].includes("行 1-18/30"), "新组件到达后 anchor 仍保持");
+  assert.ok(footer.render(80)[1].includes("行 1-19/30"), "新组件到达后 anchor 仍保持");
   // 同 kind source 对象替换（同 key）：即使 key 相同也按新 source 发起新请求。
   const replacement = createDeferredSource("subagent", [row("subagent", "subagent:a", "任务A")]);
   fixture.registry.register(replacement.source);
@@ -768,7 +771,7 @@ test("registry invalidate 重取保 anchor；同 kind source 对象替换同 key
   replacement.resolveNext(third.component);
   await flush();
   assert.equal(second.disposed, 1);
-  assert.ok(footer.render(80)[1].includes("行 1-18/30"), "source 替换后 anchor 仍保持");
+  assert.ok(footer.render(80)[1].includes("行 1-19/30"), "source 替换后 anchor 仍保持");
   fixture.view.dispose();
 });
 
@@ -860,9 +863,9 @@ test("provider render/invalidate 仅 display：ANSI 保留、按宽截断补空�
   subagent.resolveNext(ansi.component);
   await flush();
   const lines = fixture.shell.render(40);
-  // 标题 2 行 + 正文 3 行（顶部对齐）+ 补空 15 行 = 20。
+  // 标题 1 行（滚动信息）+ 正文 3 行（顶部对齐）+ 补空 16 行 = 20。
   assert.equal(lines.length, 20);
-  const bodyLines = lines.slice(2);
+  const bodyLines = lines.slice(1);
   for (const line of bodyLines) {
     assert.ok(visibleWidth(line) <= 40, `行宽不越界：${JSON.stringify(line)}`);
   }
@@ -909,7 +912,10 @@ test("导航覆盖 main/recent 全量与 stale 分组，kind 固定顺序、key 
   }
   assert.equal(fixture.shell.selectedKey(), "scheduler:s", "右移到 stale 分组条目");
   const header = fixture.shell.render(80)[0];
-  assert.ok(header.includes("旧定时") && header.includes("过期观察"), `stale 条目标记：${header}`);
+  assert.equal(header.includes("›"), false, `header 不再渲染身份行：${header}`);
+  assert.equal(header.includes("旧定时"), false, `header 不再渲染 label：${header}`);
+  assert.ok(header.includes("过期观察"), `stale 条目在 header 滚动信息行上标记：${header}`);
+  assert.ok(header.includes("行 ") && header.includes("x 展开"), `header 只剩滚动信息行：${header}`);
   // 左移回到 bash（跨 kind 导航）。
   fixture.shell.handleInput(LEFT);
   assert.equal(fixture.shell.selectedKey(), "bash:b");
@@ -958,8 +964,8 @@ test("输入语义：导航键 repeat 重复、release 忽略、未知吞掉、�
   const component = createCountedComponent(30, "A1");
   subagent.resolveNext(component.component);
   await flush();
-  // 30 行内容、高度 18：autoFollow 底部 start=12（1-based 13）。
-  assert.equal(fixture.shell.position().start, 13);
+  // 30 行内容、高度 19（24-4-1 滚动信息行）：autoFollow 底部 start=11（1-based 12）。
+  assert.equal(fixture.shell.position().start, 12);
   // 未知键吞掉。
   assert.deepEqual(fixture.shell.handleInput("q"), { consume: true });
   assert.deepEqual(fixture.shell.handleInput("\x01"), { consume: true });
@@ -990,23 +996,23 @@ test("滚动与 wheel：autoFollow/manual、j/k、page/home/end、SGR 轨球", a
   fixture.openShell();
   subagent.resolveNext(createCountedComponent(30, "A1").component);
   await flush();
-  // 高度 18、30 行内容：maxStart=12。
-  assert.deepEqual(fixture.shell.position(), { start: 13, end: 30, total: 30, autoFollow: true });
+  // 高度 19、30 行内容：maxStart=11。
+  assert.deepEqual(fixture.shell.position(), { start: 12, end: 30, total: 30, autoFollow: true });
   fixture.shell.handleInput(UP);
-  // start 0-based 11 → 1-based 12；end = min(30, 11+18) = 29（可见窗口 12..29 行）。
-  assert.deepEqual(fixture.shell.position(), { start: 12, end: 29, total: 30, autoFollow: false });
+  // start 0-based 10 → 1-based 11；end = min(30, 10+19) = 29（可见窗口 11..29 行）。
+  assert.deepEqual(fixture.shell.position(), { start: 11, end: 29, total: 30, autoFollow: false });
   assert.deepEqual(fixture.shell.handleInput(WHEEL_UP), { consume: true });
-  assert.equal(fixture.shell.position().start, 11, "SGR 轨球向上滚动");
+  assert.equal(fixture.shell.position().start, 10, "SGR 轨球向上滚动");
   assert.deepEqual(fixture.shell.handleInput(WHEEL_DOWN), { consume: true });
-  assert.equal(fixture.shell.position().start, 12, "SGR 轨球向下滚动");
+  assert.equal(fixture.shell.position().start, 11, "SGR 轨球向下滚动");
   fixture.shell.handleInput("k");
-  assert.equal(fixture.shell.position().start, 11, "k 向上");
+  assert.equal(fixture.shell.position().start, 10, "k 向上");
   fixture.shell.handleInput("j");
-  assert.equal(fixture.shell.position().start, 12, "j 向下");
+  assert.equal(fixture.shell.position().start, 11, "j 向下");
   fixture.shell.handleInput(PAGE_UP);
   assert.equal(fixture.shell.position().start, 1, "PgUp 到顶（0-based 0）");
   fixture.shell.handleInput(PAGE_DOWN);
-  assert.deepEqual(fixture.shell.position(), { start: 13, end: 30, total: 30, autoFollow: true }, "PgDn 回到跟随底部");
+  assert.deepEqual(fixture.shell.position(), { start: 12, end: 30, total: 30, autoFollow: true }, "PgDn 回到跟随底部");
   fixture.shell.handleInput(HOME);
   assert.equal(fixture.shell.position().start, 1);
   fixture.shell.handleInput(END);
@@ -1024,16 +1030,24 @@ test("geometry：正文预算 = terminalRows-4-标题实际行数，不双扣 fo
   fixture.openShell();
   subagent.resolveNext(createCountedComponent(10, "A1").component);
   await flush();
-  assert.equal(fixture.shell.render(80).length, 20, "24 行 → 20（2 标题 + 18 正文），不扣 footer");
+  assert.equal(fixture.shell.render(80).length, 20, "24 行 → 20（1 滚动信息行 + 19 正文），不扣 footer");
   const headerOnly = fixture.shell.render(80).slice(0, 2);
-  assert.ok(headerOnly[0].includes("› ● 任务A · 运行中"), `标题身份/状态：${headerOnly[0]}`);
-  assert.ok(headerOnly[1].includes("行 1-10/10") && headerOnly[1].includes("x 展开"), `标题位置行：${headerOnly[1]}`);
+  assert.equal(headerOnly[0].includes("›"), false, `标题不得再有身份行（›）：${headerOnly[0]}`);
+  assert.equal(headerOnly[0].includes("任务A"), false, `标题不得再渲染 label：${headerOnly[0]}`);
+  assert.equal(headerOnly[0].includes("运行中"), false, `标题不得再渲染 state：${headerOnly[0]}`);
+  assert.ok(
+    headerOnly[0].includes("行 1-10/10") && headerOnly[0].includes("x 展开"),
+    `标题只剩滚动信息行：${headerOnly[0]}`,
+  );
+  assert.ok(headerOnly[1].includes("A1 内容行 1"), `身份行删除后正文紧随标题：${headerOnly[1]}`);
   fixture.terminal.rows = 10;
-  assert.equal(fixture.shell.render(80).length, 6, "10 行 → 6（6-4-2）");
+  assert.equal(fixture.shell.render(80).length, 6, "10 行 → 6（bodyBudget 6：1 滚动信息行 + 5 正文）");
   fixture.terminal.rows = 6;
-  assert.equal(fixture.shell.render(80).length, 2, "6 行 → 2（2-4=bodyBudget 2，全部给标题）");
+  assert.equal(fixture.shell.render(80).length, 2, "6 行 → 2（bodyBudget 2：1 滚动信息行 + 1 正文）");
+  assert.ok(fixture.shell.render(80)[0].includes("x 展开"), "bodyBudget 2 时滚动信息行仍保留");
   fixture.terminal.rows = 5;
-  assert.equal(fixture.shell.render(80).length, 1, "5 行 → 1（仅身份标题）");
+  assert.equal(fixture.shell.render(80).length, 1, "5 行 → 1（bodyBudget 1：仅滚动信息行）");
+  assert.ok(fixture.shell.render(80)[0].includes("跟随底部"), "小终端下 bodyBudget 门控仍成立");
   fixture.terminal.rows = 0;
   assert.deepEqual(fixture.shell.render(80), []);
   // 窄宽：标题行按终端列截断不越界。
@@ -1043,29 +1057,62 @@ test("geometry：正文预算 = terminalRows-4-标题实际行数，不双扣 fo
   }
 });
 
-test("chrome 显示 row.metaLabel：subagent 详情能看到该 child 的模型与 thinking，缺省不追加空段", async () => {
-  const withMeta = Object.freeze({ key: "subagent:m", kind: "subagent", label: "任务M", stateLabel: "运行中", placement: "main", metaLabel: "模型 (codex-pool) gpt-6.1-sol · thinking: high" });
-  const withoutMeta = Object.freeze({ key: "subagent:n", kind: "subagent", label: "任务N", stateLabel: "运行中", placement: "main" });
+test("header 不渲染身份行：label/state/模型全由 detail footer 首行承载，缺省不留悬空分隔", async () => {
+  const withMeta = Object.freeze({
+    key: "subagent:m", kind: "subagent", label: "任务M", stateLabel: "运行中", placement: "main",
+    metaLabel: "模型 (codex-pool) gpt-6.1-sol · thinking: high",
+  });
+  const withoutMeta = Object.freeze({
+    key: "subagent:n", kind: "subagent", label: "任务N", stateLabel: "已完成", placement: "main",
+  });
   const subagent = createDeferredSource("subagent", [withMeta, withoutMeta]);
-  const fixture = createShellFixture({ sources: [subagent], terminalRows: 24 });
-  fixture.openShell();
+  const fixture = createPresenterFixture({ sources: [subagent], terminalRows: 24 });
+  const footer = fixture.view.createFooter(
+    { terminal: fixture.terminal, requestRender() {} },
+    { fg: (_color, text) => text },
+    {},
+  );
+  await fixture.view.openDetails();
   subagent.resolveNext(createCountedComponent(4, "M1").component);
   await flush();
-  const header = fixture.shell.render(80)[0];
-  assert.ok(header.includes("› ● 任务M · 运行中"), `身份段保持原合同：${header}`);
-  assert.ok(header.includes("模型 (codex-pool) gpt-6.1-sol") && header.includes("thinking: high"), `详情必须显示该 subagent 的模型：${header}`);
-  // 切到没有 metaLabel 的行：不追加空分隔段，也不沿用上一行的模型。
-  fixture.shell.handleInput(RIGHT);
+  const component = fixture.overlayCalls[0].component;
+  const header = component.render(80)[0];
+  // 新合同：overlay header 只有滚动信息行，不再有 `› glyph label · state · meta` 身份行。
+  assert.equal(header.includes("›"), false, `header 不得再有身份行前缀：${header}`);
+  assert.equal(header.includes("任务M"), false, `header 不得再渲染 label：${header}`);
+  assert.equal(header.includes("运行中"), false, `header 不得再渲染 state：${header}`);
+  assert.equal(header.includes("模型"), false, `header 不得再渲染模型段：${header}`);
+  assert.ok(header.includes("行 1-4/4") && header.includes("x 展开"), `header 只剩滚动信息行：${header}`);
+  // 同一事实搬到 detail footer 首行（`n/N glyph label · state` + 可选 ` · metaLabel`）。
+  const footerLines = footer.render(80);
+  const footerFirst = footerLines[0];
+  assert.ok(footerFirst.startsWith("1/2 ● 任务M · 运行中"), `footer 首行承载身份：${footerFirst}`);
+  assert.ok(
+    footerFirst.includes("模型 (codex-pool) gpt-6.1-sol") && footerFirst.includes("thinking: high"),
+    `footer 首行承载模型/thinking：${footerFirst}`,
+  );
+  // 追加模型段不得挤掉既有 3 行（位置行 + 键位提示行）。
+  assert.equal(footerLines.length, DETAIL_FOOTER_MAX_ROWS, "detail footer 仍为最多 3 行");
+  assert.ok(footerLines[1].includes("行 1-4/4") && footerLines[1].includes("x 展开"), `位置行仍在：${footerLines[1]}`);
+  assert.ok(footerLines[2].includes("Esc/Alt+O 关闭"), `键位提示行仍在：${footerLines[2]}`);
+  // 切到没有 metaLabel 的行：footer 跟随新身份，不出现模型段，也不留悬空 `·`。
+  component.handleInput(RIGHT);
   subagent.resolveNext(createCountedComponent(4, "N1").component);
   await flush();
-  const second = fixture.shell.render(80)[0];
-  assert.ok(second.includes("任务N"), `已切到第二行：${second}`);
-  assert.equal(second.includes("模型"), false, `无 metaLabel 时不得显示模型段：${second}`);
-  assert.equal(second.includes("··"), false, `不得遗留空分隔：${second}`);
-  // 窄宽仍按终端列截断，不因新增段越界。
-  for (const line of fixture.shell.render(24)) {
+  const secondHeader = component.render(80)[0];
+  assert.equal(secondHeader.includes("任务M"), false, `切行后 header 仍无身份段：${secondHeader}`);
+  assert.equal(secondHeader.includes("模型"), false, `切行后 header 仍无模型段：${secondHeader}`);
+  assert.equal(secondHeader.includes("··"), false, `不得遗留空分隔：${secondHeader}`);
+  const secondFooter = footer.render(80)[0];
+  assert.equal(secondFooter, "2/2 ● 任务N · 已完成", `无 metaLabel 时 footer 不追加任何段：${JSON.stringify(secondFooter)}`);
+  assert.equal(secondFooter.includes("模型"), false, `无 metaLabel 时不得出现模型段：${secondFooter}`);
+  assert.equal(/\s·$/.test(secondFooter), false, `尾部不得悬空分隔：${JSON.stringify(secondFooter)}`);
+  // 窄宽仍按终端列截断（header + footer），不越界。
+  for (const line of [...component.render(24), ...footer.render(24)]) {
     assert.ok(visibleWidth(line) <= 24, `窄宽行不越界：${JSON.stringify(line)}`);
   }
+  component.handleInput(ESC);
+  fixture.view.dispose();
 });
 
 test("raw 不变：行对象冻结、请求对象形状固定、registry/source 状态不被改写", async () => {

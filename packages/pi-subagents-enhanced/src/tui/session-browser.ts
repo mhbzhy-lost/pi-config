@@ -40,8 +40,9 @@ export interface BrowserRosterPersistence {
 
 /**
  * child 模型展示标签（纯 TUI 投影，不改写 raw status）。
- * 旧 footer 在 browser/child 模式右侧显示该值；统一详情壳改由 row.metaLabel 消费同一格式，
- * 避免重做面板后丢失“这个 subagent 用的什么模型”。
+ * 两个消费方共用同一格式：subagent footer 的 child 分支（footer-runtime，standalone/
+ * fallback 路径）与行投影 `ActivityRow.metaLabel`（subagent-activity → presenter 的
+ * 详情 footer 首行）。不写回任何 raw/session 数据。
  */
 export function formatChildModelLabel(model: string | undefined, thinking: string | undefined): string {
   if (!model) return "no-model";

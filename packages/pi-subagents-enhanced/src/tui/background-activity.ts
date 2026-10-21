@@ -26,8 +26,9 @@ export type ActivityPlacement = "main" | "recent";
 /**
  * 统一展示行。key 由类型、source 稳定 ID 与必要 child index 组成；
  * 身份只认 key，禁止按 label 去重，也不得以显示文本复活条目。
- * `metaLabel` 是可选的**只读展示投影**（例如 subagent 的 provider/model 与 thinking），
- * 仅供详情壳 chrome 行展示；不参与身份、去重、排序，也不得被当作任务事实权威。
+ * `metaLabel` 是可选的**只读展示投影**（例如 subagent 的 provider/model 与 thinking）：
+ * 只供 footer 展示，不参与身份/去重/排序，也不得被当作任务事实权威，
+ * 更不得进入 session/tool result/event payload。
  */
 export type ActivityRow = Readonly<{
   key: string;

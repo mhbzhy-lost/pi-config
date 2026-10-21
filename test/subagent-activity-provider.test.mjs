@@ -555,18 +555,19 @@ test("detail 走 package trusted native：native 会话先于 Fleet 回退渲染
   assert.doesNotMatch(rendered, /Fleet fallback message/);
 });
 
-test("行投影携带模型 metaLabel：统一详情壳重做后仍能看到该 subagent 用什么模型", () => {
+test("行投影携带模型 metaLabel（只读展示投影）：详情 footer 依此显示该 subagent 用什么模型", () => {
   const base = { key: "run:0", runId: "run", index: 0, agent: "executor", state: "running", asyncDir: "/tmp/run", cwd: "/repo" };
   const withModel = subagentActivity.projectSubagentActivityRows({
     active: true, children: [{ ...base, model: "codex-pool/gpt-6.1-sol:high", thinking: "high" }],
     activeChildren: [{ ...base, model: "codex-pool/gpt-6.1-sol:high", thinking: "high" }], recentChildren: [],
   });
   assert.equal(withModel[0].metaLabel, "模型 (codex-pool) gpt-6.1-sol · thinking: high");
+  assert.equal(withModel[0].key, "subagent:run:0", "展示投影不参与行身份（身份仍只认稳定 key）");
   const bare = subagentActivity.projectSubagentActivityRows({
     active: true, children: [{ ...base, model: "gpt-6.1-sol" }], activeChildren: [{ ...base, model: "gpt-6.1-sol" }], recentChildren: [],
   });
   assert.equal(bare[0].metaLabel, "模型 gpt-6.1-sol", "无 provider 前缀时不伪造 provider");
   const unknown = subagentActivity.projectSubagentActivityRows({ active: true, children: [base], activeChildren: [base], recentChildren: [] });
-  assert.equal(Object.hasOwn(unknown[0], "metaLabel"), false, "模型与 thinking 均未知时不堆 no-model 噪声");
+  assert.equal(Object.hasOwn(unknown[0], "metaLabel"), false, "模型与 thinking 均未知时不设字段，footer 不堆 no-model 噪声");
   assert.deepEqual(Object.keys(unknown[0]).sort(), ["key", "kind", "label", "placement", "stateLabel"], "未知模型时行仍只含协议五字段");
 });
