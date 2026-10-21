@@ -175,3 +175,16 @@ contact-supervisor lane 同样以 `--mode rpc --no-session` 启动 Host，其经
 断言迁移内容：probe 的 `setActiveTools` 移除 legacy 名 `subagent_supervisor`（其余观测能力全部保留）；`:429` 处由 1 条正向包含检查改为 **1 条 legacy 名负向断言 + 3 条 `supervisor_request_pending/status/reply` 正向断言**，并保留 `bg_wait` 在、旧 union `subagent` 不在；旁注 membrane 坐标（`runtime-membrane.ts:174-179`、`:187-189`）与映射权威（`supervisor-operation-tools.ts:5`、`pi/AGENTS_GLOBAL.md:82`），注明“不是 fixture 缺件，勿再按缺件排查”。严格性净提升，未放宽任何断言、未 skip/only、未改生产。
 
 据此，门禁 28 项失败中由本 lane 贡献的 2 项已消除（045 lane 1 项此前已消除）。该 child 的 run 状态在报告后显示 failed，但结论已由日志与 git 状态独立复核，不再续跑。
+
+## project-workflow 取证日志：同根因的效果签名（child `d5045380-fb5b-4c59-9ee7-e547d5291fcf` 修复前取证）
+
+`/tmp/project-workflow-before.log`：tests 2 / pass 0 / fail 2，duration 2660ms。两条失败与已确证根因的对应关系：
+
+| 失败 | 坐标 | 现场错误 | 对应根因后果 |
+| --- | --- | --- | --- |
+| `project typed worktree commit completes Auto Integration and release` | test 在 `test/pi-subagents-project-workflow.integration.mjs:241`，断言在 `:326` | `subagent_start` 的 tool_execution_end：`WORKSPACE_SERVICE_UNAVAILABLE: managed workspace service is unavailable`（`details.code` 同名） | session_start 在 required-child 校验处抛错后，排在其后的 workspace service / coordinator 初始化未执行 |
+| `non-Goal executor ignores a hostile legacy .pi-subagents tree` | test 在 `:359`，断言在 `:441` | `CAPABILITY_NEGOTIATION_FAILED: pi-subagents RPC capability negotiation failed; missing: rpc:v1/session`，诊断包 `negotiation`：`stage:"spawn-capability-assertion"`、`dispatchPath:"coding"`、`capabilitiesEnvelopePresent:true`、`versionOk:true`、`spawnMethodOk:true`、**`sessionIdPresent:false`、`lifecycleIdentityPresent:false`、`sessionCwdPresent:false`、`cwdEqual:false`** | 正是 ping 的 `session` 投影为 `{}`、bridge 未 primed 的直接后果 |
+
+方法论要点（必须记住，否则会误判）：**`Required child extensions 'agents-shared' … ENOENT` 原文不会出现在这些 lane 的 TAP 日志里**，因为 lane 不回显 Host 的 stdout/stderr；上一轮能看到该行是因为观测 harness 自行捕获了 Host 输出。因此判定同根因应使用上表两类**效果签名**，而不是 grep ENOENT 原文。据此已 steer 该 child（request `38e3692e-111a-4565-90af-a36b5546590c`，排队不等于已消费），澄清“签名缺失”不构成“非同一根因”，并授权按效果签名继续修复；若补 symlink 后效果签名仍在，才是新根因。
+
+同批取证进行中：`/tmp/completion-notification-before.log`（`async typed dispatch delivers the upstream subagent-notify custom message into the main session log` 60596ms 失败，与门禁记录一致）。
