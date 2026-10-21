@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -320,6 +320,11 @@ extensions: ${provider}
 执行隔离fixture。
 `);
   }
+  // 与 contact-supervisor/runtime lane 对齐：configRoot 缺 agents-shared 扩展会让 typed
+  // extension 的 session_start 链在 required-child 校验处失败（fixture 环境缺件），
+  // 因此以 symlink 指向仓内同一权威来源提供该扩展，不复制内容、不新建实现。
+  await mkdir(join(configRoot, "extensions"), { recursive: true });
+  await symlink(join(repoRoot, "pi", "extensions", "agents-shared.ts"), join(configRoot, "extensions", "agents-shared.ts"));
   await writeFile(provider, notifyProviderSource(contract));
   await writeFile(parentProbe, parentProbeSource());
 

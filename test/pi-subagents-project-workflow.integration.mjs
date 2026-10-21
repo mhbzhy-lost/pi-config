@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { copyFile, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -283,6 +283,11 @@ Return the deterministic child marker without modifying files.
     for (const name of ["delegate", "executor", "reviewer"]) {
       await copyFile(join(repoRoot, "pi", "agents", `${name}.md`), join(configRoot, "agents", `${name}.md`));
     }
+    // 与 contact-supervisor/runtime lane 对齐：configRoot 缺 agents-shared 扩展会让 typed
+    // extension 的 session_start 链在 required-child 校验处失败（fixture 环境缺件），
+    // 因此以 symlink 指向仓内同一权威来源提供该扩展，不复制内容、不新建实现。
+    await mkdir(join(configRoot, "extensions"), { recursive: true });
+    await symlink(join(repoRoot, "pi", "extensions", "agents-shared.ts"), join(configRoot, "extensions", "agents-shared.ts"));
     await writeFile(join(configRoot, "agents", "executor.md"), `---
 name: executor
 description: deterministic typed workflow executor
@@ -400,6 +405,9 @@ Return the deterministic child marker without modifying files.
     for (const name of ["delegate", "executor", "reviewer"]) {
       await writeFile(join(configRoot,"agents",`${name}.md`),`---\nname: ${name}\ndescription: fixture\nmodel: fake/deterministic\ntools: read,bash\nextensions: ${provider}\n---\nfixture\n`);
     }
+    // 同上：configRoot 需要提供 agents-shared 扩展（symlink 指向仓内权威来源）。
+    await mkdir(join(configRoot, "extensions"), { recursive: true });
+    await symlink(join(repoRoot, "pi", "extensions", "agents-shared.ts"), join(configRoot, "extensions", "agents-shared.ts"));
 
     const runtimeEntries = join(projectRoot, ".pi-subagents");
     await mkdir(runtimeEntries, { recursive: true, mode: 0o700 });
