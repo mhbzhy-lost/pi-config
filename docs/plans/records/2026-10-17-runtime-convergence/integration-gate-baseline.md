@@ -157,3 +157,13 @@ contact-supervisor lane 同样以 `--mode rpc --no-session` 启动 Host，其经
 分类与处置：门禁这两项失败属 **类别 2（测试制造的非预期数据）**——合法生产形态的 agentDir 都带 `agents-shared`（`subagent-runtime.ts:216-218` 明确要求），缺它的 agentDir 由 fixture 造成；修法是给该 lane 的 configRoot 补同样的 symlink，**不需要生产兼容分支**。
 
 另记一个**独立的、需用户裁决的设计问题**（本次不实施）：当 required child extension 缺失时，我们的校验先抛错会让 upstream 的 session_start 整体不执行，外部可见症状退化成难以定位的 `no_active_session`（bridge 静默未 primed），而不是明确的“缺 agents-shared”。是否要调整顺序（把 required-child 校验移到 `beforeSessionStart` 之后）或降级为非致命 + 明确诊断，属生产可诊断性决策；在裁决前保持现状 fail-closed。
+
+## fixture 修复结果（child `ea5f44a9-4d7e-4586-b522-776219a841b3`）：根因消除，暴露一条过期断言
+
+改动只落在 `test/pi-subagents-runtime.integration.mjs`（+6/-1）：为 configRoot 补 `extensions/agents-shared.ts` symlink，指向仓内权威来源 `pi/extensions/agents-shared.ts`（存在，849B），做法对齐 `test/joint-upgrade-contact-supervisor.integration.mjs:20`；不复制内容、不新建实现。
+
+重跑（`/tmp/rpc-lane-fix.log`，串行）：tests 5 / pass 3 / fail 2 / skip 0，约 5862ms（两条 RPC lane 2075ms、2744ms）。**原根因已消除**：日志中 `ENOENT`、`not an importable`、`no_active_session` 出现次数均为 0；`compat_spawn` 成功返回 details，`ping.version` 与 `REQUIRED_METHODS` 断言通过 → session_start 链已跑通、bridge 已 primed。
+
+新的首个偏离点：`test/pi-subagents-runtime.integration.mjs:429` 的 `assert.ok(details.activeTools.includes("subagent_supervisor"))`，两条 lane 均在此失败。实际 activeTools 含全部新名工具（`supervisor_request_pending/status/reply`、`subagent_start`、`subagent_run_*`、`managed_workspace_*` 等）但**不含** legacy 名 `subagent_supervisor`。定性为**类别 2 的过期断言**，不是缺件也不是生产缺陷：`src/subagent-dispatch/runtime-membrane.ts:174-179` 拦截上游 `registerTool`，对 `name === "subagent_supervisor"` 只 bind `execute` 进 adapter、不注册为可见工具，`:187-189` 的 `getAllTools` 代理显式 filter 掉该名字；模型面替代物见 `supervisor-operation-tools.ts:5`，legacy→新名的一次性映射权威定义在 `pi/AGENTS_GLOBAL.md:82`。
+
+处置：已授权该 child 把断言迁移为表达当前合同且更严的形式（legacy 名必须**不在**、`supervisor_request_*` 三者必须**在**、保留原有其它检查、旁注 membrane 坐标），并同文件内一并迁移其它引用 legacy 名之处；仍禁止改生产、禁止放宽、禁止 skip/only、禁止自行 commit。复跑日志 `/tmp/rpc-lane-fix2.log`。
