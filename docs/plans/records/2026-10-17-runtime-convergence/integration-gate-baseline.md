@@ -300,7 +300,11 @@ child 按裁决删除了 header 身份行并端到端删除 `metaLabel`，但同
 
 覆盖边界（诚实标注）：
 - **排除清单为空**：runner 未打印 `excluded (...)`，即 `EXCLUDED_INTEGRATION_FILES` 为 0 项，本轮绿不是靠豁免取得的。
-- 10 项 skipped 中 8 项是 `真实后台活动视觉：base/long/widths/heights/draft/themes/lifecycle/rpc`（视觉快照类，长期 skip），另有 `隔离 managed coding 实际父 Host/child heartbeat`（危险实验，需单独授权，见 `lifecycle-boundaries.md`）等；skip 集合与首跑一致，未因本轮修复新增 skip。
+- **10 项 skipped 全部可解释，且都是既有的授权/环境门控，未因本轮修复新增 skip**：
+  1. 8 项 `真实后台活动视觉：base/long/widths/heights/draft/themes/lifecycle/rpc` —— `test/background-activity-visual.integration.mjs:84` 的 `{ skip: process.env.PI_TEST_BG_VISUAL !== '1' }`；
+  2. 1 项 `隔离 managed coding 实际父 Host/child heartbeat` —— `test/heartbeat-parent-death.integration.mjs:318` 的 `{ skip: experimentMode(process.env) === "disabled" }`，即危险实验需单独授权（见 `lifecycle-boundaries.md`）；
+  3. 1 项 `真实 Pi PTY: SIGKILL owner is cleaned by ESRCH before the next wrapper starts`（日志 `:491`，标记为 `# fixture-sigkill 尚未授权`）—— `test/session-owner-runtime.integration.mjs:518` 在用例**体内** `t.skip(...)`，受 `PI_TEST_OWNER_SIGKILL !== "1"` 门控。
+  取证方法论更正：统计 skip 不能只 grep `# SKIP`（体内 `t.skip(reason)` 的标记行是 `# <reason>`），应按 `^﹣` 行计数并与汇总 `skipped N` 对齐；本轮 `^﹣` 计数 = 10 = 汇总值，闭合。
 - 本轮仍执行了两个**未跟踪**的观测文件（日志中 `rpc-bridge-observation` 命中 19 次），即 tests 344 中有 2 项来自它们；是否删除或移至 `scripts/probes/` 仍待用户裁决（见上一节）。
 
 轨迹：首跑 **342/304/28/10** → 上一轮 **344/332/2/10** → 本轮 **344/334/0/10**。首跑 28 项失败分布在多个文件，其中 7 个文件的复跑残留 8 项（`empty`、`invalid-reply`、project-workflow ×2、session-owner zsh wrapper、completion-notification、root-broker-startup、steer-text-insertion）即本会话逐项定位的对象；其余各项在此前的 fixture/断言迁移提交（`24dc18a`、`f211702`、`7f358cb`）后未再复现，本轮全量 0 fail 证明全部已清。8 项的逐项定性、坐标与证据见本文件前面的清单表；其中 steer 一项是**类别 1 生产合同缺陷**（`index` 必填未同步到 schema/描述），其余为类别 2（fixture 缺件、断言相对当前生命周期或工具面过期），无一项靠放宽断言、skip/only 或门禁豁免变绿。
