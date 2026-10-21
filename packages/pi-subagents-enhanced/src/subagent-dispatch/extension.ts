@@ -121,6 +121,9 @@ export const TYPED_SUBAGENT_PARAMETERS = Object.freeze({
     id: { type: "string", minLength: 1, maxLength: 4096 },
     runId: { type: "string", minLength: 1, maxLength: 4096 },
     dir: { type: "string", minLength: 1, maxLength: 4096 },
+    // status/interrupt/resume/stop 的 index 可选；steer 的 index 必填（执行期 executeControl 的
+    // steer 分支缺 index 即 SUPERVISOR_STEER_CHILD_AMBIGUOUS，不推断/不默认 0/不广播）。本 schema 是扁平
+    // union，不能按 action 表达条件必填（不引入 if/then），故 steer 的强制事实写在描述里。
     index: { type: "integer", minimum: 0 },
     message: { type: "string", minLength: 1, maxLength: 65536 },
   },
@@ -128,7 +131,7 @@ export const TYPED_SUBAGENT_PARAMETERS = Object.freeze({
 
 export const TYPED_SUBAGENT_DESCRIPTION = `通过项目自有的隔离 subagent runtime 委派任务。参数为顶层扁平字段，无 generic/coding 包装键；runtime 按路由决定派发类型：action→control、writePaths→coding、其余→generic。只读调研或纯文本工作用 {agent,task}；仓库变更用 {agent,task,writePaths,acceptance:{criteria:[...]}}。可用 agent：delegate（主力/复杂任务）、executor（确定性执行）、reviewer（评审）。用 {action:"list"} 查看当前 agent 名单。coding 的 acceptance 必须为 {criteria:[...]}，writePaths 至少包含一个仓库相对路径。
 
-coding 任务需提供完整 dispatch-ir.v2 合同；writePaths 与 acceptance 必填，model 是唯一可选的模型选择器。qualified provider/model-id 必须与可用 catalog 精确匹配。agent 声明了 models/model 时，声明候选链先于显式 model 被整体校验，API guard 覆盖全部已解析候选而非仅最终选中者；显式 model 不能绕过不可用候选、profile 全部缺失或 API guard。带 agent 声明的裸 model-id 按声明顺序匹配第一个当前可用且 ID 精确相等的候选；未命中即失败，不会检索全局 catalog。无 agent 声明的裸 model-id 按完整 provider/model-id 升序匹配可用 catalog；该路径成功时在顶层 details.warnings 返回 MODEL_MATCH_USED_GLOBAL_CATALOG。省略 model 时在启动期按声明顺序选择第一个当前可用的 profile 候选；这不是 provider 错误模型回退。modelSelection 在适用时报告 requestedModel、resolvedModel 与 source；requested 与 resolved 均不冒充子代理实际模型，runtime run/status/artifact 的 actual-model 元数据才是权威。worktree 隔离通过顶层 worktree 与 cwd 字段声明。所有 spawn 均经 RPC 以 detached 方式执行。完成通知自动送达；spawn 成功后不要用 sleep、轮询 status 或 supervisor pending 等待完成。只继续与子代理无关的工作，若无则结束当前 turn。status 仅用于用户明确要求、需要干预或诊断。支持的 control action 为 status、steer、interrupt、resume、stop。interrupt 中断当前 turn；resume 必须携带非空新消息，可将 paused/completed/failed 的 run 以新 run（新子会话）方式续跑并注入新指令，不承诺在原存活进程内就地继续；stopped 的 subagent 不可 resume。worktree=true 时响应携带 workspace_id，可用 subagent_worktree({action:"status"}) 查询状态与 allowed_dispositions。publication=allowed 的 coding 托管工作区（Auto Integration）集成由子代理 integration queue 自主拥有：父层不能对其执行 integrate（会返回 CHILD_OWNS_INTEGRATION），宿主不自动重放集成；子代理自行发布并释放，coding 任务待其 released 才算成功完成。已 released 的工作区无需额外处置；仍处于 active/preserved/cleanup-debt 的，按 subagent_worktree 状态权威返回的 allowed_dispositions、可用动作与 action_token 操作。并非所有 worktree 都禁止父层 integrate：publication=forbidden（generic）的工作区能否 integrate 以状态权威返回为准。`;
+coding 任务需提供完整 dispatch-ir.v2 合同；writePaths 与 acceptance 必填，model 是唯一可选的模型选择器。qualified provider/model-id 必须与可用 catalog 精确匹配。agent 声明了 models/model 时，声明候选链先于显式 model 被整体校验，API guard 覆盖全部已解析候选而非仅最终选中者；显式 model 不能绕过不可用候选、profile 全部缺失或 API guard。带 agent 声明的裸 model-id 按声明顺序匹配第一个当前可用且 ID 精确相等的候选；未命中即失败，不会检索全局 catalog。无 agent 声明的裸 model-id 按完整 provider/model-id 升序匹配可用 catalog；该路径成功时在顶层 details.warnings 返回 MODEL_MATCH_USED_GLOBAL_CATALOG。省略 model 时在启动期按声明顺序选择第一个当前可用的 profile 候选；这不是 provider 错误模型回退。modelSelection 在适用时报告 requestedModel、resolvedModel 与 source；requested 与 resolved 均不冒充子代理实际模型，runtime run/status/artifact 的 actual-model 元数据才是权威。worktree 隔离通过顶层 worktree 与 cwd 字段声明。所有 spawn 均经 RPC 以 detached 方式执行。完成通知自动送达；spawn 成功后不要用 sleep、轮询 status 或 supervisor pending 等待完成。只继续与子代理无关的工作，若无则结束当前 turn。status 仅用于用户明确要求、需要干预或诊断。支持的 control action 为 status、steer、interrupt、resume、stop。steer 必须同时携带 id 或 runId（可唯一定位；两者不一致即冲突）与必填的非负整数 index（目标 child 在该 run 内的下标，从 0 起；单 child 的 run 也必须写 index: 0）；缺 index 返回 SUPERVISOR_STEER_CHILD_AMBIGUOUS，8–35 字符的 runId 前缀返回 SUPERVISOR_STEER_TARGET_AMBIGUOUS，dir 在 steer 上被拒，runtime 不推断唯一 child、不默认 0、不广播。interrupt 中断当前 turn；resume 必须携带非空新消息，可将 paused/completed/failed 的 run 以新 run（新子会话）方式续跑并注入新指令，不承诺在原存活进程内就地继续；stopped 的 subagent 不可 resume。worktree=true 时响应携带 workspace_id，可用 subagent_worktree({action:"status"}) 查询状态与 allowed_dispositions。publication=allowed 的 coding 托管工作区（Auto Integration）集成由子代理 integration queue 自主拥有：父层不能对其执行 integrate（会返回 CHILD_OWNS_INTEGRATION），宿主不自动重放集成；子代理自行发布并释放，coding 任务待其 released 才算成功完成。已 released 的工作区无需额外处置；仍处于 active/preserved/cleanup-debt 的，按 subagent_worktree 状态权威返回的 allowed_dispositions、可用动作与 action_token 操作。并非所有 worktree 都禁止父层 integrate：publication=forbidden（generic）的工作区能否 integrate 以状态权威返回为准。`;
 
 const ASYNC_SPAWN_GUIDANCE = "Completion notifications arrive automatically; do not sleep, poll status, or call supervisor pending. If no independent work remains, end the turn.";
 const TRACE_PHASES = new Set([
@@ -1398,7 +1401,8 @@ function canonicalSteerTarget(params: Record<string, any>): SteerTarget {
     // 上游 assertRunId 不做 trim，故此处也保留原始字串，仅拒绝空/非字串。
     if (value !== undefined && (typeof value !== "string" || value.trim() === "")) return steerTargetRejected("SUPERVISOR_STEER_TARGET_INVALID");
   }
-  // 上游优先级为 id ?? runId；两者同时存在且不一致时无法确定唯一目标。
+  // 上游 steer 实际优先级为 runId ?? id（pi-subagents/src/runs/foreground/subagent-executor.js:6528）；
+  // 两者同时存在且不一致时无法确定唯一目标。
   if (typeof id === "string" && typeof runId === "string" && id !== runId) return steerTargetRejected("SUPERVISOR_STEER_TARGET_CONFLICT");
   const canonical = typeof id === "string" ? id : typeof runId === "string" ? runId : undefined;
   if (typeof canonical !== "string") return steerTargetRejected("SUPERVISOR_STEER_TARGET_UNRESOLVED");
@@ -1408,9 +1412,11 @@ function canonicalSteerTarget(params: Record<string, any>): SteerTarget {
   return { runId: canonical, code: undefined };
 }
 
-function controlFailure(code, receipt = undefined) {
+// hint 只追加可执行提示：code 与 details 形状不变，未传 hint 的调用点文案逐字不变。
+function controlFailure(code, receipt = undefined, hint = undefined) {
+  const hintText = typeof hint === "string" && hint.length > 0 ? ` ${hint}` : "";
   return {
-    content: [{ type: "text", text: `${code}: Supervisor control request blocked.` }],
+    content: [{ type: "text", text: `${code}: Supervisor control request blocked.${hintText}` }],
     isError: true,
     details: { code, ...(receipt?.receiptId ? { receiptId: receipt.receiptId } : {}), ...(receipt?.requestId ? { requestId: receipt.requestId } : {}), ...(receipt?.runId ? { runId: receipt.runId } : {}) },
   };
@@ -1476,7 +1482,15 @@ async function executeControl(input, rpc, supervisorControlPlane, toolCallId, di
   if (action === "steer" && supervisorControlPlane && supervisorControlPlane.enabled?.() !== false) {
     const target = canonicalSteerTarget(params);
     if (typeof target.runId !== "string") return controlFailure(target.code ?? "SUPERVISOR_STEER_TARGET_UNRESOLVED");
-    if (params.index === undefined) return controlFailure("SUPERVISOR_STEER_CHILD_AMBIGUOUS");
+    // 缺 index 是已冻结的 fail closed 决策（不推断唯一 child/不默认 0/不广播）：只在文案上给出
+    // 可执行的下一步，不新增任何绕过、推断或放宽分支。
+    if (params.index === undefined) {
+      return controlFailure(
+        "SUPERVISOR_STEER_CHILD_AMBIGUOUS",
+        undefined,
+        "steer requires an explicit integer index: re-issue subagent_run_steer with the target child's 0-based index within this run (a single-child run still needs index: 0). No value is inferred.",
+      );
+    }
     if (!Number.isSafeInteger(params.index) || params.index < 0) return controlFailure("SUPERVISOR_STEER_TARGET_INVALID");
     const identity = await supervisorControlPlane.identityForRun?.(target.runId);
     const owner = identity?.owner;

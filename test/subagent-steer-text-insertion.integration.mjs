@@ -12,7 +12,9 @@ import { buildTopLevelRuntimeEnv, SUPPORTED_PI_VERSIONS } from "../scripts/probe
 // 主动 steer 文本插入守卫（用户报告：旧仓 runtime 下主动 steer 无法向 subagent 插入文本）。
 //
 // 场景：父 Host 经 typed subagent 派发一个 async child；child 第一回合执行 `sleep`
-// 保持存活，父在 child 运行中主动 subagent_run_steer({ runId, message })。
+// 保持存活，父在 child 运行中主动 subagent_run_steer({ runId, index: 0, message })。
+// index 必填是已冻结的执行期合同（src/subagent-dispatch/extension.ts 缺 index 一律
+// SUPERVISOR_STEER_CHILD_AMBIGUOUS），本 fixture 是单 child/single mode，故 index: 0。
 // 断言 steer 文本真正插入 child 会话（child 会话 jsonl 出现该文本），且 child
 // 消费后在后续回合回显——即完整走生产 steer 路径：
 //   extension.executeControl → supervisor 控制面 → rpc.steer → child steering inbox
@@ -82,7 +84,7 @@ function providerSource(contract) {
             output = ${JSON.stringify(CHILD_FALLBACK)} + childReport;
           } else if (subagentResults.length === 1 && subagentResults[0]?.details?.runId) {
             // 父第二回合：已派发一个 child 且运行中 → 主动 steer 注入标记文本。
-            tool = { name: "subagent_run_steer", arguments: { runId: subagentResults[0].details.runId, message: ${JSON.stringify(STEER_MARKER)} } };
+            tool = { name: "subagent_run_steer", arguments: { runId: subagentResults[0].details.runId, index: 0, message: ${JSON.stringify(STEER_MARKER)} } };
           } else if (lastUser.includes(${JSON.stringify(PARENT_PROMPT)}) && subagentResults.length === 0) {
             tool = { name: "subagent_start", arguments: contract };
           } else {

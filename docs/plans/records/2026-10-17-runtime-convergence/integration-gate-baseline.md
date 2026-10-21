@@ -215,6 +215,8 @@ contact-supervisor lane 同样以 `--mode rpc --no-session` 启动 Host，其经
 
 ### 新偏离点 B：steer-text-insertion（疑似类别 1：schema 与执行期强制不一致）
 
+> 后续（2026-10-17，同一目录）：已判定为**类别 1** 并按选项 2+3 实施——steer 的 `index` 已收紧为 schema 必填，描述/错误文案同步，fixture 补 `index: 0`。本节的「schema 把 index 声明为可选」是该次 lane 观测时刻的事实，自收紧后失效；解析语义矩阵、死码证明与无法在本仓修复的 upstream 提示冲突见 `steer-locator-contract.md`。
+
 `:319` 失败原文：`child hit the no-steer fallback path (STEER_CHILD_FALLBACK) — steer text was not inserted`，`steerResult.text = "SUPERVISOR_STEER_CHILD_AMBIGUOUS: Supervisor control request blocked."`、`details.code` 同名，`childSteering` 全 0（requested/scheduled/pending/delivered/failed）。`subagent_start` 已 `isError:false`，偏离点前移到 steer 投递：fixture 的 steer 调用（`:85`）只传 `{ runId, message }`，而生产在缺 `index` 时硬拒绝（`src/subagent-dispatch/extension.ts:1479`、`supervisor-control-plane.ts:300`、`supervisor-gate-policy.ts:558`），但工具 schema 把 `index` 声明为**可选**（`operation-tools.ts:40`、`:248`，描述“可选定位”）。
 
 主会话本会话内的独立复现支持“类别 1”方向：对 `d5045380` 执行 steer 时只给 `runId` 即被 `SUPERVISOR_STEER_CHILD_AMBIGUOUS` 拒（该 run 的 fan-out 是 1/1，只有一个 child），补 `index: 0` 后才投递成功；而 upstream 状态回执自己给出的提示是 `subagent({action:"steer", id:"…", message:"…"})`（不含 index）。因此“模型按公开合同只给 runId 就会被拒”是可从合法 typed 入口产生的事实，不是测试制造的非法组合。已派只读诊断确定各定位组合（id-only / runId-only / index-only / dir）的确切解析语义与首个偏离点，再决定修生产解析、修 schema/描述、还是修 fixture；判定前不改任何一侧。

@@ -79,7 +79,7 @@ test("each schema validates its frozen field surface and rejects unknown fields"
     ["subagent_start", { ...codingStart(), model: " provider/model-id ", thinkingLevel: "high", title: "t", cwd: "/repo", worktree: true, output: false, outputMode: "inline", artifacts: false, progress: true, skill: "review", reads: ["a"] }],
     ["subagent_run_status", {}],
     ["subagent_run_status", { id: "run-1", index: 0 }],
-    ["subagent_run_steer", { message: "改成只改测试" }],
+    ["subagent_run_steer", { message: "改成只改测试", index: 0 }],
     ["subagent_run_interrupt", { runId: "run-2" }],
     ["subagent_run_resume", { message: "继续", output: false, outputMode: "file-only" }],
     ["subagent_run_resume", { id: "run-3", message: "继续", output: "out.md" }],
@@ -103,6 +103,10 @@ test("each schema validates its frozen field surface and rejects unknown fields"
     ["subagent_run_status", { message: "x" }],
     ["subagent_run_status", { view: "transcript" }],
     ["subagent_run_steer", { id: "run-1" }],
+    ["subagent_run_steer", { message: "go" }],
+    ["subagent_run_steer", { id: "run-1", index: 0 }],
+    ["subagent_run_steer", { message: "go", index: -1 }],
+    ["subagent_run_steer", { message: "go", index: 1.5 }],
     ["subagent_run_steer", { message: "" }],
     ["subagent_run_steer", { message: "go", mode: "auto" }],
     ["subagent_run_steer", { message: "go", model: "provider/x" }],
@@ -211,9 +215,9 @@ test("required agent/task and steer/resume message fail closed with compatible c
   await byName.subagent_start.execute("tc-ok-start", { agent: "delegate", task: "t" }, undefined, undefined, {});
   assert.equal(calls.start.length, 1);
   assert.deepEqual(calls.start[0][1], { agent: "delegate", task: "t" });
-  await byName.subagent_run_steer.execute("tc-ok-steer", { id: "r", message: "go" }, undefined, undefined, {});
+  await byName.subagent_run_steer.execute("tc-ok-steer", { id: "r", index: 0, message: "go" }, undefined, undefined, {});
   assert.equal(calls.control.length, 1);
-  assert.deepEqual(calls.control[0][1], { action: "steer", id: "r", message: "go" });
+  assert.deepEqual(calls.control[0][1], { action: "steer", id: "r", index: 0, message: "go" });
   await byName.subagent_run_resume.execute("tc-ok-resume", { message: "m" }, undefined, undefined, {});
   assert.equal(calls.control.length, 2);
   assert.deepEqual(calls.control[1][1], { action: "resume", message: "m" });

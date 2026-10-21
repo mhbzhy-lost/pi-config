@@ -10,6 +10,8 @@
 //   与 additionalProperties:false 一致 fail closed，不覆盖、不透传、不触达任何下游回调；
 //   其余白名单之外字段同样 fail closed（isError + details.code/keypath，形状与既有 failure 一致）。
 // - 轻量必填检查只做“非空 string”：start 的 agent/task、steer/resume 的 message；
+//   steer 的 index 必填只由 schema 的 required 表达（不新增 factory 运行时检查，
+//   执行期仍由 extension.ts 的 steer resolver 裁决 code）；
 //   细粒度 coding/模型/字节验证仍由回调内原 typed 编译器与 runtime 裁决，不复制进 factory。
 // - 无新 dispatcher/state/定时器：start 复用注入的 executeStart（内含 coding/generic 路由），
 //   roster/run_* 复用注入的 executeControl 固定 action。
@@ -120,7 +122,12 @@ export const SUBAGENT_RUN_STATUS_PARAMETERS = Object.freeze({
 export const SUBAGENT_RUN_STEER_PARAMETERS = Object.freeze({
   type: "object",
   additionalProperties: false,
-  required: ["message"],
+  // index 必填：执行期（extension.ts:1487）在缺 index 时直接返回 SUPERVISOR_STEER_CHILD_AMBIGUOUS，
+  // 不推断唯一 child、不默认 0、不广播。公开 schema 必须与已冻结的执行期一致，否则模型按
+  // 「index 可选」发出的最小合法调用 {runId,message} 必然被拒。
+  // TARGET_FIELDS 仍与 status/interrupt/resume/stop 共享字段形状，只在 steer 上收紧 required，
+  // 其余三个动作经同一直通分支（不共享 steer resolver），行为不变。
+  required: ["message", "index"],
   properties: { ...TARGET_FIELDS, message: MESSAGE_FIELD },
 });
 
@@ -237,10 +244,10 @@ const DESCRIPTORS: readonly OperationToolDescriptor[] = Object.freeze([
   {
     name: "subagent_run_steer",
     label: "Subagent Run Steer",
-    description: "向运行中的 subagent run 投递转向指令：message 必填非空；id/runId/dir/index 为可选定位（dir 在 steer 上会被目标解析器拒绝，优先 id/runId）。受控投递由 supervisor gate 裁决，本工具不绕过。",
-    promptSnippet: "用 subagent_run_steer 向运行中的 run 注入新指令（message 必填）。",
+    description: "向运行中的 subagent run 投递转向指令：message 与 index 均必填。index 是目标 child 在该 run 内的非负整数下标（从 0 起），单 child 的 run 也必须写 index: 0；缺 index 一律返回 SUPERVISOR_STEER_CHILD_AMBIGUOUS，非安全非负整数返回 SUPERVISOR_STEER_TARGET_INVALID，执行期不推断唯一 child、不默认 0、不广播。定位另需 id 或 runId 之一：两者同时给出且不一致返回 SUPERVISOR_STEER_TARGET_CONFLICT，8–35 字符的 runId 前缀返回 SUPERVISOR_STEER_TARGET_AMBIGUOUS，dir 在 steer 上会被目标解析器以 SUPERVISOR_STEER_TARGET_ALIAS 拒绝（status/interrupt/stop 的 dir 不受影响）。受控投递由 supervisor gate 裁决，本工具不绕过。",
+    promptSnippet: "用 subagent_run_steer 向运行中的 run 注入新指令（message 与 index 必填）。",
     promptGuidelines: [
-      "steer 需非空 message 与可定位目标；受控 run 的投递以 supervisor gate 决策为准，被拒即停止，不改道。",
+      "steer 需非空 message、可唯一定位的 id 或 runId，以及必填的非负整数 index（缺 index 直接被 SUPERVISOR_STEER_CHILD_AMBIGUOUS 拒绝，不推断、不默认 0、不广播）；受控 run 的投递以 supervisor gate 决策为准，被拒即停止，不改道。",
     ],
     parameters: SUBAGENT_RUN_STEER_PARAMETERS,
     kind: "control",
