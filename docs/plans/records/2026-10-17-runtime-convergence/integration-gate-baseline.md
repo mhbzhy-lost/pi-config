@@ -103,3 +103,31 @@ wrapper exit 0，**`GATE_EXIT=1`**，约 1031 秒：`tests 342 / pass 304 / fail
 3. **生产激活 upstream bridge context**：让 `getContext()` 在本仓 Host 内返回真实 session context（生产改动，需评估与 typed 路径/membrane 的重叠）。
 
 未选 1/2/3 前不改生产、不删用例、不登记排除。project-workflow / completion-notification / steer-text-insertion 三条 lane 的 `rpc:v1/session` 缺失**不能**沿用本次已被否证的 session 假设，需各自取证。
+
+## top-level RPC lane 取证（用户选 A：有界取证）
+
+### 已确证的机制
+
+1. bridge 服务端只有一处注册：upstream `extension/index.js:631-637`
+   `registerSubagentRpcBridge({ events: pi.events, getContext: () => state.lastUiContext, execute: executeSubagentReady, state, disabledFeatures })`。
+2. `handleRequest`（`extension/rpc.js:583-587`）对 `ping` 放行，其余方法在 `getContext()` 为空时抛 `no_active_session`（即 lane 看到的 `No active extension context for subagent RPC.`）。
+3. `state.lastUiContext` 只有两个赋值点：
+   - `index.js:767-772`：`pi.on("tool_result")` 且 `event.toolName === "subagent"` 且 `ctx.hasUI` —— 本仓栈里**永不可能**成立（S4 后旧 union 工具不注册/不 active，RPC 模式也没有 UI）；
+   - `index.js:816-845` `resetSessionState(ctx, …)` 末尾 `state.lastUiContext = ctx` —— 由 session 生命周期（session_start / 切换 / rebind）驱动。
+   清空点：`:303-304`、`:327-328`（stale context 守卫）、`:960`。
+4. **本仓生产派发是这条 bridge 的客户端**：`src/subagent-dispatch/rpc-client.ts:3-4` 使用同一对通道 `subagents:rpc:v1:request` / `subagents:rpc:v1:reply:`，`:276` emit、`:230` 订阅回执；`extensions/subagent-runtime.ts:21` 注入该 client，`:319` 以 `bootstrap: upstreamSubagentRuntime` 装载 upstream。因此 bridge 的 active context 是生产派发的真实依赖，不是无关兼容面（上一轮“生产不依赖它”的说法已在记录中更正）。
+
+### 结论：不能退役
+
+退役这条 lane 会同时失去：bridge context 可用性的唯一外部视角哨兵、`ping` capability 投影（含 `rpc:v1/session`）的端到端校验、child 环境 marker 卫生、nested 事件隔离、workflow root/leaf 关联。这些一旦在 Host/upstream 升级中破坏，症状会散落成 `CAPABILITY_NEGOTIATION_FAILED` / `WORKSPACE_SERVICE_UNAVAILABLE` / “dispatch receipt is missing”（正是当前另外 4 项失败的形态），而不是一句精确的 `no_active_session`。故选项 1（退役）不采纳；选项 2（门禁排除）只在取证失败时作为临时手段。
+
+### 尚未解释的不对称（保留为未证实，不猜测）
+
+contact-supervisor lane 同样以 `--mode rpc --no-session` 启动 Host，其经本仓 typed 工具的派发**成功**（13/15 场景通过）；而本 lane 的独立客户端调 bridge 得到 `no_active_session`。且本轮实验已否证“补 `--session-dir` 即可”——补了仍同形态失败（`/tmp/rc-rpc-lane-session.log`）。两个互斥候选：
+
+- H1：该 Host 里 `resetSessionState` 从未执行（RPC 模式 + `--no-session` 下 session 生命周期未触发），而 contact-supervisor 的成功派发并不经这条 bridge（即本仓在该形态下走了另一条 in-process 路径）；
+- H2：回答请求的 bridge 实例与本仓 bootstrap 的实例不是同一个（多实例/多 state），因此其 `lastUiContext` 永远为空。
+
+### 下一步（单一有界实验，未执行）
+
+在该 lane 的 Host 里加一个只读观测扩展，记录三件事：`session_start` 是否触发及其 ctx 是否存在、`subagents:rpc:v1:ready` 是否发出（`rpc.js:712` `emitReady` 会带 `pingData(ctx ?? getContext())`）、以及 `ping` 回执里 `session` 投影是否非空；同时对 contact-supervisor lane 做同一观测。两边对照即可在 H1/H2 之间判定，无需改生产。判定前不加兼容分支、不放宽断言、不登记门禁排除。
