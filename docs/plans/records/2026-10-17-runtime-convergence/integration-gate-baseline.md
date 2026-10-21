@@ -293,3 +293,16 @@ child 按裁决删除了 header 身份行并端到端删除 `metaLabel`，但同
 主会话独立复核：`node --test test/background-activity-runtime.integration.mjs` → **13/13 绿**（1028ms）；改动面仅该文件（+51/−8）；child 侧另有 79/79（四个 TUI 单测文件）与 `npx tsc --noEmit` 零错误。
 
 另记一项事实：门禁 runner 按 glob 选文件，**未跟踪文件也会被执行**——本次 `running 42 integration files`（此前 41）且日志含 `[rpc-bridge-observation]` 输出，即两个未跟踪的观测文件已进入门禁（tests 342→344 的来源），每次多启动 2 次真实 Host 且 form1 会故意复现“bridge 未 primed”形态，而它们的断言几乎为空、无回归价值。是否删除或移至 `scripts/probes/` 待用户裁决。
+
+## 最终全量门禁：零失败（job `de073c08-d23a-4888-9c09-b37f792381e9`，HEAD `e3d20b4`）
+
+`/tmp/rc-gate-final.log`：`running 42 integration files` → **344 tests / 334 pass / 0 fail / 10 skipped**，duration 876436ms，**`GATE_EXIT=0`**（本轮把退出码写进日志，不再被尾部 `tee` 掩盖）。主会话自读日志复核汇总，并确认上一轮两项失败已转绿：`owner-first：package 唯一安装 footer，三 source 同 scope 握手，根只发布 factory` ✔ 37.5ms、`late detail：旧选择在途详情返回后不覆盖新选择，旧组件被 dispose` ✔ 15.1ms。
+
+覆盖边界（诚实标注）：
+- **排除清单为空**：runner 未打印 `excluded (...)`，即 `EXCLUDED_INTEGRATION_FILES` 为 0 项，本轮绿不是靠豁免取得的。
+- 10 项 skipped 中 8 项是 `真实后台活动视觉：base/long/widths/heights/draft/themes/lifecycle/rpc`（视觉快照类，长期 skip），另有 `隔离 managed coding 实际父 Host/child heartbeat`（危险实验，需单独授权，见 `lifecycle-boundaries.md`）等；skip 集合与首跑一致，未因本轮修复新增 skip。
+- 本轮仍执行了两个**未跟踪**的观测文件（日志中 `rpc-bridge-observation` 命中 19 次），即 tests 344 中有 2 项来自它们；是否删除或移至 `scripts/probes/` 仍待用户裁决（见上一节）。
+
+轨迹：首跑 **342/304/28/10** → 上一轮 **344/332/2/10** → 本轮 **344/334/0/10**。首跑 28 项失败分布在多个文件，其中 7 个文件的复跑残留 8 项（`empty`、`invalid-reply`、project-workflow ×2、session-owner zsh wrapper、completion-notification、root-broker-startup、steer-text-insertion）即本会话逐项定位的对象；其余各项在此前的 fixture/断言迁移提交（`24dc18a`、`f211702`、`7f358cb`）后未再复现，本轮全量 0 fail 证明全部已清。8 项的逐项定性、坐标与证据见本文件前面的清单表；其中 steer 一项是**类别 1 生产合同缺陷**（`index` 必填未同步到 schema/描述），其余为类别 2（fixture 缺件、断言相对当前生命周期或工具面过期），无一项靠放宽断言、skip/only 或门禁豁免变绿。
+
+本会话另有 2 项失败是自身展示层提交 `6b1827e` 引入、被门禁抓出并当场定性为断言过期后迁移（`e3d20b4`），即“28 → 0”的收尾阶段包含一次自伤与自愈，记录在上一节。
