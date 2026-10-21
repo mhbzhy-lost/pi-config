@@ -66,7 +66,18 @@ if(scenario==='empty') {const childStart=events.find(e=>e.child&&e.type==='start
  assert.ok(request,'父message_end未收到实际阻塞请求：'+JSON.stringify({status,events,stderr}));
  if(scenario==='stop') { assert.notEqual(status.state,'complete','stop不能被误标成功');const f=join(root,'workspace/supervisor-control');const persisted=await Promise.all((await readdir(f)).filter(x=>x.endsWith('.json')).map(async x=>JSON.parse(await readFile(join(f,x),'utf8')).value));assert.equal(persisted.flatMap(x=>x.requests).find(x=>x.requestId===request.message.details.requestId).state,'failed','stop不能留下幽灵pending');assert.equal(events.some(e=>!e.child&&e.message?.toolName==='supervisor_request_reply'&&e.message.details?.replyTo),false);return; }
  if(scenario==='invalid-reply') {
-   const replies=events.filter(e=>!e.child&&e.message?.toolName==='supervisor_request_reply');assert.equal(replies.length,3);assert.ok(replies.every(e=>e.message.isError===true&&e.message.details.code==='SUPERVISOR_REQUEST_NOT_PENDING'));assert.equal(childResult.message.isError,true);return;
+   // 合同：Host在tool执行前做schema校验，第2/3次缺replyTo的调用不会进入控制面（details为空对象、无code）。按回执顺序断言，保留“schema非法调用不得投递”的覆盖。
+   const replies=events.filter(e=>!e.child&&e.message?.toolName==='supervisor_request_reply');assert.equal(replies.length,3);assert.ok(replies.every(e=>e.message.isError===true));
+   assert.equal(replies[0].message.details?.code,'SUPERVISOR_REQUEST_NOT_PENDING');
+   for(const reply of replies.slice(1)){assert.equal(reply.message.details?.code,undefined,'Host校验失败的回执不应带控制面错误码');assert.match(reply.message.content[0].text,/must have required properties replyTo/);}
+   assert.equal(childResult.message.isError,true);
+   // 零投递：只读durable权威面，schema非法调用不得留下已消费receipt，请求最终为expired。
+   const folder=join(root,'workspace/supervisor-control');const readPersisted=async()=>Promise.all((await readdir(folder)).filter(x=>x.endsWith('.json')).map(async x=>JSON.parse(await readFile(join(folder,x),'utf8')).value));
+   let persisted=[];const settleDeadline=Date.now()+5000;
+   while(Date.now()<settleDeadline){persisted=await readPersisted();if(persisted.flatMap(s=>s.requests??[]).find(r=>r.requestId===request.message.details.requestId)?.state==='expired')break;await delay(50);}
+   assert.equal(persisted.flatMap(s=>s.receipts??[]).some(r=>r.consumed===true),false,'schema非法调用不得产生已消费receipt');
+   assert.equal(persisted.flatMap(s=>s.requests??[]).find(r=>r.requestId===request.message.details.requestId)?.state,'expired','非法回执不得推进请求状态');
+   return;
  }
  if(scenario==='timeout') {
    assert.equal(childResult.message.isError,true); assert.match(childResult.message.content[0].text,/Timed out/);
