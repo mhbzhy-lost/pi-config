@@ -1,11 +1,15 @@
 ---
 name: exa-search
-description: 需要联网搜索最新信息、新闻、事实或技术文档，或需要抓取指定 URL 的网页正文时使用。基于 Exa 官方 REST API 的直接 HTTP 调用。
+description: 仅在用户明确要求使用 Exa 搜索或抓取网页时使用（例如「用 Exa 搜索…」「用 Exa 抓取这个链接」）。未指定供应商的联网搜索与网页抓取默认使用 deepseek-search；基于 Exa 官方 REST API 的直接 HTTP 调用。
 ---
 
 # Exa 网页搜索与正文抓取
 
 直接调用 Exa 官方 REST API：固定端点 `https://api.exa.ai/search`（搜索）与 `https://api.exa.ai/contents`（抓取正文）。wrapper 不包含 MCP、JSON-RPC 或 SSE 相关实现，也不暴露任何旧网关工具名；search/fetch 均原样返回服务端的结构化 REST JSON，不做摘要改写，数据展示由调用方处理。
+
+## 何时使用
+
+仅在用户明确要求使用 Exa 时使用本 skill。未指定供应商时，使用 `deepseek-search`；不要因其他搜索工具失败而自动切换到 Exa。
 
 ## 前置条件
 

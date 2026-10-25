@@ -48,5 +48,6 @@ __pycache__/
 # Secrets
 /skill-overrides/external-llm-review/.env
 /skill-overrides/exa-search/.env
+/skill-overrides/deepseek-search/.env
 /pi/models.json
 /pi/settings.json

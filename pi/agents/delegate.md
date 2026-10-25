@@ -2,7 +2,6 @@
 name: delegate
 description: 承接复杂实现、跨模块开发与源码级归因诊断的主力执行代理
 models:
-  - qoder-pool/DeepSeek-Flash
   - codex-pool/gpt-6.1-sol
   - qoder-pool/Qwen3.8-Max
   - zai-coding-cn/glm-5.3
