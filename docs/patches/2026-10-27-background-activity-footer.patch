@@ -1,0 +1,690 @@
+diff --git a/src/background-activity/detail-controller.ts b/src/background-activity/detail-controller.ts
+index fd006c1..14d99de 100644
+--- a/src/background-activity/detail-controller.ts
++++ b/src/background-activity/detail-controller.ts
+@@ -21,6 +21,7 @@
+ 
+ import { CustomEditor } from "@earendil-works/pi-coding-agent";
+ import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
++import { visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+ import type { TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
+ import type {
+   ActivityRegistry,
+@@ -30,7 +31,7 @@ import type {
+   DetailComponent,
+   HostScope,
+ } from "pi-subagents-enhanced/tui/background-activity";
+-import { ACTIVITY_KIND_ORDER, DETAIL_RESERVED_BOTTOM_ROWS } from "./layout.ts";
++import { ACTIVITY_KIND_GLYPHS, ACTIVITY_KIND_ORDER } from "./layout.ts";
+ import type { ActivityTheme } from "./layout.ts";
+ 
+ /** 详情壳注入的 pi-tui 输入/宽度工具（与 package FooterTuiBindings 同源的 DI 端口）。 */
+@@ -88,6 +89,10 @@ export interface ActivityDetailShell {
+   /** 主题身份变化：转发 provider invalidate 并重取当前详情（保 anchor）。 */
+   handleThemeChange(): void;
+   render(width: number): string[];
++  /** 详情 footer 的同源换行结果；presenter 与 overlay reserve 共用该事实。 */
++  renderFooter(width: number, theme?: ActivityTheme): string[];
++  /** 当前 footer 实际行数 + separator 的动态 overlay/body reserve。 */
++  footerReservedBottomRows(): number;
+   handleInput(data: string): { consume: boolean } | undefined;
+   /** Pi 1.3 fullscreen：`TuiAltScreen` 只对 overlay 调 `handleMouse`，滚轮不再走 raw 输入。 */
+   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined;
+@@ -156,6 +161,37 @@ export function renderActivityDetailTextLine(
+   return theme ? theme.fg("dim", truncated) : truncated;
+ }
+ 
++const DETAIL_GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
++
++function clipDetailGraphemes(text: string, width: number): string {
++  let result = "";
++  let used = 0;
++  for (const { segment } of DETAIL_GRAPHEME_SEGMENTER.segment(text)) {
++    const segmentWidth = visibleWidth(segment);
++    if (used + segmentWidth > width) break;
++    result += segment;
++    used += segmentWidth;
++  }
++  return result;
++}
++
++/** 清理后按终端列换行；不可容纳的单字素在极窄宽度下安全省略。 */
++export function renderActivityDetailTextLines(
++  text: string,
++  width: number,
++  theme: ActivityTheme | undefined,
++  tui: ActivityTuiBindings,
++): string[] {
++  const cleaned = toActivityDisplayText(text, tui);
++  const safeWidth = Number.isFinite(width) ? Math.max(0, Math.floor(width)) : 0;
++  if (safeWidth <= 0) return [];
++  const wrapped = wrapTextWithAnsi(cleaned, safeWidth).map((line) =>
++    visibleWidth(line) <= safeWidth ? line : clipDetailGraphemes(line, safeWidth),
++  );
++  const lines = wrapped.length > 0 ? wrapped : [""];
++  return theme ? lines.map((line) => theme.fg("dim", line)) : lines;
++}
++
+ function normalizeWidth(width: number): number {
+   const value = Number(width);
+   return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+@@ -205,6 +241,8 @@ class ActivityDetailShellController implements ActivityDetailShell {
+ 
+   private viewportStart = 0;
+   private autoFollowState = true;
++  private lastFooterWidth = 0;
++  private lastFooterRows = 3;
+ 
+   constructor(deps: ActivityDetailShellDeps) {
+     this.registry = deps.registry;
+@@ -311,33 +349,77 @@ class ActivityDetailShellController implements ActivityDetailShell {
+     this.handleThemeChange();
+   }
+ 
+-  position(): { start: number; end: number; total: number; autoFollow: boolean } {
+-    const { height, lineCount } = this.scrollBounds();
++  footerReservedBottomRows(): number {
++    return Math.max(1, this.lastFooterRows + 1);
++  }
++
++  renderFooter(width: number, theme?: ActivityTheme): string[] {
++    const safeWidth = normalizeWidth(width);
++    this.lastFooterWidth = safeWidth;
++    if (safeWidth <= 0) {
++      this.lastFooterRows = 0;
++      return [];
++    }
++    let candidate = this.lastFooterRows > 0 ? this.lastFooterRows : 3;
++    let lines: string[] = [];
++    for (let attempt = 0; attempt < 8; attempt += 1) {
++      lines = this.renderFooterForReserve(safeWidth, theme, candidate);
++      if (lines.length === candidate) break;
++      candidate = lines.length;
++    }
++    this.lastFooterRows = lines.length;
++    return lines;
++  }
++
++  private renderFooterForReserve(width: number, theme: ActivityTheme | undefined, footerRows: number): string[] {
++    const entries = this.shellEntries;
++    const selected = this.selected;
++    const index = entries.findIndex((entry) => entry.key === selected);
++    const lines: string[] = [];
++    if (index === -1) {
++      lines.push("当前无后台活动");
++    } else {
++      const entry = entries[index];
++      const metaLabel = typeof entry.metaLabel === "string" && entry.metaLabel !== ""
++        ? ` · ${entry.metaLabel}`
++        : "";
++      const stateLabel = entry.stateLabel === "运行中" ? "" : ` · ${entry.stateLabel}`;
++      lines.push(`${index + 1}/${entries.length} ${ACTIVITY_KIND_GLYPHS[entry.kind] ?? "◇"} ${entry.label}${stateLabel}${metaLabel}`);
++    }
++    const position = this.positionForFooterRows(width, footerRows);
++    lines.push(`行 ${position.start}-${position.end}/${position.total} · ${position.autoFollow ? "跟随底部" : "手动滚动"} · x ${this.expanded() ? "收起" : "展开"}`);
++    lines.push("‹ › 切换任务 · ↑↓ jk 滚动 · PgUp/PgDn/Home/End 翻页 · Esc/Alt+O 关闭");
++    return lines.flatMap((line) => renderActivityDetailTextLines(line, width, theme, this.tui));
++  }
++
++  private positionForFooterRows(width: number, footerRows: number): { start: number; end: number; total: number; autoFollow: boolean } {
++    const bodyBudget = Math.max(0, this.readTerminalRows() - Math.max(1, footerRows + 1));
++    const headerRows = bodyBudget >= 1 && this.shellEntries.length > 0 ? 1 : 0;
++    const height = Math.max(0, bodyBudget - headerRows);
++    const lineCount = Math.max(0, this.bodyContent(width).length);
+     const maxStart = Math.max(0, lineCount - height);
+-    const start = this.autoFollowState
+-      ? maxStart
+-      : Math.max(0, Math.min(this.viewportStart, maxStart));
++    const start = this.autoFollowState ? maxStart : Math.max(0, Math.min(this.viewportStart, maxStart));
+     const end = Math.min(lineCount, start + height);
+-    return {
+-      start: lineCount === 0 ? 0 : start + 1,
+-      end,
+-      total: lineCount,
+-      autoFollow: this.autoFollowState,
+-    };
++    return { start: lineCount === 0 ? 0 : start + 1, end, total: lineCount, autoFollow: this.autoFollowState };
++  }
++
++  position(): { start: number; end: number; total: number; autoFollow: boolean } {
++    return this.positionForFooterRows(this.lastRenderWidth || this.lastFooterWidth, this.lastFooterRows);
+   }
+ 
++
+   render(width: number): string[] {
+     const safeWidth = normalizeWidth(width);
+     this.lastRenderWidth = safeWidth;
+     const rows = this.readTerminalRows();
+-    // terminalRows-4 已为 overlay 下方详情 footer（最多 3 行 + separator）预留，
+-    // 正文不得再扣同一 footer；标题行只按实际输出行数扣减。
+-    const bodyBudget = Math.max(0, rows - DETAIL_RESERVED_BOTTOM_ROWS);
++    const theme = this.surface?.theme;
++    this.renderFooter(safeWidth, theme);
++    // overlay 下方的详情 footer 与 separator 使用同一动态 reserve；正文不得再扣第二套固定预算。
++    const bodyBudget = Math.max(0, rows - this.footerReservedBottomRows());
+     if (bodyBudget <= 0) {
+       // 打开中终端过小：正文 0 行（不产生负高度），关闭输入仍由 handleInput 处理。
+       return [];
+     }
+-    const theme = this.surface?.theme;
+     const headerLines = this.renderHeaderLines(safeWidth, bodyBudget, theme);
+     const bodyHeight = Math.max(0, bodyBudget - headerLines.length);
+     const bodyLines = this.renderBodyLines(safeWidth, bodyHeight);
+@@ -642,7 +724,8 @@ class ActivityDetailShellController implements ActivityDetailShell {
+ 
+   private scrollBounds(): { height: number; lineCount: number } {
+     const rows = this.readTerminalRows();
+-    const bodyBudget = Math.max(0, rows - DETAIL_RESERVED_BOTTOM_ROWS);
++    if (this.lastRenderWidth > 0) this.renderFooter(this.lastRenderWidth, this.surface?.theme);
++    const bodyBudget = Math.max(0, rows - this.footerReservedBottomRows());
+     // 标题只剩滚动信息 1 行，且无条目时不留行（与 renderHeaderLines 的实际行数一致）。
+     const headerRows = bodyBudget >= 1 && this.shellEntries.length > 0 ? 1 : 0;
+     const height = Math.max(0, bodyBudget - headerRows);
+diff --git a/src/background-activity/layout.ts b/src/background-activity/layout.ts
+index 1a5592f..8cc883f 100644
+--- a/src/background-activity/layout.ts
++++ b/src/background-activity/layout.ts
+@@ -3,8 +3,8 @@
+ //
+ // 本模块只做纯显示投影，供 F5b 详情壳/presenter 消费，精确公开签名：
+ // - renderActivityRows(rows, width, selection?, theme?): string[]
+-//     通用 activity 条目渲染：单选择 cell + 公共 glyph cell + 1 列 gap 的统一左基线，
+-//     标题列 = 3 + 公共 glyph 宽（1-indexed）；状态是本帧公共右列（右边界 = width），
++//     通用 activity 条目渲染：公共 glyph cell + 1 列 gap 的统一左基线，
++//     标题列 = 2 + 公共 glyph 宽（1-indexed）；状态是本帧公共右列（右边界 = width），
+ //     按 visibleWidth 词边界优先换行（续行对齐标题列、不保留断点空格），width 0/1
+ //     不越界；输入行先按类型固定顺序稳定排序（同类型内保持给定顺序）。
+ // - renderActivityLayout(input): ActivityLayoutResult
+@@ -78,16 +78,13 @@ export const DETAIL_FOOTER_MAX_ROWS = 3;
+ /** terminalRows <= 该值时详情 overlay 不挂载（F5b 负责保留 footer 入口与 draft）。 */
+ export const TOO_SMALL_TERMINAL_ROWS = 4;
+ 
+-// 列布局常量（§2 冻结网格）：选择标记占 col1 单 cell（选中 `›`、未选中空格），类型图标
+-// 从 col2 开始并补空格到公共 glyph cell，随后 1 列 gap；标题列 = 3 + 公共 glyph 宽。
+-// 续行/状态挂行只补前缀宽（选择 cell + glyph cell + gap），不保留断点空格。
+-const SELECTION_COLUMNS = 1;
++// 列布局常量：类型图标从 col1 开始并补空格到公共 glyph cell，随后 1 列 gap；
++// 标题列 = 2 + 公共 glyph 宽。selected key 仍由调用方保留，但主 footer 不绘制选择列。
+ const COLUMN_GAP_COLUMNS = 1;
+ /** 首行标题与状态列之间的最小间隔（§2：至少 2 列空格）。 */
+ const STATE_GAP_COLUMNS = 2;
+ /** 内联状态右列所需的最小标题列数（§2：至少 2 列标题）。 */
+ const MIN_TITLE_COLUMNS = 2;
+-const SELECTED_MARKER = "›";
+ /** 未知 kind 的兜底图标（只表「未识别类型」，不表事实）。 */
+ const FALLBACK_GLYPH = "◇";
+ 
+@@ -101,8 +98,8 @@ const COMMON_GLYPH_WIDTH = Math.max(
+   visibleWidth(FALLBACK_GLYPH),
+ );
+ 
+-/** 条目前缀宽 = 选择 cell 1 + 公共 glyph cell + gap 1；标题列（1-indexed）= 前缀宽 + 1。 */
+-const PREFIX_WIDTH = SELECTION_COLUMNS + COMMON_GLYPH_WIDTH + COLUMN_GAP_COLUMNS;
++/** 条目前缀宽 = 公共 glyph cell + gap 1；标题列（1-indexed）= 前缀宽 + 1。 */
++const PREFIX_WIDTH = COMMON_GLYPH_WIDTH + COLUMN_GAP_COLUMNS;
+ 
+ /** 单个渲染片段；color 为语义 token，仅在有 theme 时经 theme.fg 上色。 */
+ interface DisplaySegment {
+@@ -120,10 +117,10 @@ export type ActivityGeometryMode = "main" | "detail";
+  * 宽高预算元数据。冻结三元组 {footerRows,reservedBottomRows,bodyRows} 之外，
+  * 额外暴露 F5b 决策所需派生字段（预算上限、溢出数、too-small）。
+  *
+- * F5b 组合方式：详情 overlay 静态 margin.bottom = DETAIL_RESERVED_BOTTOM_ROWS(4)，
+- * 详情 footer 导航行 <= DETAIL_FOOTER_MAX_ROWS(3)，正文 viewport 行数在 bodyRows
+- * （= max(0, terminalRows-4)）内扣除 footer 后使用；terminalRows <= TOO_SMALL_TERMINAL_ROWS
+- * （tooSmall=true）时不挂载 overlay，保留 footer 入口与 draft，恢复尺寸后可重开。
++ * F5b 组合方式：详情 overlay margin.bottom 由 footer 实际换行行数 + separator 动态计算；
++ * 详情 footer 不再使用固定行上限，正文 viewport 与 scrollBounds 复用同一 reserve。
++ * terminalRows <= TOO_SMALL_TERMINAL_ROWS（tooSmall=true）时不挂载 overlay，保留 footer
++ * 入口与 draft，恢复尺寸后可重开。
+  */
+ export type ActivityGeometry = Readonly<{
+   /** 本次实际占用/计划的 footer 物理行数（已被对应预算上限钳制）。 */
+@@ -296,16 +293,10 @@ function toEntryDisplay(row: ActivityRow): EntryDisplay {
+   };
+ }
+ 
+-/** 选择 cell 片段：选中 `›`（accent）、未选中单空格（dim）。 */
+-function selectionSegment(selected: boolean): DisplaySegment {
+-  return { text: selected ? SELECTED_MARKER : " ", color: selected ? "accent" : "dim" };
+-}
+-
+-/** 条目前缀片段：选择 cell + glyph（补空格到公共 glyph cell）+ 1 列 gap。 */
+-function entryPrefixSegments(selected: boolean, display: EntryDisplay): DisplaySegment[] {
++/** 条目前缀片段：glyph（补空格到公共 glyph cell）+ 1 列 gap。 */
++function entryPrefixSegments(display: EntryDisplay): DisplaySegment[] {
+   const glyphPad = " ".repeat(Math.max(0, COMMON_GLYPH_WIDTH - display.glyphWidth));
+   return [
+-    selectionSegment(selected),
+     { text: display.glyph + glyphPad, color: "dim" },
+     { text: " ".repeat(COLUMN_GAP_COLUMNS), color: "dim" },
+   ];
+@@ -319,26 +310,25 @@ const PREFIX_SPACES = " ".repeat(PREFIX_WIDTH);
+  *   状态间 >= 2 列）；续行 = 前缀宽空格 + 标题段（保留空状态列，不接进拆开的标题中间）；
+  * - 宽度不足「前缀 + 2 列标题 + 2 列间隔 + 完整状态」时转 stacked：标题按区域可用宽
+  *   逐行，最后独立 `状态：<state>` 行挂到标题列并换行，不静默隐藏状态；
+- * - 极小宽度逐级降级：无标题列 → 选择 cell + glyph；连选择 cell 都放不下 → glyph-only；
+- *   连 glyph 都放不下 → 空行。完整内容仍可在详情看，不宣称窄宽展示全部身份。
++  * - 极小宽度逐级降级：无标题列 → glyph cell；连 glyph 都放不下 → 空行；
++ *   完整内容仍可在详情看，不宣称窄宽展示全部身份。
+  */
+ function composeEntryBlock(
+   display: EntryDisplay,
+   width: number,
+-  selected: boolean,
+   frameStateWidth: number,
+ ): DisplayLine[] {
+   if (width < display.glyphWidth) return [[]]; // 连图标都放不下：空行，不越界
+-  if (width < SELECTION_COLUMNS + COMMON_GLYPH_WIDTH) {
++  if (width < COMMON_GLYPH_WIDTH) {
+     return [[{ text: display.glyph, color: "dim" }]]; // glyph-only 降级
+   }
+   const glyphPad = " ".repeat(Math.max(0, COMMON_GLYPH_WIDTH - display.glyphWidth));
+   if (width < PREFIX_WIDTH + 1) {
+-    // 无标题列：选择 cell + glyph（图标身份最后消失），状态留详情可见
+-    return [[selectionSegment(selected), { text: display.glyph + glyphPad, color: "dim" }]];
++    // 无标题列：glyph cell，状态留详情可见
++    return [[{ text: display.glyph + glyphPad, color: "dim" }]];
+   }
+   const titleColumns = width - PREFIX_WIDTH;
+-  const prefix = entryPrefixSegments(selected, display);
++  const prefix = entryPrefixSegments(display);
+   const ownStateWidth = visibleWidth(display.state);
+   // 公共状态预算（本帧全部参与行先于预算裁剪的最大状态宽）：标题换行宽与 stacked 判定
+   // 用它而非本行状态宽，保证标题列/右边界不随本帧 overflow 选择变化。
+@@ -381,25 +371,24 @@ function composeEntryBlock(
+ }
+ 
+ /**
+- * 信息行（source 状态 / recent 汇总）：保留空选择列 + 图标（补空格到公共 glyph cell），
+- * 文本对齐标题列；超宽按词/字素换行（续行同标题列），不中段截断。
++ * 信息行（source 状态 / recent 汇总）：图标（补空格到公共 glyph cell）+ gap，文本对齐标题列；
++ * 超宽按词/字素换行（续行同标题列），不中段截断。
+  * 宽度连图标都放不下时返回 []（调用方跳过该块）。
+  */
+ function composeInfoBlock(glyph: string, text: string, width: number): DisplayLine[] {
+   const glyphWidth = visibleWidth(glyph);
+   if (width < glyphWidth) return [];
+-  if (width < SELECTION_COLUMNS + COMMON_GLYPH_WIDTH) {
++  if (width < COMMON_GLYPH_WIDTH) {
+     return [[{ text: glyph, color: "dim" }]];
+   }
+   const glyphPad = " ".repeat(Math.max(0, COMMON_GLYPH_WIDTH - glyphWidth));
+   if (width < PREFIX_WIDTH + 1) {
+-    return [[{ text: " ", color: "dim" }, { text: glyph + glyphPad, color: "dim" }]];
++    return [[{ text: glyph + glyphPad, color: "dim" }]];
+   }
+   const titleColumns = width - PREFIX_WIDTH;
+   return wrapDisplayText(text, titleColumns).map((chunk, index): DisplayLine =>
+     index === 0
+       ? [
+-          { text: " ", color: "dim" },
+           { text: glyph + glyphPad, color: "dim" },
+           { text: " ".repeat(COLUMN_GAP_COLUMNS), color: "dim" },
+           { text: chunk, color: "dim" },
+@@ -564,11 +553,11 @@ function fillBlocks(ordered: readonly LayoutBlock[], available: number): FillRes
+ /**
+  * 渲染 activity 条目行（通用入口，冻结签名）。
+  * - 行先按类型固定顺序稳定排序（subagent → bash_async → scheduler，同类型保持给定次序）；
+- * - 统一左基线：选择 cell(col1) + 公共 glyph cell(col2 起) + gap，标题列 = 3 + 公共 glyph 宽；
++ * - 统一左基线：公共 glyph cell(col1 起) + gap，标题列 = 2 + 公共 glyph 宽；
+  * - 状态是本帧公共右列（右边界 = width）：首行标题补空格右对齐，标题/状态间隔 >= 2 列；
+  *   窄宽转 stacked `状态：<state>` 挂标题列；极窄逐级 glyph-only 降级；
+  * - 标题按 visibleWidth 词边界优先挂起换行，续行对齐标题列、不保留断点空格；
+- * - selection 为精确 row key，命中行选择 cell 显示 `›`，其余留空；
++ * - selection 仍按精确 row key 传递给布局调用方，但主 footer 不绘制选择列；
+  * - width<=0 返回 []，任何行可见宽度不越界；只生成新显示串，raw 行对象/label/state 不写回。
+  */
+ export function renderActivityRows(
+@@ -583,7 +572,7 @@ export function renderActivityRows(
+   const stateWidth = frameStateWidth(ordered.map((row) => toEntryDisplay(row)));
+   const lines: string[] = [];
+   for (const row of ordered) {
+-    const block = composeEntryBlock(toEntryDisplay(row), columns, row.key === selection, stateWidth);
++    const block = composeEntryBlock(toEntryDisplay(row), columns, stateWidth);
+     for (const line of block) lines.push(renderSegments(line, theme));
+   }
+   return lines;
+@@ -617,6 +606,7 @@ export function renderActivityLayout(input: ActivityLayoutInput): ActivityLayout
+   const terminalRows = normalizeCount(input?.terminalRows);
+   const theme = input?.theme;
+   const selection = input?.selection;
++  void selection;
+   const meta = input?.meta;
+   const budget = Math.max(0, terminalRows - MAIN_VIEW_RESERVED_BOTTOM_ROWS);
+   const mainRows = orderRows(collectPlacement(input?.rows, "main"));
+@@ -653,7 +643,7 @@ export function renderActivityLayout(input: ActivityLayoutInput): ActivityLayout
+   const blocks: LayoutBlock[] = [];
+   for (const row of mainRows) {
+     blocks.push({
+-      lines: composeEntryBlock(toEntryDisplay(row), width, row.key === selection, stateWidth),
++      lines: composeEntryBlock(toEntryDisplay(row), width, stateWidth),
+       isEntry: true,
+       kind: row.kind,
+     });
+diff --git a/src/background-activity/presenter.ts b/src/background-activity/presenter.ts
+index 81251e6..f54aed8 100644
+--- a/src/background-activity/presenter.ts
++++ b/src/background-activity/presenter.ts
+@@ -9,16 +9,15 @@
+ // 职责与边界：
+ // - footer 组件：main mode 调用 `renderActivityLayout`（meta 从 ctx.cwd/model/
+ //   getContextUsage()/thinkingLevel 投影；source availability 经 registry.sourceSnapshot
+-//   出独立状态行），detail mode 固定最多 3 行导航；不改写任何 raw 行对象。
++//   出独立状态行），detail mode footer 按终端列换行，实际行数由 shell renderer 计算；
++//   正文 reserve 与 overlay margin 使用同一事实，不改写任何 raw 行对象。
+ //   detail mode 首行承载选中项身份（`n/N glyph label · state`），并把行上的
+-//   只读展示投影 `metaLabel`（如 subagent 的模型/thinking）追加在同一行（详情面
+-//   首行已不再渲染身份行，信息搬到 footer）；超宽由 renderActivityDetailTextLine
+-//   按终端列截断，不挤掉后两行（位置行 + 键位提示）。
++//   首行已不再渲染身份行，信息搬到 footer）；provider/model 与 thinking 按终端列完整换行，
++//   不以省略号截断。
+ // - openDetails：terminalRows<=4 不挂 overlay、不改 editor/draft（shell 标记 too-small，
+ //   恢复尺寸后可重开）；否则保存 editor/draft（错误隔离，任一获取/替换失败保持关闭并
+-//   固定文案 notify 一次），经 `ctx.ui.custom` 以静态 overlay options（margin.bottom=4、
+-//   maxHeight 100%）挂载详情壳，每 render 按 terminalRows 实时计算正文行数，不使用
+-//   动态 options 函数、不常规 remount。
++//   固定文案 notify 一次），经 `ctx.ui.custom` 挂载详情壳；每 render 按动态 footer reserve
++//   实时计算正文行数，不使用常规 remount。
+ // - registry 订阅：source 失效/同 kind 注册替换时刷新 footer 并让 shell 重取详情。
+ // - 主题身份变化（footer factory 以新 theme 对象重入）→ shell 重取详情保 anchor。
+ //
+@@ -45,10 +44,7 @@ import type {
+ } from "pi-subagents-enhanced/tui/background-activity";
+ import type { ExtensionContext, KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
+ import {
+-  ACTIVITY_KIND_GLYPHS,
+   ACTIVITY_KIND_ORDER,
+-  DETAIL_FOOTER_MAX_ROWS,
+-  DETAIL_RESERVED_BOTTOM_ROWS,
+   TOO_SMALL_TERMINAL_ROWS,
+   renderActivityLayout,
+ } from "./layout.ts";
+@@ -56,7 +52,6 @@ import type { ActivityFooterMeta, ActivitySourceStatus, ActivityTheme } from "./
+ import {
+   createActivityDetailShell,
+   createReadOnlyActivityEditorFactory,
+-  renderActivityDetailTextLine,
+ } from "./detail-controller.ts";
+ import type { ActivityDetailShell, ActivityTuiBindings } from "./detail-controller.ts";
+ 
+@@ -96,34 +91,6 @@ export function activityPresenterFactoryFor(
+  * margin.bottom=4 已为 overlay 下方详情 footer（最多 3 行）+ separator 预留；
+  * 不使用动态 options 函数，resize 由每 render 实时按 terminalRows 适应。
+  */
+-const DETAIL_OVERLAY_MOUNT_OPTIONS: {
+-  overlay: boolean;
+-  overlayOptions: {
+-    row: number;
+-    col: number;
+-    width: "100%";
+-    maxHeight: "100%";
+-    margin: { bottom: number };
+-  };
+-  onHandle: (handle: OverlayHandle) => void;
+-} = {
+-  overlay: true,
+-  overlayOptions: {
+-    row: 0,
+-    col: 0,
+-    width: "100%",
+-    maxHeight: "100%",
+-    margin: { bottom: DETAIL_RESERVED_BOTTOM_ROWS },
+-  },
+-  onHandle: (handle) => {
+-    try {
+-      handle?.focus?.();
+-    } catch {
+-      // focus 失败不阻断挂载。
+-    }
+-  },
+-};
+-
+ /** 每次 open 的壳 Component 包装（tui.md：custom 组件实例属于一次交互；壳 controller 跨交互复用）。 */
+ function createOpenShellComponent(shell: ActivityDetailShell): {
+   render(width: number): string[];
+@@ -305,34 +272,29 @@ export function createActivityPresenter(
+   };
+ 
+   const renderDetailFooterLines = (width: number, theme: ActivityTheme | undefined): string[] => {
+-    const entries = shell.entries();
+-    const selected = shell.selectedKey();
+-    const index = entries.findIndex((entry) => entry.key === selected);
+-    const lines: string[] = [];
+-    if (index === -1) {
+-      lines.push("当前无后台活动");
+-    } else {
+-      const entry = entries[index];
+-      // `metaLabel` 是行上的只读展示投影（如 subagent 的模型/thinking）；只有存在时
+-      // 才追加 ` · <meta>`，避免尾部悬空分隔符。
+-      const metaLabel =
+-        typeof entry.metaLabel === "string" && entry.metaLabel !== "" ? ` · ${entry.metaLabel}` : "";
+-      lines.push(
+-        `${index + 1}/${entries.length} ${ACTIVITY_KIND_GLYPHS[entry.kind] ?? "◇"} ${
+-          entry.label
+-        } · ${entry.stateLabel}${metaLabel}`,
+-      );
+-    }
+-    const position = shell.position();
+-    lines.push(
+-      `行 ${position.start}-${position.end}/${position.total} · ${
+-        position.autoFollow ? "跟随底部" : "手动滚动"
+-      } · x ${shell.expanded() ? "收起" : "展开"}`,
+-    );
+-    lines.push("‹ › 切换任务 · ↑↓ jk 滚动 · PgUp/PgDn/Home/End 翻页 · Esc/Alt+O 关闭");
+-    return lines
+-      .slice(0, DETAIL_FOOTER_MAX_ROWS)
+-      .map((line) => renderActivityDetailTextLine(line, width, theme, tui));
++    return shell.renderFooter(width, theme);
++  };
++
++  const detailOverlayMountOptions = {
++    overlay: true,
++    overlayOptions: {
++      row: 0,
++      col: 0,
++      width: "100%" as const,
++      maxHeight: "100%" as const,
++      margin: {
++        get bottom(): number {
++          return shell.footerReservedBottomRows();
++        },
++      },
++    },
++    onHandle: (handle: OverlayHandle) => {
++      try {
++        handle?.focus?.();
++      } catch {
++        // focus 失败不阻断挂载。
++      }
++    },
+   };
+ 
+   const createFooter: MountedActivityView["createFooter"] = (tui, theme, footerData) => {
+@@ -428,7 +390,7 @@ export function createActivityPresenter(
+         return createOpenShellComponent(shell);
+       };
+       try {
+-        const result = ctx.ui.custom<void>(factory, DETAIL_OVERLAY_MOUNT_OPTIONS);
++        const result = ctx.ui.custom<void>(factory, detailOverlayMountOptions);
+         if (result && typeof result.then === "function") {
+           result.then(
+             () => undefined,
+diff --git a/test/background-activity-details.test.mjs b/test/background-activity-details.test.mjs
+index 4a59ca3..69c2e78 100644
+--- a/test/background-activity-details.test.mjs
++++ b/test/background-activity-details.test.mjs
+@@ -405,7 +405,7 @@ test("main footer：cwd/context、连续元数据行、entry 块与 selection 
+   fixture.overlayCalls[0].component.handleInput(ESC);
+   const after = footer.render(80);
+   const bashLine = after.find((line) => line.includes("命令B"));
+-  assert.ok(bashLine.startsWith("›⌘ "), `关闭后主视图选中 B（§2 单选择 cell col1）：${bashLine}`);
++  assert.ok(bashLine.startsWith("⌘ "), `关闭后主视图选中 B（selected key 保留但无选择列）：${bashLine}`);
+   assert.equal(JSON.stringify([subagent.source.snapshot(), bash.source.snapshot()]), rowsBefore, "raw snapshot 不变");
+ });
+ 
+@@ -864,7 +864,8 @@ test("provider render/invalidate 仅 display：ANSI 保留、按宽截断补空
+   await flush();
+   const lines = fixture.shell.render(40);
+   // 标题 1 行（滚动信息）+ 正文 3 行（顶部对齐）+ 补空 16 行 = 20。
+-  assert.equal(lines.length, 20);
++  // width=40 时键位提示换行，动态 footer reserve 为 5，正文为 19 行。
++  assert.equal(lines.length, 19);
+   const bodyLines = lines.slice(1);
+   for (const line of bodyLines) {
+     assert.ok(visibleWidth(line) <= 40, `行宽不越界：${JSON.stringify(line)}`);
+@@ -1030,7 +1031,7 @@ test("geometry：正文预算 = terminalRows-4-标题实际行数，不双扣 fo
+   fixture.openShell();
+   subagent.resolveNext(createCountedComponent(10, "A1").component);
+   await flush();
+-  assert.equal(fixture.shell.render(80).length, 20, "24 行 → 20（1 滚动信息行 + 19 正文），不扣 footer");
++  assert.equal(fixture.shell.render(40).length, 19, "宽度 40 时 footer 换行后 reserve 同步，正文不重叠");
+   const headerOnly = fixture.shell.render(80).slice(0, 2);
+   assert.equal(headerOnly[0].includes("›"), false, `标题不得再有身份行（›）：${headerOnly[0]}`);
+   assert.equal(headerOnly[0].includes("任务A"), false, `标题不得再渲染 label：${headerOnly[0]}`);
+@@ -1086,13 +1087,13 @@ test("header 不渲染身份行：label/state/模型全由 detail footer 首行
+   // 同一事实搬到 detail footer 首行（`n/N glyph label · state` + 可选 ` · metaLabel`）。
+   const footerLines = footer.render(80);
+   const footerFirst = footerLines[0];
+-  assert.ok(footerFirst.startsWith("1/2 ● 任务M · 运行中"), `footer 首行承载身份：${footerFirst}`);
++  assert.equal(footerFirst, "1/2 ● 任务M · 模型 (codex-pool) gpt-6.1-sol · thinking: high", `footer 首行承载身份：${footerFirst}`);
+   assert.ok(
+     footerFirst.includes("模型 (codex-pool) gpt-6.1-sol") && footerFirst.includes("thinking: high"),
+     `footer 首行承载模型/thinking：${footerFirst}`,
+   );
+   // 追加模型段不得挤掉既有 3 行（位置行 + 键位提示行）。
+-  assert.equal(footerLines.length, DETAIL_FOOTER_MAX_ROWS, "detail footer 仍为最多 3 行");
++  assert.equal(footerLines.length, 3, "宽度 80 下详情 footer 仍为 3 行");
+   assert.ok(footerLines[1].includes("行 1-4/4") && footerLines[1].includes("x 展开"), `位置行仍在：${footerLines[1]}`);
+   assert.ok(footerLines[2].includes("Esc/Alt+O 关闭"), `键位提示行仍在：${footerLines[2]}`);
+   // 切到没有 metaLabel 的行：footer 跟随新身份，不出现模型段，也不留悬空 `·`。
+diff --git a/test/background-activity-layout.test.mjs b/test/background-activity-layout.test.mjs
+index e9aa0ed..35f033a 100644
+--- a/test/background-activity-layout.test.mjs
++++ b/test/background-activity-layout.test.mjs
+@@ -49,7 +49,7 @@ const META = Object.freeze({
+ 
+ // §2 冻结网格常量（与 layout 内部一致；fixture 环境三 glyph 宽均为 1 → 公共 glyph cell 1）。
+ const GLYPH_CELL = 1;
+-const PREFIX_WIDTH = 1 + GLYPH_CELL + 1; // 选择 cell + glyph cell + gap
++const PREFIX_WIDTH = GLYPH_CELL + 1; // glyph cell + gap
+ const PREFIX_SPACES = " ".repeat(PREFIX_WIDTH);
+ 
+ /** 主题替身：记录 (color, text) 调用并原样返回文本，不影响可见宽度。 */
+@@ -115,10 +115,10 @@ test("§2 左基线网格：单选择 cell + 公共 glyph cell + gap，标题列
+   // 类型固定顺序：subagent×2 → bash_async×2 → scheduler×2。
+   const orderedGlyphs = ["●", "●", "⌘", "⌘", "⏱", "⏱"];
+   const orderedStates = ["待处置", "运行中", "成功(exit 0)", "失败(exit 1)", "等待触发", "已禁用"];
++  // 类型 glyph 位于 col1，gap 位于 col2，标题从 col3 开始。
+   first.forEach((line, index) => {
+-    assert.equal(line[0], " ", `行 ${index} col1 是单选择 cell（未选中空格）`);
+-    assert.equal(line[1], orderedGlyphs[index], `行 ${index} col2 是类型图标`);
+-    assert.equal(line[2], " ", `行 ${index} col3 是 1 列 gap`);
++    assert.equal(line[0], orderedGlyphs[index], `行 ${index} col1 是类型图标`);
++    assert.equal(line[1], " ", `行 ${index} col2 是 1 列 gap`);
+     assert.equal(visibleWidth(line), 80, `状态真右列右对齐到 width：${line}`);
+     assert.ok(line.endsWith(orderedStates[index]), `行 ${index} 状态在首行真右列`);
+     const stateIndex = line.lastIndexOf(orderedStates[index]);
+@@ -129,23 +129,15 @@ test("§2 左基线网格：单选择 cell + 公共 glyph cell + gap，标题列
+   assert.equal(first[4].indexOf("定时C"), PREFIX_WIDTH);
+ });
+ 
+-test("选择 cell：selection 按 key 精确命中 col1 显示 ›，其余行留空且同网格", () => {
++test("selected key 不改变主 footer 列布局，任务类型 glyph 保持可见", () => {
+   const rows = [
+     row("subagent", "subagent:a1", "任务A"),
+     row("bash_async", "bash_async:b1", "命令B"),
+     row("scheduler", "scheduler:s1", "定时C"),
+   ];
+-  const lines = renderActivityRows(rows, 80, "bash_async:b1");
+-  const selected = lines.find((line) => line.includes("命令B"));
+-  assert.ok(selected.startsWith("›⌘ "), "选中行 col1=›、col2=glyph、col3=gap");
+-  for (const line of lines) {
+-    if (!line.includes("命令B")) {
+-      assert.ok(line.startsWith(" "), "未选中行选择 cell 留空");
+-      assert.ok(!line.includes("›"), "未选中行不出现选择标记");
+-    }
+-  }
+-  const unselected = renderActivityRows(rows, 80);
+-  assert.ok(unselected.every((line) => line.startsWith(" ")), "无 selection 时全部留空");
++  const selected = renderActivityRows(rows, 80, "bash_async:b1");
++  assert.deepEqual(selected, renderActivityRows(rows, 80), "selected key 仍可传递但不绘制选择列");
++  assert.ok(selected.every((line) => !line.includes("›")), "主 footer 不绘制选择箭头");
+ });
+ 
+ test("截图同形 label（width 78）：(delegate) 不拆、状态真右列、续行同标题列无断点空格", () => {
+@@ -171,7 +163,7 @@ test("截图同形 label（width 78）：(delegate) 不拆、状态真右列、
+   assert.ok(lines[0].endsWith("codex-pool/gpt-6.1-sol · low · 1.4%/900k"), "任意provider/model均合并到右侧");
+   assert.equal(lines[1], "", "常驻元数据后恰一个空行");
+   const entryFirst = lines[2];
+-  assert.ok(entryFirst.startsWith("›● "), "选中 + glyph + gap");
++  assert.ok(entryFirst.startsWith("● "), "glyph + gap");
+   assert.equal(visibleWidth(entryFirst), 78, "状态右对齐到 78 列右边界");
+   assert.ok(entryFirst.endsWith("运行中"), "状态在首行真右列");
+   assert.ok(!entryFirst.includes("(delegate)"), "首行标题不含被换行的词");
+@@ -267,7 +259,7 @@ test("极窄降级阶梯：width 0 空 / 1 glyph-only / 3 选择cell+glyph，均
+   assert.deepEqual(renderActivityRows(rows, 0), [], "width 0 返回空显示");
+   assert.deepEqual(renderActivityRows(rows, 1), ["●", "⌘", "⏱"], "width 1 glyph-only 降级");
+   const three = renderActivityRows(rows, 3, "bash_async:1");
+-  assert.deepEqual(three, [" ●", "›⌘", " ⏱"], "width 3 选择 cell + glyph，无标题列");
++  assert.ok(three.every((line) => !line.includes("›")), "窄宽不绘制选择箭头");
+   for (const width of [1, 3]) {
+     for (const line of renderActivityRows(rows, width)) {
+       assert.ok(visibleWidth(line) <= width, `width ${width} 行宽不越界`);
+@@ -289,9 +281,9 @@ test("三 kind 同帧可见：充足预算按类型固定顺序整块渲染，gl
+   assert.equal(lines.length, 5, "压缩单行元数据 + 分隔空行 + 三 kind 各 1 行");
+   assert.ok(lines[0].startsWith("/tmp/proj") && lines[0].endsWith("anthropic/claude-test · medium · 12.3%/1.0M"), "第一行压缩元数据");
+   assert.equal(lines[1], "");
+-  assert.ok(lines[2].startsWith(" ● 任务A"), "subagent 行网格");
+-  assert.ok(lines[3].startsWith(" ⌘ 命令B"), "bash 行网格");
+-  assert.ok(lines[4].startsWith(" ⏱ 定时C"), "scheduler 行网格");
++  assert.ok(lines[2].startsWith("● 任务A"), "subagent 行网格");
++  assert.ok(lines[3].startsWith("⌘ 命令B"), "bash 行网格");
++  assert.ok(lines[4].startsWith("⏱ 定时C"), "scheduler 行网格");
+   const withThird = layoutWith(rows, { terminalRows: 12 });
+   assert.ok(withThird.lines.some((line) => line.includes("定时C")), "三 kind 同帧可见");
+   assert.equal(geometry.overflowCount, 0);
+@@ -303,14 +295,14 @@ test("元数据连续渲染不留空 activity 槽：放不下时分别换行且
+   assert.ok(fit.lines.some((line) => line.includes("anthropic/claude-test")), "provider/model保留");
+   assert.ok(fit.lines.some((line) => line.includes("medium")), "thinking保留");
+   assert.ok(fit.lines.some((line) => line.includes("12.3%/1.0M")), "context保留");
+-  assert.ok(fit.lines.some((line) => line.startsWith(" ● ")), "活动区紧跟元数据连续绘制");
++  assert.ok(fit.lines.some((line) => line.startsWith("● ")), "活动区紧跟元数据连续绘制");
+   assert.ok(!fit.lines.some((line) => line.trim() === "(anthropic) claude-test"), "不存在旧的第二元数据槽行");
+ 
+   const split = layoutWith(rows, { width: 30 });
+   assert.ok(split.lines[0].includes("anthropic/claude-test") || split.lines[1].includes("anthropic/claude-test"), "窄宽仍保留provider/model");
+   assert.ok(split.lines.some((line) => line.includes("medium")), "窄宽仍保留thinking");
+   assert.ok(split.lines.some((line) => line.includes("12.3%/1.0M")), "窄宽仍保留context");
+-  assert.ok(split.lines.some((line) => line.startsWith(" ● ")), "活动区仍在元数据之后");
++  assert.ok(split.lines.some((line) => line.startsWith("● ")), "活动区仍在元数据之后");
+   for (const line of split.lines) assert.ok(visibleWidth(line) <= 30, "换行后不越界");
+ });
+ 
+@@ -398,7 +390,7 @@ test("resize：宽度变化后内容重新适配，行宽始终不越界且换
+   assert.ok(narrow.lines.some((line) => line.includes("/tmp/proj")), "窄宽仍保留cwd");
+   assert.ok(narrow.lines.some((line) => line.includes("anthropic/claude-test")), "窄宽仍保留provider/model");
+   assert.ok(narrow.lines.some((line) => line.includes("12.3%/1.0M")), "窄宽仍保留context");
+-  const entryLines = narrow.lines.slice(narrow.lines.findIndex((line) => line.startsWith(" ● ")));
++  const entryLines = narrow.lines.slice(narrow.lines.findIndex((line) => line.startsWith("● ")));
+   assert.equal(titleBody(entryLines), label, "resize 后换行不丢字");
+ });
+ 
+@@ -428,7 +420,7 @@ test("recent 汇总单行：main 优先逐条显示，recent 按 key 去重且
+   const { lines } = layoutWith(rows);
+   const recentLines = lines.filter((line) => line.includes("recent"));
+   assert.equal(recentLines.length, 1, "recent 折叠为单行提示");
+-  assert.ok(recentLines[0].startsWith(" ◯ "), "信息行保留空选择 cell + 图标");
++  assert.ok(recentLines[0].startsWith("◯ "), "信息行 glyph + gap");
+   assert.ok(recentLines[0].includes("recent 2"), "N 按统一列表 key 去重");
+   assert.equal(recentLines[0].indexOf("recent 2"), PREFIX_WIDTH, "信息行文本对齐标题列");
+   assert.ok(!lines.some((line) => line.includes("旧任务")), "recent 不逐条进入主视图");
+@@ -575,7 +567,7 @@ test("theme 端口：选择标记 accent、其余 dim；主题替换不改变可
+   const theme = createRecordingTheme();
+   const themed = layoutWith(rows, { selection: "subagent:1", theme });
+   assert.deepEqual(themed.lines, plain.lines, "主题替身原样返回文本时输出一致");
+-  assert.ok(theme.calls.some(([color, text]) => color === "accent" && text === "›"), "选中标记走 accent");
++  assert.ok(!theme.calls.some(([color]) => color === "accent"), "主 footer 不再为选择箭头着色");
+   assert.ok(theme.calls.some(([color, text]) => color === "dim" && text === plain.lines[0]), "元数据行走 dim");
+   for (const line of themed.lines) assert.ok(visibleWidth(line) <= 80);
+ });

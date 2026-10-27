@@ -3,10 +3,14 @@
 //
 // 本模块只做纯显示投影，供 F5b 详情壳/presenter 消费，精确公开签名：
 // - renderActivityRows(rows, width, selection?, theme?): string[]
-//     通用 activity 条目渲染：单选择 cell + 公共 glyph cell + 1 列 gap 的统一左基线，
-//     标题列 = 3 + 公共 glyph 宽（1-indexed）；状态是本帧公共右列（右边界 = width），
+//     通用 activity 条目渲染：公共 glyph cell + 1 列 gap 的统一左基线，
+//     标题列 = 2 + 公共 glyph 宽（1-indexed）；状态是本帧公共右列（右边界 = width），
 //     按 visibleWidth 词边界优先换行（续行对齐标题列、不保留断点空格），width 0/1
 //     不越界；输入行先按类型固定顺序稳定排序（同类型内保持给定顺序）。
+//     单任务卡最多两个物理行（含状态挂行）：inline 标题最多 2 行且状态在首行右列；
+//     stacked 固定标题 1 行 + 状态 1 行；无状态标题最多 2 行。真实截短的字段在最后
+//     保留行尾 `…`，未截断（含恰好两行）不加省略号。完整 command/label/state 只在
+//     详情读取，raw 行对象不写回。
 // - renderActivityLayout(input): ActivityLayoutResult
 //     主视图 footer 工厂：元数据先连续渲染（第一行 cwd 左/context 右；第二元数据行
 //     provider/model 左 + thinking 右，放不下时分别换行且均从 col1 共同左基线开始，
@@ -78,16 +82,14 @@ export const DETAIL_FOOTER_MAX_ROWS = 3;
 /** terminalRows <= 该值时详情 overlay 不挂载（F5b 负责保留 footer 入口与 draft）。 */
 export const TOO_SMALL_TERMINAL_ROWS = 4;
 
-// 列布局常量（§2 冻结网格）：选择标记占 col1 单 cell（选中 `›`、未选中空格），类型图标
-// 从 col2 开始并补空格到公共 glyph cell，随后 1 列 gap；标题列 = 3 + 公共 glyph 宽。
-// 续行/状态挂行只补前缀宽（选择 cell + glyph cell + gap），不保留断点空格。
-const SELECTION_COLUMNS = 1;
+// 列布局常量：类型图标从 col1 开始并补空格到公共 glyph cell，随后 1 列 gap；
+// 标题列 = 2 + 公共 glyph 宽。selected key 仍由调用方保留，但主 footer 不绘制选择列。
+// 续行/状态挂行只补前缀宽（glyph cell + gap），不保留断点空格。
 const COLUMN_GAP_COLUMNS = 1;
 /** 首行标题与状态列之间的最小间隔（§2：至少 2 列空格）。 */
 const STATE_GAP_COLUMNS = 2;
 /** 内联状态右列所需的最小标题列数（§2：至少 2 列标题）。 */
 const MIN_TITLE_COLUMNS = 2;
-const SELECTED_MARKER = "›";
 /** 未知 kind 的兜底图标（只表「未识别类型」，不表事实）。 */
 const FALLBACK_GLYPH = "◇";
 
@@ -101,8 +103,8 @@ const COMMON_GLYPH_WIDTH = Math.max(
   visibleWidth(FALLBACK_GLYPH),
 );
 
-/** 条目前缀宽 = 选择 cell 1 + 公共 glyph cell + gap 1；标题列（1-indexed）= 前缀宽 + 1。 */
-const PREFIX_WIDTH = SELECTION_COLUMNS + COMMON_GLYPH_WIDTH + COLUMN_GAP_COLUMNS;
+/** 条目前缀宽 = 公共 glyph cell + gap 1；标题列（1-indexed）= 前缀宽 + 1。 */
+const PREFIX_WIDTH = COMMON_GLYPH_WIDTH + COLUMN_GAP_COLUMNS;
 
 /** 单个渲染片段；color 为语义 token，仅在有 theme 时经 theme.fg 上色。 */
 interface DisplaySegment {
@@ -120,10 +122,10 @@ export type ActivityGeometryMode = "main" | "detail";
  * 宽高预算元数据。冻结三元组 {footerRows,reservedBottomRows,bodyRows} 之外，
  * 额外暴露 F5b 决策所需派生字段（预算上限、溢出数、too-small）。
  *
- * F5b 组合方式：详情 overlay 静态 margin.bottom = DETAIL_RESERVED_BOTTOM_ROWS(4)，
- * 详情 footer 导航行 <= DETAIL_FOOTER_MAX_ROWS(3)，正文 viewport 行数在 bodyRows
- * （= max(0, terminalRows-4)）内扣除 footer 后使用；terminalRows <= TOO_SMALL_TERMINAL_ROWS
- * （tooSmall=true）时不挂载 overlay，保留 footer 入口与 draft，恢复尺寸后可重开。
+ * F5b 组合方式：详情 overlay margin.bottom 由 footer 实际换行行数 + separator 动态计算；
+ * 详情 footer 不再使用固定行上限，正文 viewport 与 scrollBounds 复用同一 reserve。
+ * terminalRows <= TOO_SMALL_TERMINAL_ROWS（tooSmall=true）时不挂载 overlay，保留 footer
+ * 入口与 draft，恢复尺寸后可重开。
  */
 export type ActivityGeometry = Readonly<{
   /** 本次实际占用/计划的 footer 物理行数（已被对应预算上限钳制）。 */
@@ -296,16 +298,19 @@ function toEntryDisplay(row: ActivityRow): EntryDisplay {
   };
 }
 
-/** 选择 cell 片段：选中 `›`（accent）、未选中单空格（dim）。 */
-function selectionSegment(selected: boolean): DisplaySegment {
-  return { text: selected ? SELECTED_MARKER : " ", color: selected ? "accent" : "dim" };
-}
+/** 任务卡单任务标题最多物理行数（inline/无状态：2 行；stacked 标题压 1 行 + 状态 1 行）。 */
+const MAX_TITLE_LINES = 2;
 
-/** 条目前缀片段：选择 cell + glyph（补空格到公共 glyph cell）+ 1 列 gap。 */
-function entryPrefixSegments(selected: boolean, display: EntryDisplay): DisplaySegment[] {
+/** stacked 状态行装饰前缀；窄宽下若它挤光状态正文则省略装饰、优先 state 文本。 */
+const STATE_LABEL_PREFIX = "状态：";
+
+/** 字段级截断标记：只出现在实际被截短字段的最后保留行。 */
+const FIELD_ELLIPSIS = "…";
+
+/** 条目前缀片段：glyph（补空格到公共 glyph cell）+ 1 列 gap。 */
+function entryPrefixSegments(display: EntryDisplay): DisplaySegment[] {
   const glyphPad = " ".repeat(Math.max(0, COMMON_GLYPH_WIDTH - display.glyphWidth));
   return [
-    selectionSegment(selected),
     { text: display.glyph + glyphPad, color: "dim" },
     { text: " ".repeat(COLUMN_GAP_COLUMNS), color: "dim" },
   ];
@@ -313,32 +318,107 @@ function entryPrefixSegments(selected: boolean, display: EntryDisplay): DisplayS
 
 const PREFIX_SPACES = " ".repeat(PREFIX_WIDTH);
 
+interface CappedField {
+  /** 最多 maxLines 个物理行（空文本仍占一个空行）。 */
+  lines: string[];
+  /** 行数越界或字素降级确实丢了显示内容；换行边界空白消费不计入。 */
+  hidden: boolean;
+}
+
 /**
- * 组装单条 activity 的物理行（§2 冻结网格）：
+ * 任务卡单字段限行投影（仅由 composeEntryBlock 消费）：方向与 wrapDisplayText 一致，
+ * 但显式记录「内容是否真的没显示完」，供字段尾 `…` 使用。单字素宽于可用列时按列安全
+ * 丢弃并记为 hidden，不越界、不拆字素。
+ */
+function capFieldText(text: string, maxWidth: number, maxLines: number): CappedField {
+  if (!(maxWidth > 0)) return { lines: [""], hidden: text !== "" };
+  if (text === "") return { lines: [""], hidden: false };
+  const kept: string[] = [];
+  let hidden = false;
+  for (const rawLine of wrapTextWithAnsi(text, maxWidth)) {
+    // 输入已经过 toDisplayText 清干净；这里再剥离 wrap 为行尾补的复位序列，保持显示副本无 ANSI。
+    const line = stripTerminalSequences(rawLine);
+    if (visibleWidth(line) <= maxWidth) {
+      // 与 wrapDisplayText 一致：跳过 wrap 产生的空行（不占物理行槽位）
+      if (line !== "") kept.push(line);
+      continue;
+    }
+    const clipped = clipToWidth(line, maxWidth);
+    hidden = true; // 单字素宽于可用列：宁可丢字不越界
+    if (clipped !== "") kept.push(clipped);
+  }
+  if (kept.length > maxLines) hidden = true;
+  const lines = kept.slice(0, Math.max(0, maxLines));
+  return { lines: lines.length > 0 ? lines : [""], hidden };
+}
+
+/**
+ * 已确认 hidden 时在最后保留行尾追加 `…`：先按省略号列宽截出安全前缀，避免最后 chunk
+ * 未满宽时 truncateToWidth(chunk, width, "…") 不显示省略号；连省略号都放不下则不加。
+ */
+function appendFieldEllipsis(lines: string[], maxWidth: number, hidden: boolean): string[] {
+  if (!hidden || lines.length === 0) return lines;
+  const ellipsisWidth = visibleWidth(FIELD_ELLIPSIS);
+  if (!(maxWidth >= ellipsisWidth)) return lines;
+  const last = lines[lines.length - 1] ?? "";
+  // truncateToWidth 会在截断结果尾补复位序列；显示副本本身无色，剥掉后只留可见前缀。
+  const prefix = stripTerminalSequences(truncateToWidth(last, maxWidth - ellipsisWidth, ""));
+  return [...lines.slice(0, -1), prefix + FIELD_ELLIPSIS];
+}
+
+/** 单字段限行 + 真实截短尾 `…`。 */
+function capFieldLines(text: string, maxWidth: number, maxLines: number): string[] {
+  const capped = capFieldText(text, maxWidth, maxLines);
+  return appendFieldEllipsis(capped.lines, maxWidth, capped.hidden);
+}
+
+/**
+ * stacked 状态行（最多 1 行，挂在标题列）：默认 `状态：<state>`；当装饰前缀会挤光状态
+ * 正文（保留行去掉装饰后没有任何 state 字素）时省略装饰、优先显示 state 文本前缀。
+ * 只影响显示副本，stateLabel 与详情保持完整。
+ */
+function capStateLine(state: string, maxWidth: number): string | undefined {
+  if (state === "") return undefined;
+  if (maxWidth > visibleWidth(STATE_LABEL_PREFIX)) {
+    const prefixed = capFieldText(`${STATE_LABEL_PREFIX}${state}`, maxWidth, 1);
+    const first = prefixed.lines[0] ?? "";
+    const statePortion = first.startsWith(STATE_LABEL_PREFIX)
+      ? first.slice(STATE_LABEL_PREFIX.length)
+      : "";
+    if (statePortion !== "") {
+      return appendFieldEllipsis(prefixed.lines, maxWidth, prefixed.hidden)[0] ?? "";
+    }
+  }
+  return capFieldLines(state, maxWidth, 1)[0] ?? "";
+}
+
+/**
+ * 组装单条 activity 的物理行（§2 冻结网格，单任务卡最多两个物理行）：
  * - 正常宽度：首行 = 前缀 + 标题首段 + 补空格 + 状态右列（状态右边界 = width，标题与
- *   状态间 >= 2 列）；续行 = 前缀宽空格 + 标题段（保留空状态列，不接进拆开的标题中间）；
- * - 宽度不足「前缀 + 2 列标题 + 2 列间隔 + 完整状态」时转 stacked：标题按区域可用宽
- *   逐行，最后独立 `状态：<state>` 行挂到标题列并换行，不静默隐藏状态；
- * - 极小宽度逐级降级：无标题列 → 选择 cell + glyph；连选择 cell 都放不下 → glyph-only；
- *   连 glyph 都放不下 → 空行。完整内容仍可在详情看，不宣称窄宽展示全部身份。
+ *   状态间 >= 2 列）；整卡唯一可选的第二行 = 前缀宽空格 + 标题尾段（保留空状态列）；
+ *   标题最多 2 行，只有第 3 行起仍有内容或字素降级丢字时，才在最后保留行尾 `…`；
+ * - 宽度不足「前缀 + 2 列标题 + 2 列间隔 + 完整状态」时转 stacked：第 1 行标题前缀
+ *   （真截尾时 `…`），第 2 行状态 1 行（真截尾时 `…`，极窄省略装饰优先 state 文本）；
+ * - 无状态：标题最多 2 行，不虚构状态行；
+ * - 极小宽度逐级降级：无标题列 → glyph cell；连 glyph 都放不下 → 空行；
+ *   完整内容仍可在详情看，不宣称窄宽展示全部身份。
  */
 function composeEntryBlock(
   display: EntryDisplay,
   width: number,
-  selected: boolean,
   frameStateWidth: number,
 ): DisplayLine[] {
   if (width < display.glyphWidth) return [[]]; // 连图标都放不下：空行，不越界
-  if (width < SELECTION_COLUMNS + COMMON_GLYPH_WIDTH) {
+  if (width < COMMON_GLYPH_WIDTH) {
     return [[{ text: display.glyph, color: "dim" }]]; // glyph-only 降级
   }
   const glyphPad = " ".repeat(Math.max(0, COMMON_GLYPH_WIDTH - display.glyphWidth));
   if (width < PREFIX_WIDTH + 1) {
-    // 无标题列：选择 cell + glyph（图标身份最后消失），状态留详情可见
-    return [[selectionSegment(selected), { text: display.glyph + glyphPad, color: "dim" }]];
+    // 无标题列：glyph cell，状态留详情可见
+    return [[{ text: display.glyph + glyphPad, color: "dim" }]];
   }
   const titleColumns = width - PREFIX_WIDTH;
-  const prefix = entryPrefixSegments(selected, display);
+  const prefix = entryPrefixSegments(display);
   const ownStateWidth = visibleWidth(display.state);
   // 公共状态预算（本帧全部参与行先于预算裁剪的最大状态宽）：标题换行宽与 stacked 判定
   // 用它而非本行状态宽，保证标题列/右边界不随本帧 overflow 选择变化。
@@ -350,56 +430,56 @@ function composeEntryBlock(
   if (stateBudget > 0 && titleColumns >= MIN_TITLE_COLUMNS + STATE_GAP_COLUMNS + stateBudget) {
     // 状态真右列：标题换行宽预留「>=2 间隔 + 公共状态预算」，首行补空格右对齐本行状态
     const wrapWidth = titleColumns - STATE_GAP_COLUMNS - stateBudget;
-    const chunks = wrapDisplayText(display.label, wrapWidth);
-    const firstWidth = visibleWidth(chunks[0] ?? "");
+    const titleLines = capFieldLines(display.label, wrapWidth, MAX_TITLE_LINES);
+    const firstWidth = visibleWidth(titleLines[0] ?? "");
     if (ownStateWidth > 0) {
       const pad = " ".repeat(Math.max(STATE_GAP_COLUMNS, titleColumns - ownStateWidth - firstWidth));
       lines.push([
         ...prefix,
-        { text: chunks[0] ?? "", color: "dim" },
+        { text: titleLines[0] ?? "", color: "dim" },
         { text: pad, color: "dim" },
         { text: display.state, color: "dim" },
       ]);
     } else {
-      lines.push([...prefix, { text: chunks[0] ?? "", color: "dim" }]);
+      lines.push([...prefix, { text: titleLines[0] ?? "", color: "dim" }]);
     }
-    for (const chunk of chunks.slice(1)) pushContinuation(chunk);
+    for (const chunk of titleLines.slice(1)) pushContinuation(chunk);
     return lines;
   }
-  const chunks = wrapDisplayText(display.label, titleColumns);
-  chunks.forEach((chunk, index) => {
+  // stacked：标题 1 行 + 状态 1 行；无状态时标题最多 2 行。
+  const titleLines = capFieldLines(
+    display.label,
+    titleColumns,
+    ownStateWidth > 0 ? 1 : MAX_TITLE_LINES,
+  );
+  titleLines.forEach((chunk, index) => {
     if (index === 0) lines.push([...prefix, { text: chunk, color: "dim" }]);
     else pushContinuation(chunk);
   });
-  if (ownStateWidth > 0) {
-    // stacked：独立状态行挂标题列，超宽继续换行，不静默隐藏
-    for (const chunk of wrapDisplayText(`状态：${display.state}`, titleColumns)) {
-      pushContinuation(chunk);
-    }
-  }
+  const stateLine = capStateLine(display.state, titleColumns);
+  if (stateLine !== undefined) pushContinuation(stateLine);
   return lines;
 }
 
 /**
- * 信息行（source 状态 / recent 汇总）：保留空选择列 + 图标（补空格到公共 glyph cell），
- * 文本对齐标题列；超宽按词/字素换行（续行同标题列），不中段截断。
+ * 信息行（source 状态 / recent 汇总）：图标（补空格到公共 glyph cell）+ gap，文本对齐标题列；
+ * 超宽按词/字素换行（续行同标题列），不中段截断。
  * 宽度连图标都放不下时返回 []（调用方跳过该块）。
  */
 function composeInfoBlock(glyph: string, text: string, width: number): DisplayLine[] {
   const glyphWidth = visibleWidth(glyph);
   if (width < glyphWidth) return [];
-  if (width < SELECTION_COLUMNS + COMMON_GLYPH_WIDTH) {
+  if (width < COMMON_GLYPH_WIDTH) {
     return [[{ text: glyph, color: "dim" }]];
   }
   const glyphPad = " ".repeat(Math.max(0, COMMON_GLYPH_WIDTH - glyphWidth));
   if (width < PREFIX_WIDTH + 1) {
-    return [[{ text: " ", color: "dim" }, { text: glyph + glyphPad, color: "dim" }]];
+    return [[{ text: glyph + glyphPad, color: "dim" }]];
   }
   const titleColumns = width - PREFIX_WIDTH;
   return wrapDisplayText(text, titleColumns).map((chunk, index): DisplayLine =>
     index === 0
       ? [
-          { text: " ", color: "dim" },
           { text: glyph + glyphPad, color: "dim" },
           { text: " ".repeat(COLUMN_GAP_COLUMNS), color: "dim" },
           { text: chunk, color: "dim" },
@@ -564,11 +644,11 @@ function fillBlocks(ordered: readonly LayoutBlock[], available: number): FillRes
 /**
  * 渲染 activity 条目行（通用入口，冻结签名）。
  * - 行先按类型固定顺序稳定排序（subagent → bash_async → scheduler，同类型保持给定次序）；
- * - 统一左基线：选择 cell(col1) + 公共 glyph cell(col2 起) + gap，标题列 = 3 + 公共 glyph 宽；
+ * - 统一左基线：公共 glyph cell(col1 起) + gap，标题列 = 2 + 公共 glyph 宽；
  * - 状态是本帧公共右列（右边界 = width）：首行标题补空格右对齐，标题/状态间隔 >= 2 列；
  *   窄宽转 stacked `状态：<state>` 挂标题列；极窄逐级 glyph-only 降级；
  * - 标题按 visibleWidth 词边界优先挂起换行，续行对齐标题列、不保留断点空格；
- * - selection 为精确 row key，命中行选择 cell 显示 `›`，其余留空；
+ * - selection 仍按精确 row key 传递，但主 footer 不绘制选择列；
  * - width<=0 返回 []，任何行可见宽度不越界；只生成新显示串，raw 行对象/label/state 不写回。
  */
 export function renderActivityRows(
@@ -583,7 +663,7 @@ export function renderActivityRows(
   const stateWidth = frameStateWidth(ordered.map((row) => toEntryDisplay(row)));
   const lines: string[] = [];
   for (const row of ordered) {
-    const block = composeEntryBlock(toEntryDisplay(row), columns, row.key === selection, stateWidth);
+    const block = composeEntryBlock(toEntryDisplay(row), columns, stateWidth);
     for (const line of block) lines.push(renderSegments(line, theme));
   }
   return lines;
@@ -617,6 +697,8 @@ export function renderActivityLayout(input: ActivityLayoutInput): ActivityLayout
   const terminalRows = normalizeCount(input?.terminalRows);
   const theme = input?.theme;
   const selection = input?.selection;
+  // selected key 仍由 presenter 保留（详情首行/关闭后重开依赖它），主 footer 不再绘制选择列。
+  void selection;
   const meta = input?.meta;
   const budget = Math.max(0, terminalRows - MAIN_VIEW_RESERVED_BOTTOM_ROWS);
   const mainRows = orderRows(collectPlacement(input?.rows, "main"));
@@ -653,7 +735,7 @@ export function renderActivityLayout(input: ActivityLayoutInput): ActivityLayout
   const blocks: LayoutBlock[] = [];
   for (const row of mainRows) {
     blocks.push({
-      lines: composeEntryBlock(toEntryDisplay(row), width, row.key === selection, stateWidth),
+      lines: composeEntryBlock(toEntryDisplay(row), width, stateWidth),
       isEntry: true,
       kind: row.kind,
     });

@@ -1,5 +1,7 @@
 // 统一执行计划 F1（docs/plans/2026-10-15-runtime-closeout.md §2 冻结显示合同）验收：
 // 统一左基线 / 状态公共右列 / 词边界优先换行 / 元数据不留空槽 / 公平完整 block 预算。
+// 单任务卡（subagent/bash_async/scheduler）显示合同为两物理行摘要：
+// docs/investigations/2026-10-27-background-footer-two-row-limit.md。
 //
 // 本文件是纯 display fixture 验证：所有输入都是冻结的显示 fixture，不充当 production
 // 数据来源证明；不启动真实 Host/任务/终端，不读取 session/settings，不发消息。
@@ -11,7 +13,9 @@
 //   - 前导空格/换行边界空白消费（续行不以前导空格开始）；
 //   - ASCII 词、长路径、CJK、ZWJ emoji、ANSI/C0 清理、双空格；
 //   - selected/unselected 单选择 cell；三 kind 公共 glyph cell 与标题列公式 3+glyphWidth；
-//   - state 超宽转 stacked `状态：` 挂标题列；极窄 glyph-only 降级；
+//   - 单任务卡最多两物理行：inline 标题最多 2 行 + 首行状态右列；stacked 标题 1 行 +
+//     状态 1 行；无状态标题最多 2 行；真实截短字段尾 `…`，未截（含恰两行）不加；
+//   - state 超宽转 stacked：标题在前、状态行挂标题列且真实截短尾 `…`；极窄 glyph-only 降级；
 //   - 元数据连续渲染（provider/model 左 + thinking 右；放不下分别换行 col1），无空槽；
 //   - 三 kind 同帧可见 + 预算紧时每 kind 首个完整 block 的公平策略、整块 overflow；
 //   - widths {0,1,3,12,20,40,78,80,120} × heights {0,4,7,10,24} 不越界/不超预算/确定性；
@@ -49,7 +53,7 @@ const META = Object.freeze({
 
 // §2 冻结网格常量（与 layout 内部一致；fixture 环境三 glyph 宽均为 1 → 公共 glyph cell 1）。
 const GLYPH_CELL = 1;
-const PREFIX_WIDTH = 1 + GLYPH_CELL + 1; // 选择 cell + glyph cell + gap
+const PREFIX_WIDTH = GLYPH_CELL + 1; // glyph cell + gap
 const PREFIX_SPACES = " ".repeat(PREFIX_WIDTH);
 
 /** 主题替身：记录 (color, text) 调用并原样返回文本，不影响可见宽度。 */
@@ -115,37 +119,29 @@ test("§2 左基线网格：单选择 cell + 公共 glyph cell + gap，标题列
   // 类型固定顺序：subagent×2 → bash_async×2 → scheduler×2。
   const orderedGlyphs = ["●", "●", "⌘", "⌘", "⏱", "⏱"];
   const orderedStates = ["待处置", "运行中", "成功(exit 0)", "失败(exit 1)", "等待触发", "已禁用"];
+  // 类型 glyph 位于 col1，gap 位于 col2，标题从 col3 开始。
   first.forEach((line, index) => {
-    assert.equal(line[0], " ", `行 ${index} col1 是单选择 cell（未选中空格）`);
-    assert.equal(line[1], orderedGlyphs[index], `行 ${index} col2 是类型图标`);
-    assert.equal(line[2], " ", `行 ${index} col3 是 1 列 gap`);
+    assert.equal(line[0], orderedGlyphs[index], `行 ${index} col1 是类型图标`);
+    assert.equal(line[1], " ", `行 ${index} col2 是 1 列 gap`);
     assert.equal(visibleWidth(line), 80, `状态真右列右对齐到 width：${line}`);
     assert.ok(line.endsWith(orderedStates[index]), `行 ${index} 状态在首行真右列`);
     const stateIndex = line.lastIndexOf(orderedStates[index]);
     assert.equal(line.slice(stateIndex - 2, stateIndex), "  ", `标题/状态间隔>=2 列：${line}`);
   });
-  assert.equal(first[0].indexOf("任务A"), PREFIX_WIDTH, "标题列 = 3 + glyphWidth（col4）");
+  assert.equal(first[0].indexOf("任务A"), PREFIX_WIDTH, "标题列 = 2 + glyphWidth（col3）");
   assert.equal(first[2].indexOf("命令B"), PREFIX_WIDTH);
   assert.equal(first[4].indexOf("定时C"), PREFIX_WIDTH);
 });
 
-test("选择 cell：selection 按 key 精确命中 col1 显示 ›，其余行留空且同网格", () => {
+test("selected key 不改变主 footer 列布局，任务类型 glyph 保持可见", () => {
   const rows = [
     row("subagent", "subagent:a1", "任务A"),
     row("bash_async", "bash_async:b1", "命令B"),
     row("scheduler", "scheduler:s1", "定时C"),
   ];
-  const lines = renderActivityRows(rows, 80, "bash_async:b1");
-  const selected = lines.find((line) => line.includes("命令B"));
-  assert.ok(selected.startsWith("›⌘ "), "选中行 col1=›、col2=glyph、col3=gap");
-  for (const line of lines) {
-    if (!line.includes("命令B")) {
-      assert.ok(line.startsWith(" "), "未选中行选择 cell 留空");
-      assert.ok(!line.includes("›"), "未选中行不出现选择标记");
-    }
-  }
-  const unselected = renderActivityRows(rows, 80);
-  assert.ok(unselected.every((line) => line.startsWith(" ")), "无 selection 时全部留空");
+  const selected = renderActivityRows(rows, 80, "bash_async:b1");
+  assert.deepEqual(selected, renderActivityRows(rows, 80), "selected key 仍可传递但不绘制选择列");
+  assert.ok(selected.every((line) => !line.includes("›")), "主 footer 不绘制选择箭头");
 });
 
 test("截图同形 label（width 78）：(delegate) 不拆、状态真右列、续行同标题列无断点空格", () => {
@@ -171,7 +167,7 @@ test("截图同形 label（width 78）：(delegate) 不拆、状态真右列、�
   assert.ok(lines[0].endsWith("codex-pool/gpt-6.1-sol · low · 1.4%/900k"), "任意provider/model均合并到右侧");
   assert.equal(lines[1], "", "常驻元数据后恰一个空行");
   const entryFirst = lines[2];
-  assert.ok(entryFirst.startsWith("›● "), "选中 + glyph + gap");
+  assert.ok(entryFirst.startsWith("● "), "glyph + gap");
   assert.equal(visibleWidth(entryFirst), 78, "状态右对齐到 78 列右边界");
   assert.ok(entryFirst.endsWith("运行中"), "状态在首行真右列");
   assert.ok(!entryFirst.includes("(delegate)"), "首行标题不含被换行的词");
@@ -207,7 +203,12 @@ test("词边界优先：ASCII 词/完整词不拆，换行边界空白被消费�
   const longToken = "x".repeat(40);
   const broken = renderActivityRows([row("subagent", "s:3", longToken, "运行中")], 20);
   for (const line of broken) assert.ok(visibleWidth(line) <= 20, "长 token 字素兜底不越界");
-  assert.equal(titleBody(broken), longToken, "长 token 字素兜底拼回原文不丢字");
+  assert.equal(broken.length, 2, "单任务卡最多两物理行（首行标题+状态，次行标题尾段）");
+  const summarized = titleBody(broken);
+  assert.ok(summarized.endsWith("…"), "真实丢弃尾部时最后保留行尾 …");
+  const keptToken = summarized.slice(0, -1).replace(/\s+/g, "");
+  assert.ok(keptToken.length > 0 && longToken.startsWith(keptToken), "保留原 token 的安全字素前缀");
+  assert.ok(keptToken.length < longToken.length, "40 字符长 token 真实截短，不全文多行铺开");
 });
 
 test("CJK/emoji ZWJ/ANSI/C0 清理只生成新显示串：raw label/state 不写回", () => {
@@ -235,30 +236,38 @@ test("CJK/emoji ZWJ/ANSI/C0 清理只生成新显示串：raw label/state 不写
   ]);
 });
 
-test("CJK 长 label 换行不丢字：续行对齐标题列，宽度不越界", () => {
+test("CJK 长 label 两行摘要：真截尾 …、续行对齐标题列，宽度不越界", () => {
   const label = "部署".repeat(15); // 60 终端列
   const lines = renderActivityRows([row("subagent", "subagent:1", label)], 30);
-  assert.ok(lines.length > 1, "长 CJK label 换行");
+  assert.equal(lines.length, 2, "长 CJK label 压成两行摘要（标题首行 + 标题尾段）");
   for (const line of lines) assert.ok(visibleWidth(line) <= 30, `行宽 ${visibleWidth(line)} 不越界`);
   assert.ok(lines[0].endsWith("运行中"), "首行状态真右列");
   for (const continuation of lines.slice(1)) {
     assert.ok(continuation.startsWith(PREFIX_SPACES), "续行挂起缩进 = 前缀宽");
   }
-  assert.equal(titleBody(lines), label, "换行不丢字：分段拼回等于原 label");
+  const summarized = titleBody(lines);
+  assert.ok(summarized.endsWith("…"), "CJK 标题真实截短时最后保留行尾 …");
+  const keptPrefix = summarized.slice(0, -1).replace(/\s+/g, "");
+  assert.ok(keptPrefix.length > 0 && label.startsWith(keptPrefix), "保留原 label 的安全字素前缀（不拆字素）");
+  assert.ok(keptPrefix.length < label.length, "60 列标题真实截短，不全文多行铺开");
 });
 
-test("state 超宽转 stacked：独立 `状态：` 行挂标题列并换行，不静默隐藏", () => {
+test("state 超宽转 stacked：标题 1 行 + 状态 1 行，状态真实截短尾 …", () => {
   const longState = "等待触发中且非常长的状态词";
   const lines = renderActivityRows([row("scheduler", "s:1", "每日巡检", longState)], 20);
-  assert.ok(lines.length >= 2, "stacked 至少标题行 + 状态行");
+  assert.equal(lines.length, 2, "stacked 恰两行：标题行 + 状态行");
   assert.ok(!lines[0].includes(longState), "首行不夹状态");
   const stateBody = lines.slice(1).map((line) => line.slice(PREFIX_WIDTH)).join("");
-  assert.equal(stateBody, `状态：${longState}`, "独立状态行挂标题列、全文可见（换行不丢字）");
+  assert.ok(stateBody.startsWith("状态："), "宽 20 下状态行保留 `状态：` 装饰前缀");
+  assert.ok(stateBody.endsWith("…"), "状态字段真实截短时行尾 …");
+  const keptState = stateBody.slice("状态：".length, -1);
+  assert.ok(keptState.length > 0 && longState.startsWith(keptState), "保留原状态文本的安全前缀");
+  assert.ok(keptState.length < longState.length, "超宽状态真实截短，不全文多行铺开");
   assert.ok(lines[1].startsWith(`${PREFIX_SPACES}状态：`), "状态行前缀 = 标题列");
   for (const line of lines) assert.ok(visibleWidth(line) <= 20, "stacked 不越界");
 });
 
-test("极窄降级阶梯：width 0 空 / 1 glyph-only / 3 选择cell+glyph，均不越界", () => {
+test("极窄降级阶梯：width 0 空 / 1 glyph-only / 3 仅 glyph cell，均不越界", () => {
   const rows = [
     row("subagent", "subagent:1", "任务A"),
     row("bash_async", "bash_async:1", "命令B"),
@@ -267,7 +276,7 @@ test("极窄降级阶梯：width 0 空 / 1 glyph-only / 3 选择cell+glyph，均
   assert.deepEqual(renderActivityRows(rows, 0), [], "width 0 返回空显示");
   assert.deepEqual(renderActivityRows(rows, 1), ["●", "⌘", "⏱"], "width 1 glyph-only 降级");
   const three = renderActivityRows(rows, 3, "bash_async:1");
-  assert.deepEqual(three, [" ●", "›⌘", " ⏱"], "width 3 选择 cell + glyph，无标题列");
+  assert.ok(three.every((line) => !line.includes("›")), "窄宽不绘制选择箭头");
   for (const width of [1, 3]) {
     for (const line of renderActivityRows(rows, width)) {
       assert.ok(visibleWidth(line) <= width, `width ${width} 行宽不越界`);
@@ -289,9 +298,9 @@ test("三 kind 同帧可见：充足预算按类型固定顺序整块渲染，gl
   assert.equal(lines.length, 5, "压缩单行元数据 + 分隔空行 + 三 kind 各 1 行");
   assert.ok(lines[0].startsWith("/tmp/proj") && lines[0].endsWith("anthropic/claude-test · medium · 12.3%/1.0M"), "第一行压缩元数据");
   assert.equal(lines[1], "");
-  assert.ok(lines[2].startsWith(" ● 任务A"), "subagent 行网格");
-  assert.ok(lines[3].startsWith(" ⌘ 命令B"), "bash 行网格");
-  assert.ok(lines[4].startsWith(" ⏱ 定时C"), "scheduler 行网格");
+  assert.ok(lines[2].startsWith("● 任务A"), "subagent 行网格");
+  assert.ok(lines[3].startsWith("⌘ 命令B"), "bash 行网格");
+  assert.ok(lines[4].startsWith("⏱ 定时C"), "scheduler 行网格");
   const withThird = layoutWith(rows, { terminalRows: 12 });
   assert.ok(withThird.lines.some((line) => line.includes("定时C")), "三 kind 同帧可见");
   assert.equal(geometry.overflowCount, 0);
@@ -303,14 +312,14 @@ test("元数据连续渲染不留空 activity 槽：放不下时分别换行且 
   assert.ok(fit.lines.some((line) => line.includes("anthropic/claude-test")), "provider/model保留");
   assert.ok(fit.lines.some((line) => line.includes("medium")), "thinking保留");
   assert.ok(fit.lines.some((line) => line.includes("12.3%/1.0M")), "context保留");
-  assert.ok(fit.lines.some((line) => line.startsWith(" ● ")), "活动区紧跟元数据连续绘制");
+  assert.ok(fit.lines.some((line) => line.startsWith("● ")), "活动区紧跟元数据连续绘制");
   assert.ok(!fit.lines.some((line) => line.trim() === "(anthropic) claude-test"), "不存在旧的第二元数据槽行");
 
   const split = layoutWith(rows, { width: 30 });
   assert.ok(split.lines[0].includes("anthropic/claude-test") || split.lines[1].includes("anthropic/claude-test"), "窄宽仍保留provider/model");
   assert.ok(split.lines.some((line) => line.includes("medium")), "窄宽仍保留thinking");
   assert.ok(split.lines.some((line) => line.includes("12.3%/1.0M")), "窄宽仍保留context");
-  assert.ok(split.lines.some((line) => line.startsWith(" ● ")), "活动区仍在元数据之后");
+  assert.ok(split.lines.some((line) => line.startsWith("● ")), "活动区仍在元数据之后");
   for (const line of split.lines) assert.ok(visibleWidth(line) <= 30, "换行后不越界");
 });
 
@@ -385,7 +394,7 @@ test("widths × heights 矩阵：不越界、不超预算、确定性、预算 0
   }
 });
 
-test("resize：宽度变化后内容重新适配，行宽始终不越界且换行不丢字", () => {
+test("resize：宽度变化后内容重新适配，行宽始终不越界且真实截短尾 …", () => {
   const label = "命令".repeat(10); // 40 终端列
   const rows = [row("subagent", "subagent:1", label)];
   const wide = layoutWith(rows, { width: 80 });
@@ -394,12 +403,18 @@ test("resize：宽度变化后内容重新适配，行宽始终不越界且换�
   for (const line of narrow.lines) assert.ok(visibleWidth(line) <= 24);
   assert.equal(wide.lines.length, 3, "宽屏：meta 1 行 + 分隔空行 + 单行条目");
   assert.ok(wide.lines[2].includes(label) && wide.lines[2].endsWith("运行中"), "宽屏条目状态右列");
+  assert.ok(!wide.lines[2].includes("…"), "宽屏单行完整标题不假加省略号");
   assert.ok(narrow.lines.length > wide.lines.length, "窄屏换行后行数增加");
   assert.ok(narrow.lines.some((line) => line.includes("/tmp/proj")), "窄宽仍保留cwd");
   assert.ok(narrow.lines.some((line) => line.includes("anthropic/claude-test")), "窄宽仍保留provider/model");
   assert.ok(narrow.lines.some((line) => line.includes("12.3%/1.0M")), "窄宽仍保留context");
-  const entryLines = narrow.lines.slice(narrow.lines.findIndex((line) => line.startsWith(" ● ")));
-  assert.equal(titleBody(entryLines), label, "resize 后换行不丢字");
+  const entryLines = narrow.lines.slice(narrow.lines.findIndex((line) => line.startsWith("● ")));
+  assert.equal(entryLines.length, 2, "窄屏单任务卡压成两行");
+  const summarized = titleBody(entryLines);
+  assert.ok(summarized.endsWith("…"), "窄屏真实截短时最后保留行尾 …");
+  const keptPrefix = summarized.slice(0, -1).replace(/\s+/g, "");
+  assert.ok(keptPrefix.length > 0 && label.startsWith(keptPrefix), "保留原 label 的安全前缀");
+  assert.ok(keptPrefix.length < label.length, "窄屏真实截短，不全文多行铺开");
 });
 
 test("超多 overflow：主视图预算 terminalRows-6，最后一行 col1 显示还有 N 项 · Alt+O", () => {
@@ -428,7 +443,7 @@ test("recent 汇总单行：main 优先逐条显示，recent 按 key 去重且�
   const { lines } = layoutWith(rows);
   const recentLines = lines.filter((line) => line.includes("recent"));
   assert.equal(recentLines.length, 1, "recent 折叠为单行提示");
-  assert.ok(recentLines[0].startsWith(" ◯ "), "信息行保留空选择 cell + 图标");
+  assert.ok(recentLines[0].startsWith("◯ "), "信息行 glyph + gap");
   assert.ok(recentLines[0].includes("recent 2"), "N 按统一列表 key 去重");
   assert.equal(recentLines[0].indexOf("recent 2"), PREFIX_WIDTH, "信息行文本对齐标题列");
   assert.ok(!lines.some((line) => line.includes("旧任务")), "recent 不逐条进入主视图");
@@ -575,7 +590,7 @@ test("theme 端口：选择标记 accent、其余 dim；主题替换不改变可
   const theme = createRecordingTheme();
   const themed = layoutWith(rows, { selection: "subagent:1", theme });
   assert.deepEqual(themed.lines, plain.lines, "主题替身原样返回文本时输出一致");
-  assert.ok(theme.calls.some(([color, text]) => color === "accent" && text === "›"), "选中标记走 accent");
+  assert.ok(!theme.calls.some(([color]) => color === "accent"), "主 footer 不再为选择箭头着色");
   assert.ok(theme.calls.some(([color, text]) => color === "dim" && text === plain.lines[0]), "元数据行走 dim");
   for (const line of themed.lines) assert.ok(visibleWidth(line) <= 80);
 });

@@ -9,16 +9,15 @@
 // 职责与边界：
 // - footer 组件：main mode 调用 `renderActivityLayout`（meta 从 ctx.cwd/model/
 //   getContextUsage()/thinkingLevel 投影；source availability 经 registry.sourceSnapshot
-//   出独立状态行），detail mode 固定最多 3 行导航；不改写任何 raw 行对象。
-//   detail mode 首行承载选中项身份（`n/N glyph label · state`），并把行上的
-//   只读展示投影 `metaLabel`（如 subagent 的模型/thinking）追加在同一行（详情面
-//   首行已不再渲染身份行，信息搬到 footer）；超宽由 renderActivityDetailTextLine
-//   按终端列截断，不挤掉后两行（位置行 + 键位提示）。
+//   出独立状态行），detail mode footer 按终端列换行，实际行数由 shell renderer 计算；
+//   正文 reserve 与 overlay margin 使用同一事实，不改写任何 raw 行对象。
+//   detail mode 首行承载选中项身份（`n/N glyph label` + 非「运行中」状态 + 可选模型/
+//   thinking 投影；详情面首行已不再渲染身份行，信息搬到 footer）；只有该身份行按终端列
+//   完整换行，位置行与键位提示行恒为单行，不以省略号截断身份信息。
 // - openDetails：terminalRows<=4 不挂 overlay、不改 editor/draft（shell 标记 too-small，
 //   恢复尺寸后可重开）；否则保存 editor/draft（错误隔离，任一获取/替换失败保持关闭并
-//   固定文案 notify 一次），经 `ctx.ui.custom` 以静态 overlay options（margin.bottom=4、
-//   maxHeight 100%）挂载详情壳，每 render 按 terminalRows 实时计算正文行数，不使用
-//   动态 options 函数、不常规 remount。
+//   固定文案 notify 一次），经 `ctx.ui.custom` 挂载详情壳；每 render 按动态 footer reserve
+//   实时计算正文行数，不使用常规 remount。
 // - registry 订阅：source 失效/同 kind 注册替换时刷新 footer 并让 shell 重取详情。
 // - 主题身份变化（footer factory 以新 theme 对象重入）→ shell 重取详情保 anchor。
 //
@@ -45,10 +44,7 @@ import type {
 } from "pi-subagents-enhanced/tui/background-activity";
 import type { ExtensionContext, KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import {
-  ACTIVITY_KIND_GLYPHS,
   ACTIVITY_KIND_ORDER,
-  DETAIL_FOOTER_MAX_ROWS,
-  DETAIL_RESERVED_BOTTOM_ROWS,
   TOO_SMALL_TERMINAL_ROWS,
   renderActivityLayout,
 } from "./layout.ts";
@@ -56,7 +52,6 @@ import type { ActivityFooterMeta, ActivitySourceStatus, ActivityTheme } from "./
 import {
   createActivityDetailShell,
   createReadOnlyActivityEditorFactory,
-  renderActivityDetailTextLine,
 } from "./detail-controller.ts";
 import type { ActivityDetailShell, ActivityTuiBindings } from "./detail-controller.ts";
 
@@ -90,39 +85,6 @@ export function activityPresenterFactoryFor(
   return (bindings: FooterBindings): MountedActivityView =>
     createActivityPresenter(bindings, uiDependencies);
 }
-
-/**
- * 详情 overlay 静态挂载参数：row 0/col 0/全宽/maxHeight 100%/margin.bottom=4。
- * margin.bottom=4 已为 overlay 下方详情 footer（最多 3 行）+ separator 预留；
- * 不使用动态 options 函数，resize 由每 render 实时按 terminalRows 适应。
- */
-const DETAIL_OVERLAY_MOUNT_OPTIONS: {
-  overlay: boolean;
-  overlayOptions: {
-    row: number;
-    col: number;
-    width: "100%";
-    maxHeight: "100%";
-    margin: { bottom: number };
-  };
-  onHandle: (handle: OverlayHandle) => void;
-} = {
-  overlay: true,
-  overlayOptions: {
-    row: 0,
-    col: 0,
-    width: "100%",
-    maxHeight: "100%",
-    margin: { bottom: DETAIL_RESERVED_BOTTOM_ROWS },
-  },
-  onHandle: (handle) => {
-    try {
-      handle?.focus?.();
-    } catch {
-      // focus 失败不阻断挂载。
-    }
-  },
-};
 
 /** 每次 open 的壳 Component 包装（tui.md：custom 组件实例属于一次交互；壳 controller 跨交互复用）。 */
 function createOpenShellComponent(shell: ActivityDetailShell): {
@@ -305,34 +267,42 @@ export function createActivityPresenter(
   };
 
   const renderDetailFooterLines = (width: number, theme: ActivityTheme | undefined): string[] => {
-    const entries = shell.entries();
-    const selected = shell.selectedKey();
-    const index = entries.findIndex((entry) => entry.key === selected);
-    const lines: string[] = [];
-    if (index === -1) {
-      lines.push("当前无后台活动");
-    } else {
-      const entry = entries[index];
-      // `metaLabel` 是行上的只读展示投影（如 subagent 的模型/thinking）；只有存在时
-      // 才追加 ` · <meta>`，避免尾部悬空分隔符。
-      const metaLabel =
-        typeof entry.metaLabel === "string" && entry.metaLabel !== "" ? ` · ${entry.metaLabel}` : "";
-      lines.push(
-        `${index + 1}/${entries.length} ${ACTIVITY_KIND_GLYPHS[entry.kind] ?? "◇"} ${
-          entry.label
-        } · ${entry.stateLabel}${metaLabel}`,
-      );
-    }
-    const position = shell.position();
-    lines.push(
-      `行 ${position.start}-${position.end}/${position.total} · ${
-        position.autoFollow ? "跟随底部" : "手动滚动"
-      } · x ${shell.expanded() ? "收起" : "展开"}`,
-    );
-    lines.push("‹ › 切换任务 · ↑↓ jk 滚动 · PgUp/PgDn/Home/End 翻页 · Esc/Alt+O 关闭");
-    return lines
-      .slice(0, DETAIL_FOOTER_MAX_ROWS)
-      .map((line) => renderActivityDetailTextLine(line, width, theme, tui));
+    return shell.renderFooter(width, theme);
+  };
+
+  /**
+   * 详情 overlay 挂载参数：row 0/col 0/全宽/maxHeight 100%，margin.bottom 为动态 getter。
+   *
+   * 与安装版 pi-tui 1.4.0 核对依据（不按旧假设）：
+   * - `node_modules/@earendil-works/pi-tui/dist/tui.js:861-870` `resolveOverlayLayout`
+   *   每次调用都重读 `opt.margin.bottom`（`Math.max(0, margin.bottom ?? 0)`），不缓存；
+   * - 同文件 `:1001`/`:1009` 在每次 render 合成 overlay 前各解析一次布局，getter 每帧被求值；
+   * - `node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js:2325-2333`
+   *   的 `resolveOptions()` 只在挂载时调用一次：`overlayOptions: () => ...` 函数拿不到逐帧
+   *   动态，逐帧动态只能靠选项对象上的 getter。
+   * 所以 margin.bottom = shell.footerReservedBottomRows()（footer 实际行数 + separator），
+   * 与正文 reserve 同源，resize/换行变化同帧生效。
+   */
+  const detailOverlayMountOptions = {
+    overlay: true,
+    overlayOptions: {
+      row: 0,
+      col: 0,
+      width: "100%" as const,
+      maxHeight: "100%" as const,
+      margin: {
+        get bottom(): number {
+          return shell.footerReservedBottomRows();
+        },
+      },
+    },
+    onHandle: (handle: OverlayHandle) => {
+      try {
+        handle?.focus?.();
+      } catch {
+        // focus 失败不阻断挂载。
+      }
+    },
   };
 
   const createFooter: MountedActivityView["createFooter"] = (tui, theme, footerData) => {
@@ -428,7 +398,7 @@ export function createActivityPresenter(
         return createOpenShellComponent(shell);
       };
       try {
-        const result = ctx.ui.custom<void>(factory, DETAIL_OVERLAY_MOUNT_OPTIONS);
+        const result = ctx.ui.custom<void>(factory, detailOverlayMountOptions);
         if (result && typeof result.then === "function") {
           result.then(
             () => undefined,

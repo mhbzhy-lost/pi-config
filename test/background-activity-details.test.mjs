@@ -405,7 +405,7 @@ test("main footer：cwd/context、连续元数据行、entry 块与 selection �
   fixture.overlayCalls[0].component.handleInput(ESC);
   const after = footer.render(80);
   const bashLine = after.find((line) => line.includes("命令B"));
-  assert.ok(bashLine.startsWith("›⌘ "), `关闭后主视图选中 B（§2 单选择 cell col1）：${bashLine}`);
+  assert.ok(bashLine.startsWith("⌘ "), `关闭后主视图选中 B（selected key 保留但无选择列）：${bashLine}`);
   assert.equal(JSON.stringify([subagent.source.snapshot(), bash.source.snapshot()]), rowsBefore, "raw snapshot 不变");
 });
 
@@ -864,6 +864,7 @@ test("provider render/invalidate 仅 display：ANSI 保留、按宽截断补空�
   await flush();
   const lines = fixture.shell.render(40);
   // 标题 1 行（滚动信息）+ 正文 3 行（顶部对齐）+ 补空 16 行 = 20。
+  // 位置行/键位提示行恒为单行（不参与换行展开），width=40 时 footer 仍为 3 行、动态 reserve 为 4。
   assert.equal(lines.length, 20);
   const bodyLines = lines.slice(1);
   for (const line of bodyLines) {
@@ -1030,7 +1031,7 @@ test("geometry：正文预算 = terminalRows-4-标题实际行数，不双扣 fo
   fixture.openShell();
   subagent.resolveNext(createCountedComponent(10, "A1").component);
   await flush();
-  assert.equal(fixture.shell.render(80).length, 20, "24 行 → 20（1 滚动信息行 + 19 正文），不扣 footer");
+  assert.equal(fixture.shell.render(40).length, 20, "宽度 40 时单行 chrome 不涨 reserve，正文不重叠");
   const headerOnly = fixture.shell.render(80).slice(0, 2);
   assert.equal(headerOnly[0].includes("›"), false, `标题不得再有身份行（›）：${headerOnly[0]}`);
   assert.equal(headerOnly[0].includes("任务A"), false, `标题不得再渲染 label：${headerOnly[0]}`);
@@ -1086,13 +1087,13 @@ test("header 不渲染身份行：label/state/模型全由 detail footer 首行�
   // 同一事实搬到 detail footer 首行（`n/N glyph label · state` + 可选 ` · metaLabel`）。
   const footerLines = footer.render(80);
   const footerFirst = footerLines[0];
-  assert.ok(footerFirst.startsWith("1/2 ● 任务M · 运行中"), `footer 首行承载身份：${footerFirst}`);
+  assert.equal(footerFirst, "1/2 ● 任务M · 模型 (codex-pool) gpt-6.1-sol · thinking: high", `footer 首行承载身份：${footerFirst}`);
   assert.ok(
     footerFirst.includes("模型 (codex-pool) gpt-6.1-sol") && footerFirst.includes("thinking: high"),
     `footer 首行承载模型/thinking：${footerFirst}`,
   );
   // 追加模型段不得挤掉既有 3 行（位置行 + 键位提示行）。
-  assert.equal(footerLines.length, DETAIL_FOOTER_MAX_ROWS, "detail footer 仍为最多 3 行");
+  assert.equal(footerLines.length, 3, "宽度 80 下详情 footer 仍为 3 行");
   assert.ok(footerLines[1].includes("行 1-4/4") && footerLines[1].includes("x 展开"), `位置行仍在：${footerLines[1]}`);
   assert.ok(footerLines[2].includes("Esc/Alt+O 关闭"), `键位提示行仍在：${footerLines[2]}`);
   // 切到没有 metaLabel 的行：footer 跟随新身份，不出现模型段，也不留悬空 `·`。
