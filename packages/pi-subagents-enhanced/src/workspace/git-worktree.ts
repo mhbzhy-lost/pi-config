@@ -154,6 +154,16 @@ function removeUntrackedRuntimeMetadata(cwd) {
   }
 }
 
+// 未跟踪且未被 ignore 的文件属于用户数据：不得被销毁授权静默删除。
+// 排除口径与 userStatus 保持一致：runtime 元数据与 legacy 路径不算用户数据。
+function untrackedUserFiles(cwd) {
+  const excluded = [".pi", ".pi-subagents", ".state/subagent-dispatch", ".state/worktree-lifecycle", ...RUNTIME_METADATA_ROOTS];
+  return gitRaw(cwd, ["ls-files", "--others", "--exclude-standard", "-z"])
+    .split("\0")
+    .filter(Boolean)
+    .filter((entry) => !excluded.some((prefix) => entry === prefix || entry.startsWith(`${prefix}/`)));
+}
+
 function originPreflight(record: ManagedWorkspaceRecord, { exactBase = false, requireClean = true }: { exactBase?: boolean; requireClean?: boolean } = {}) {
   const root = primaryOrigin(record);
   const ref = currentRef(root);
@@ -480,6 +490,12 @@ export function inspectManagedIntegrationAdmission(record: ManagedWorkspaceRecor
   return { inspection: source, targetHead: git(root, ["rev-parse", "HEAD^{commit}"]) };
 }
 
+// 回收语义：本函数的所有调用方（discardForLease、recoverDisposition 的非 preserve 分支、
+// releaseForLease 的 preserved/cleanup-debt 终局回收、applyPreparedDisposition 的非 preserve 结算）
+// 均已获得显式销毁授权，因此 worktree 移除带 --force：tracked 未提交修改属于工作区自身产物，
+// 在销毁授权范围内，force 删除符合 discard/release 语义，也与下方 `branch -D` 的强删语义一致。
+// 分级保护：非 runtime 元数据的未跟踪用户文件仍 fail closed（数据保护合同），不随 worktree 销毁；
+// dirty submodule 等残余失败仍由 classifyGitFailure 分类上报，不使用 `--force --force`。
 export function releaseManagedGitWorkspace(record: ManagedWorkspaceRecord, { expectedHead }: { expectedHead?: string } = {}) {
   const exists = pathExists(record.path);
   const registration = registrationFor(record);
@@ -489,7 +505,15 @@ export function releaseManagedGitWorkspace(record: ManagedWorkspaceRecord, { exp
     const identity = inspectIdentity(record);
     if (expectedHead && identity.headCommit !== expectedHead) throw failure("MANAGED_WORKSPACE_IDENTITY", "workspace HEAD changed before release");
     removeUntrackedRuntimeMetadata(identity.workspacePath);
-    const removeArgs = ["worktree", "remove", record.path] as const;
+    const removeArgs = ["worktree", "remove", "--force", record.path] as const;
+    // 分级回收：仅有 tracked 未提交修改时直接 force 删除；若存在非 runtime 元数据的
+    // 未跟踪用户文件，则 fail closed 为 cleanup-debt，保持“dirty workspace 不得被
+    // discard 静默销毁”的既有合同（见 test/managed-workspace-service.integration.mjs）。
+    const untracked = untrackedUserFiles(identity.workspacePath);
+    if (untracked.length) {
+      const detail = classifyGitFailure({ args: removeArgs, cause: new Error("untracked user files block destructive release"), porcelain: untracked.map((entry) => `?? ${entry}`).join("\n") });
+      throw failure("MANAGED_WORKSPACE_GIT", `git ${detail.args.join(" ")} blocked: a dirty workspace must never be silently destroyed by discard; untracked=${untracked.length}; category=${detail.category}`, undefined, detail);
+    }
     try { git(record.request.originRoot, removeArgs); }
     catch (cause) {
       let porcelain: string | undefined;

@@ -137,6 +137,11 @@ test("discard succeeds with tracked .pi/agents project config and only runtime m
   const run = { runId: "run-pi-config", asyncDir: join(f.root, "async-pi-config") };
   service.bindRun({ workspaceId: active.workspaceId, run });
   const proof = observedProof(run);
+  // 回收回归：discard 是显式销毁授权路径，worktree 带未提交修改时也必须能回收；
+  // 曾因 `git worktree remove` 缺少 --force 使 disposing 永久卡死。必须在签发
+  // disposition 前制造 dirty，避免快照哈希漂移。
+  await writeFile(join(active.path, ".pi", "agents", "executor.md"), "---\nname: executor\n---\ndirty: true\n");
+  assert.notEqual(git(active.path, "status", "--porcelain").trim(), "", "worktree 带未提交修改");
   const issued = service.issueDisposition({ workspaceId: active.workspaceId, terminalProof: proof });
   const discarded = service.dispose({ workspaceId: active.workspaceId, terminalProof: proof, disposition: "discard", reason: "test", actionToken: issued.actionToken });
   assert.equal(discarded.state, "released");
