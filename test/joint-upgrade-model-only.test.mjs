@@ -18,17 +18,19 @@ test('所有控制工具保持模型声明但codemode与executeTool均不可调�
     for (const name of ['scheduler_create', 'scheduler_list', 'scheduler_get', 'scheduler_delete']) api.registerTool({ name, label: name, description: name, parameters: Type.Object({}), execute: async () => ({ content: [{ type: 'text', text: 'fixture' }], details: undefined }) });
   } });
  }] }); t.after(() => h.close());
- // S4 硬切换：旧 union 名不再注册，新每操作独立工具全部 model-only。
+ // S4 硬切换与 C4 退役：旧 union 名与 roster 不再注册，每操作独立工具全部 model-only。
  // 本用例未注入 supervisorAdapter，因此三个 supervisor_request_* 不注册；
  // 'subagent_supervisor' 由本用例自行注册的旧 factory 定义提供。
  const names = [
-  'subagent_roster', 'subagent_start', 'subagent_run_status', 'subagent_run_steer',
+  'subagent_start', 'subagent_run_status', 'subagent_run_steer',
   'subagent_run_interrupt', 'subagent_run_resume', 'subagent_run_stop',
   'managed_workspace_list', 'managed_workspace_status', 'managed_workspace_dispose', 'managed_workspace_release',
   'subagent_supervisor', 'subagent_integration', 'scheduler_create', 'scheduler_list', 'scheduler_get', 'scheduler_delete',
  ];
- for (const legacy of ['subagent', 'subagent_worktree']) {
-  assert.equal(h.session.getActiveToolNames().includes(legacy), false, legacy + ': 旧 union 名不得仍注册为模型工具');
+ for (const legacy of ['subagent_roster', 'subagent', 'subagent_worktree']) {
+  assert.equal(h.session.getAllTools().some(tool => tool.name === legacy), false, legacy + ': 已退役工具不得注册');
+  assert.equal(h.session.getActiveToolNames().includes(legacy), false, legacy + ': 已退役工具不得保留模型声明');
+  assert.equal(h.session.getCallableToolNames().includes(legacy), false, legacy + ': 已退役工具不得隐藏为 nested 工具');
  }
  for (const name of names) {
   assert.ok(h.session.getActiveToolNames().includes(name), name + ': 保留模型声明');

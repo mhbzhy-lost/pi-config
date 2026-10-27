@@ -255,10 +255,10 @@ export function installAgentsShared({ extensionPath = "<src/agents-shared/index.
   return recorder;
 }
 
-export const SHARED_CHILD_BLOCK_OPEN = '<pi_child_execution_boundaries source="runtime">';
-export const GLOBAL_BLOCK_OPEN = '<pi_global_instructions source="PI_CODING_AGENT_DIR/AGENTS_GLOBAL.md">';
+export const SHARED_CHILD_BLOCK_OPEN = "<pi_child_execution_boundaries>";
+export const GLOBAL_BLOCK_OPEN = "<pi_global_instructions>";
 export const GLOBAL_BLOCK_CLOSE = "</pi_global_instructions>";
-export const SHARED_BLOCK_OPEN = '<pi_shared_instructions source="PI_CODING_AGENT_DIR/AGENTS_SHARED.md">';
+export const SHARED_BLOCK_OPEN = "<pi_shared_instructions>";
 
 /* -------------------------------------------------------------------------- */
 /* profile / SYSTEM.md 探针（只看仓库自有路径，不读真实用户配置）                 */
@@ -678,10 +678,17 @@ function scanSourceFile({ ts, relPath, text, extension, policy }) {
       );
       continue;
     }
-    // delete <options>.x / delete <options>[k]：TypeScript AST 使用独立 DeleteExpression。
+    // delete <options>.x / delete <options>[k]：只允许正规 sections 的字面成员撤回；
+    // 不放行 options 本体、guidelines 或计算键，保留完整替换策略的 fail-closed 边界。
     if (ts.isDeleteExpression(node)) {
       const operand = node.expression;
-      if ((ts.isPropertyAccessExpression(operand) || ts.isElementAccessExpression(operand)) && isOptionsTarget(operand.expression)) {
+      const isSectionMember = ts.isPropertyAccessExpression(operand) &&
+        ts.isPropertyAccessExpression(operand.expression) &&
+        operand.expression.name.text === "sections" &&
+        (isOptionsAliasIdentifier(operand.expression.expression) ||
+          (ts.isPropertyAccessExpression(operand.expression.expression) &&
+            operand.expression.expression.name.text === "systemPromptOptions"));
+      if (!isSectionMember && (ts.isPropertyAccessExpression(operand) || ts.isElementAccessExpression(operand)) && isOptionsTarget(operand.expression)) {
         fail(
           "delete-on-options-unclassified",
           node,

@@ -64,7 +64,7 @@ test("configured enhanced local package registers one authoritative subagent too
     const extensions = resourceLoader.getExtensions().extensions;
     const enhanced = extensions.filter((extension) => String(extension.path).includes("/packages/pi-subagents-enhanced/extensions/"));
     const legacy = extensions.filter((extension) => /\/pi\/extensions\/(?:subagent-runtime|custom-footer)\.ts$/.test(String(extension.path)));
-    const operationNames = ["subagent_roster", "subagent_start", "subagent_run_status", "subagent_run_steer",
+    const operationNames = ["subagent_start", "subagent_run_status", "subagent_run_steer",
       "subagent_run_interrupt", "subagent_run_resume", "subagent_run_stop", "managed_workspace_list",
       "managed_workspace_status", "managed_workspace_dispose", "managed_workspace_release",
       "supervisor_request_pending", "supervisor_request_status", "supervisor_request_reply"].sort();
@@ -74,6 +74,9 @@ test("configured enhanced local package registers one authoritative subagent too
     assert.equal(enhanced.length, 2);
     assert.equal(legacy.length, 0);
     assert.deepEqual(toolNames, operationNames);
+    assert.equal(session.getAllTools().some((tool) => tool.name === "subagent_roster"), false);
+    assert.equal(session.getActiveToolNames().includes("subagent_roster"), false);
+    assert.equal(session.getCallableToolNames().includes("subagent_roster"), false);
     assert.deepEqual(runtime?.sourceInfo, {
       path: join(repoRoot, "packages", "pi-subagents-enhanced", "extensions", "subagent-runtime.ts"),
       source: join(repoRoot, "packages", "pi-subagents-enhanced"),

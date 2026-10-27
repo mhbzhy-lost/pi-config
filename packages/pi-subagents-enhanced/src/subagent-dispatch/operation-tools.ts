@@ -1,4 +1,4 @@
-// S1：start/roster/run 七个 main/model-only 操作工具的薄 factory。
+// S1：start/run 六个 main/model-only 操作工具的薄 factory；roster 已退役。
 // 合同来源：docs/plans/records/2026-10-16-operation-tools/contract.md §2.1/§3 与计划 §S1。
 // 约束：
 // - 每份 schema 根为单 type:"object" + additionalProperties:false，顶层不使用 anyOf/oneOf/allOf/if-then；
@@ -6,6 +6,11 @@
 //   schema 不加 if/then 早拒。
 // - 本模块不得 import extension.ts（避免 S4 唯一注册点反向循环）；schema 字段按 S0 冻结表局部声明，
 //   不新增 runtime-only 字段（view/lines/mode/childId/context/timeoutMs/version）。
+// - steer 的模型可见定位字段不含 dir（S0 冻结表把 dir 列为可选，该历史行已被运行期事实与
+//   docs/plans/records/2026-10-17-runtime-convergence/steer-locator-contract.md、
+//   docs/investigations/2026-10-27-steer-argument-pipeline-deep-dive.md §7 取代）。
+//   schema 层收窄不改变运行期行为：受控 canonical resolver 的 alias 拒绝与 owner/correlation/
+//   live/reply 门禁一字未改。
 // - 固定 action 由 factory 注入：schema 不声明 action，调用方 args 携带 action 即跨面未知字段，
 //   与 additionalProperties:false 一致 fail closed，不覆盖、不透传、不触达任何下游回调；
 //   其余白名单之外字段同样 fail closed（isError + details.code/keypath，形状与既有 failure 一致）。
@@ -14,7 +19,7 @@
 //   执行期仍由 extension.ts 的 steer resolver 裁决 code）；
 //   细粒度 coding/模型/字节验证仍由回调内原 typed 编译器与 runtime 裁决，不复制进 factory。
 // - 无新 dispatcher/state/定时器：start 复用注入的 executeStart（内含 coding/generic 路由），
-//   roster/run_* 复用注入的 executeControl 固定 action。
+//   run_* 复用注入的 executeControl 固定 action。
 
 /** 原 ToolDefinition.execute 的参数顺序；DI 回调按同一顺序委托，便于 S4 直接注入既有闭包。 */
 export type SubagentOperationExecute = (
@@ -81,12 +86,6 @@ const READS_FIELD = {
   ],
 };
 
-export const SUBAGENT_ROSTER_PARAMETERS = Object.freeze({
-  type: "object",
-  additionalProperties: false,
-  properties: {},
-});
-
 export const SUBAGENT_START_PARAMETERS = Object.freeze({
   type: "object",
   additionalProperties: false,
@@ -119,16 +118,27 @@ export const SUBAGENT_RUN_STATUS_PARAMETERS = Object.freeze({
   properties: { ...TARGET_FIELDS },
 });
 
+// steer 专用定位字段：只保留 id/runId/index 三项（字段形状原样取自 TARGET_FIELDS，不复制值域）。
+// dir 在本工具面对 steer 没有任何合法值：受控 canonicalSteerTarget 对任何非 undefined 的 dir
+// 一律先返回 SUPERVISOR_STEER_TARGET_ALIAS，公开声明 dir 只会让模型发出必然被拒的调用。
+// 因此 steer 不再从共享 TARGET_FIELDS 复用 dir；status/interrupt/resume/stop 仍共享
+// 含 dir 的 TARGET_FIELDS，一字未改（它们不经 steer resolver）。
+const STEER_TARGET_FIELDS = Object.freeze({
+  id: TARGET_FIELDS.id,
+  runId: TARGET_FIELDS.runId,
+  index: TARGET_FIELDS.index,
+});
+
 export const SUBAGENT_RUN_STEER_PARAMETERS = Object.freeze({
   type: "object",
   additionalProperties: false,
   // index 必填：执行期（extension.ts:1487）在缺 index 时直接返回 SUPERVISOR_STEER_CHILD_AMBIGUOUS，
   // 不推断唯一 child、不默认 0、不广播。公开 schema 必须与已冻结的执行期一致，否则模型按
   // 「index 可选」发出的最小合法调用 {runId,message} 必然被拒。
-  // TARGET_FIELDS 仍与 status/interrupt/resume/stop 共享字段形状，只在 steer 上收紧 required，
-  // 其余三个动作经同一直通分支（不共享 steer resolver），行为不变。
+  // dir 不在 properties 内：模型传入 dir 由 additionalProperties:false 在参数层拒绝（参数错误，
+  // 不进入执行期）；绕过 schema 的 direct raw 输入仍走既有 alias 拒绝，见 descriptor 的 allowedKeys。
   required: ["message", "index"],
-  properties: { ...TARGET_FIELDS, message: MESSAGE_FIELD },
+  properties: { ...STEER_TARGET_FIELDS, message: MESSAGE_FIELD },
 });
 
 export const SUBAGENT_RUN_INTERRUPT_PARAMETERS = Object.freeze({
@@ -194,20 +204,6 @@ interface OperationToolDescriptor {
 
 const DESCRIPTORS: readonly OperationToolDescriptor[] = Object.freeze([
   {
-    name: "subagent_roster",
-    label: "Subagent Roster",
-    description: "列出当前可用的 subagent agent 名单（无参数）。权威来源为项目 agent 发现与准入过滤；输出 name 与 frontmatter 元数据，不启动任何 run。",
-    promptSnippet: "用 subagent_roster 查看当前可用 agent 名单与 frontmatter。",
-    promptGuidelines: [
-      "subagent_roster 无参数；启动新 run 用 subagent_start，不要通过本工具传任何启动或控制字段。",
-    ],
-    parameters: SUBAGENT_ROSTER_PARAMETERS,
-    kind: "control",
-    action: "list",
-    allowedKeys: [],
-    requiredStrings: [],
-  },
-  {
     name: "subagent_start",
     label: "Subagent Start",
     description: "启动一个新的 subagent run：agent、task 必填。writePaths 存在时为 coding 派发，acceptance.criteria 必填，该条件必填由运行时 typed 编译器裁决。worktree:true 时回执携带 workspace_id，其处置一律以本次 managed_workspace_status 实时返回的 allowed_dispositions 与一次性 token 为权威，不在此预判 integrate 或 discard；coding 工作区的集成由子代理 integration queue 自主拥有。本工具不含任何控制 action 字段，也不负责 run 的后续 status/steer/interrupt/resume/stop；启动成功只代表已开始，不是 terminal proof。",
@@ -244,7 +240,7 @@ const DESCRIPTORS: readonly OperationToolDescriptor[] = Object.freeze([
   {
     name: "subagent_run_steer",
     label: "Subagent Run Steer",
-    description: "向运行中的 subagent run 投递转向指令：message 与 index 均必填。index 是目标 child 在该 run 内的非负整数下标（从 0 起），单 child 的 run 也必须写 index: 0；缺 index 一律返回 SUPERVISOR_STEER_CHILD_AMBIGUOUS，非安全非负整数返回 SUPERVISOR_STEER_TARGET_INVALID，执行期不推断唯一 child、不默认 0、不广播。定位另需 id 或 runId 之一：两者同时给出且不一致返回 SUPERVISOR_STEER_TARGET_CONFLICT，8–35 字符的 runId 前缀返回 SUPERVISOR_STEER_TARGET_AMBIGUOUS，dir 在 steer 上会被目标解析器以 SUPERVISOR_STEER_TARGET_ALIAS 拒绝（status/interrupt/stop 的 dir 不受影响）。受控投递由 supervisor gate 裁决，本工具不绕过。",
+    description: "向运行中的 subagent run 投递转向指令：message 与 index 均必填。index 是目标 child 在该 run 内的非负整数下标（从 0 起），单 child 的 run 也必须写 index: 0；缺 index 一律返回 SUPERVISOR_STEER_CHILD_AMBIGUOUS，非安全非负整数返回 SUPERVISOR_STEER_TARGET_INVALID，执行期不推断唯一 child、不默认 0、不广播。定位另需 id 或 runId 之一：两者同时给出且不一致返回 SUPERVISOR_STEER_TARGET_CONFLICT，8–35 字符的 runId 前缀返回 SUPERVISOR_STEER_TARGET_AMBIGUOUS。steer 不接受 dir：本工具 schema 的 additionalProperties:false 会在参数层拒绝带 dir 的调用；绕过 schema 的 direct raw 输入仍由目标解析器以 SUPERVISOR_STEER_TARGET_ALIAS fail-closed（status/interrupt/resume/stop 的 dir 不受影响）。受控投递由 supervisor gate 裁决，本工具不绕过。",
     promptSnippet: "用 subagent_run_steer 向运行中的 run 注入新指令（message 与 index 必填）。",
     promptGuidelines: [
       "steer 需非空 message、可唯一定位的 id 或 runId，以及必填的非负整数 index（缺 index 直接被 SUPERVISOR_STEER_CHILD_AMBIGUOUS 拒绝，不推断、不默认 0、不广播）；受控 run 的投递以 supervisor gate 决策为准，被拒即停止，不改道。",
@@ -252,6 +248,10 @@ const DESCRIPTORS: readonly OperationToolDescriptor[] = Object.freeze([
     parameters: SUBAGENT_RUN_STEER_PARAMETERS,
     kind: "control",
     action: "steer",
+    // dir 保留在白名单内是执行兼容面，不是模型可见字段：schema（additionalProperties:false）
+    // 先拒绝模型带 dir 的调用，而 direct raw 输入仍能到达 canonicalSteerTarget 的既有
+    // SUPERVISOR_STEER_TARGET_ALIAS 拒绝码。若从此白名单删除 dir，raw 入口会先返回
+    // INVALID_DISPATCH，既有 alias case 的 code/keypath 预期随之改变（本轮明确不做）。
     allowedKeys: ["id", "runId", "dir", "index", "message"],
     // 通用 INVALID_DISPATCH：canonicalSteerTarget 只校验 run 定位不校验 message，
     // 不得把 $.message 错误标成 steer 目标解析码。
@@ -303,10 +303,10 @@ const DESCRIPTORS: readonly OperationToolDescriptor[] = Object.freeze([
 ]);
 
 /**
- * 创建七个 main/model-only subagent 操作工具（S1）。
+ * 创建六个 main/model-only subagent 操作工具（S1，roster 已退役）。
  * 唯一执行回调按原 ToolDefinition.execute 参数顺序 (toolCallId, input, signal, onUpdate, ctx) 委托：
  * - subagent_start → executeStart（白名单字段，无 action 注入，coding/generic 路由留在回调内）；
- * - subagent_roster / subagent_run_* → executeControl（固定 action 注入为 input.action；
+ * - subagent_run_* → executeControl（固定 action 注入为 input.action；
  *   调用方 args 的 action 及一切白名单外字段 fail closed，不触达任何下游回调）。
  */
 export function createSubagentOperationTools({ executeStart, executeControl, renderCall, renderResult }: SubagentOperationToolDeps) {

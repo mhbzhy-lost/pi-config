@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { execFileSync } from "node:child_process";
 import { closeSync, constants, fstatSync, lstatSync, openSync, realpathSync, writeSync } from "node:fs";
 import path from "node:path";
@@ -16,6 +17,7 @@ import { buildWorkflowSpawn, createWorkflowChildStartCollector, childStartTimeou
 import { getTitleRegistry, normalizeSubagentTitle } from "./title-registry.ts";
 import { createSupervisorAdapter, createSupervisorTool } from "./supervisor-adapter.ts";
 import { createSubagentOperationTools } from "./operation-tools.ts";
+import { createAdmittedAgentCatalog } from "./agent-catalog.ts";
 import { createSupervisorOperationTools } from "./supervisor-operation-tools.ts";
 import { supervisorCanonicalDigest, type SupervisorDiagnosticsRequestV1, type SupervisorDiagnosticsV1 } from "./supervisor-control-plane.ts";
 import { createSupervisorIntentId } from "./supervisor-intent-id.ts";
@@ -1391,34 +1393,83 @@ const STEER_PREFIX_MIN_LENGTH = 8;
 const STEER_FULL_RUN_ID_LENGTH = 36;
 // 本 package tsconfig 未开 strictNullChecks，字面量 true/false 会被 widen 成 boolean，
 // 因此不能用 { ok: true } / { ok: false } 做判别式窄化，改用 typeof 窄化。
-type SteerTarget = { runId: string | undefined; code: string | undefined };
-const steerTargetRejected = (code: string): SteerTarget => ({ runId: undefined, code });
+// 参数错误诊断：只用于说明「哪个字段错了、正确格式是什么」，不参与授权判定，也不改写
+// code/isError 与既有身份字段；keypath 为主责字段，fields 为涉及的全部字段（冲突/缺目标为两个）。
+type SteerTargetDiagnostic = { keypath: string; fields: string[]; reason: string };
+type SteerTarget = { runId: string | undefined; code: string | undefined; hint: string | undefined; diagnostic: SteerTargetDiagnostic | undefined };
+const steerTargetRejected = (code: string, hint: string | undefined = undefined, diagnostic: SteerTargetDiagnostic | undefined = undefined): SteerTarget => ({ runId: undefined, code, hint, diagnostic });
 function canonicalSteerTarget(params: Record<string, any>): SteerTarget {
   // dir 可单独定位 run，本层无法据其证明授权目标等于投递目标 → fail-closed。
-  if (params.dir !== undefined) return steerTargetRejected("SUPERVISOR_STEER_TARGET_ALIAS");
+  if (params.dir !== undefined) {
+    return steerTargetRejected(
+      "SUPERVISOR_STEER_TARGET_ALIAS",
+      "`$.dir` 不能作为 steer 的定位字段：请去掉 dir，改用单一完整的 36 位 runId（或与之逐字一致的 id）；本层不据目录推断授权目标，也不自动重发。",
+      { keypath: "$.dir", fields: ["$.dir"], reason: "steer 不接受 dir 定位，必须改用单一完整 id/runId" },
+    );
+  }
   const { id, runId } = params;
-  for (const value of [id, runId]) {
+  const candidates: Array<[string, any]> = [["$.id", id], ["$.runId", runId]];
+  for (const [keypath, value] of candidates) {
     // 上游 assertRunId 不做 trim，故此处也保留原始字串，仅拒绝空/非字串。
-    if (value !== undefined && (typeof value !== "string" || value.trim() === "")) return steerTargetRejected("SUPERVISOR_STEER_TARGET_INVALID");
+    if (value !== undefined && (typeof value !== "string" || value.trim() === "")) {
+      return steerTargetRejected(
+        "SUPERVISOR_STEER_TARGET_INVALID",
+        `\`${keypath}\` 必须是非空字符串形式的完整 run id（36 位）；空串、纯空白与非字符串都会被拒绝。`,
+        { keypath, fields: [keypath], reason: "id/runId 为空或不是字符串" },
+      );
+    }
   }
   // 上游 steer 实际优先级为 runId ?? id（pi-subagents/src/runs/foreground/subagent-executor.js:6528）；
   // 两者同时存在且不一致时无法确定唯一目标。
-  if (typeof id === "string" && typeof runId === "string" && id !== runId) return steerTargetRejected("SUPERVISOR_STEER_TARGET_CONFLICT");
+  if (typeof id === "string" && typeof runId === "string" && id !== runId) {
+    return steerTargetRejected(
+      "SUPERVISOR_STEER_TARGET_CONFLICT",
+      "`$.id` 与 `$.runId` 同时给出时必须逐字一致，或只保留其中一个完整 run id；本层在此处即拒绝，尚未评估下游 owner/runtime。",
+      { keypath: "$.id", fields: ["$.id", "$.runId"], reason: "id 与 runId 不一致，无法确定唯一目标" },
+    );
+  }
   const canonical = typeof id === "string" ? id : typeof runId === "string" ? runId : undefined;
-  if (typeof canonical !== "string") return steerTargetRejected("SUPERVISOR_STEER_TARGET_UNRESOLVED");
-  if (path.isAbsolute(canonical) || /[\\/]/.test(canonical) || canonical.includes("..")) return steerTargetRejected("SUPERVISOR_STEER_TARGET_INVALID");
+  const canonicalKeypath = typeof id === "string" ? "$.id" : "$.runId";
+  if (typeof canonical !== "string") {
+    return steerTargetRejected(
+      "SUPERVISOR_STEER_TARGET_UNRESOLVED",
+      "缺少定位字段：steer 必须提供 `$.id` 或 `$.runId` 之一作为单一完整 run id（36 位），本层不推断默认目标。",
+      { keypath: "$.id", fields: ["$.id", "$.runId"], reason: "缺少 id/runId 目标" },
+    );
+  }
+  if (path.isAbsolute(canonical) || /[\\/]/.test(canonical) || canonical.includes("..")) {
+    return steerTargetRejected(
+      "SUPERVISOR_STEER_TARGET_INVALID",
+      `\`${canonicalKeypath}\` 必须是完整 run id（36 位），不是路径：不得包含绝对路径、目录分隔符或 \`..\`。`,
+      { keypath: canonicalKeypath, fields: [canonicalKeypath], reason: "目标写成路径形态而非完整 run id" },
+    );
+  }
   // 前缀形态会被上游扇描解析成另一个完整 runId，授权目标与投递目标可能不一致。
-  if (canonical.length >= STEER_PREFIX_MIN_LENGTH && canonical.length < STEER_FULL_RUN_ID_LENGTH) return steerTargetRejected("SUPERVISOR_STEER_TARGET_AMBIGUOUS");
-  return { runId: canonical, code: undefined };
+  if (canonical.length >= STEER_PREFIX_MIN_LENGTH && canonical.length < STEER_FULL_RUN_ID_LENGTH) {
+    return steerTargetRejected(
+      "SUPERVISOR_STEER_TARGET_AMBIGUOUS",
+      `\`${canonicalKeypath}\` 是 8–35 字符的 id 前缀：请改传完整 36 位 run id，本层不解析前缀，避免授权目标与上游投递目标不一致。`,
+      { keypath: canonicalKeypath, fields: [canonicalKeypath], reason: "目标是 8–35 字符前缀，不是完整 36 位 run id" },
+    );
+  }
+  return { runId: canonical, code: undefined, hint: undefined, diagnostic: undefined };
 }
 
 // hint 只追加可执行提示：code 与 details 形状不变，未传 hint 的调用点文案逐字不变。
-function controlFailure(code, receipt = undefined, hint = undefined) {
+// diagnostic 仅在参数校验路径使用，只新增 keypath/fields/reason 三个机器可读诊断字段，
+// 既有 code/receiptId/requestId/runId 身份字段与 isError 保持不变。
+function controlFailure(code, receipt = undefined, hint = undefined, diagnostic = undefined) {
   const hintText = typeof hint === "string" && hint.length > 0 ? ` ${hint}` : "";
   return {
     content: [{ type: "text", text: `${code}: Supervisor control request blocked.${hintText}` }],
     isError: true,
-    details: { code, ...(receipt?.receiptId ? { receiptId: receipt.receiptId } : {}), ...(receipt?.requestId ? { requestId: receipt.requestId } : {}), ...(receipt?.runId ? { runId: receipt.runId } : {}) },
+    details: {
+      code,
+      ...(receipt?.receiptId ? { receiptId: receipt.receiptId } : {}),
+      ...(receipt?.requestId ? { requestId: receipt.requestId } : {}),
+      ...(receipt?.runId ? { runId: receipt.runId } : {}),
+      ...(diagnostic ? { keypath: diagnostic.keypath, fields: diagnostic.fields, reason: diagnostic.reason } : {}),
+    },
   };
 }
 
@@ -1444,7 +1495,81 @@ async function compensateSupervisorDelivery({ supervisorControlPlane, intent, ho
   }
 }
 
-async function executeControl(input, rpc, supervisorControlPlane, toolCallId, discover, ctx, resolveRootSessionId, diagnosticSink, titleRegistry) {
+function createResumeBindingWaiter(events, expectedSessionId, expectedAgent, onBinding) {
+  if (!events || typeof events.on !== "function") throw new TypeError("managed resume requires an event bus");
+  let expectedRunId;
+  let settled = false;
+  let settledError;
+  let settledValue;
+  let resolveWaiting;
+  let rejectWaiting;
+  const buffered = [];
+  const bufferedTerminals = [];
+  let unsubscribeStarted = () => {};
+  let unsubscribeTerminal = () => {};
+  const dispose = () => {
+    unsubscribeStarted();
+    unsubscribeTerminal();
+    unsubscribeStarted = () => {};
+    unsubscribeTerminal = () => {};
+  };
+  const finish = (error, value) => {
+    if (settled) return;
+    settled = true;
+    dispose();
+    settledError = error;
+    settledValue = value;
+    if (error) rejectWaiting?.(error);
+    else resolveWaiting?.(value);
+    rejectWaiting = undefined;
+    resolveWaiting = undefined;
+  };
+  const accept = (event) => {
+    const runId = event?.runId ?? event?.id;
+    if (!expectedRunId || runId !== expectedRunId || event?.sessionId !== expectedSessionId || event?.agent !== expectedAgent) return;
+    void Promise.resolve().then(() => onBinding(event)).then((value) => finish(undefined, value), (error) => finish(error, undefined));
+  };
+  unsubscribeStarted = events.on("subagent:async-started", (event) => {
+    if (!event || event.sessionId !== expectedSessionId || event.agent !== expectedAgent) return;
+    if (!expectedRunId) {
+      if (buffered.length < 8) buffered.push(event);
+      return;
+    }
+    accept(event);
+  }) ?? (() => {});
+  unsubscribeTerminal = events.on("subagent:process-terminal", (event) => {
+    const runId = event?.runId ?? event?.id;
+    if (!expectedRunId) {
+      if (bufferedTerminals.length < 8 && typeof runId === "string") bufferedTerminals.push(runId);
+      return;
+    }
+    if (runId === expectedRunId) {
+      const error = new Error("managed resume runner terminated before binding");
+      error.code = "RESUME_BINDING_BLOCKED";
+      finish(error, undefined);
+    }
+  }) ?? (() => {});
+  return Object.freeze({
+    setExpectedRunId(runId) {
+      expectedRunId = runId;
+      if (bufferedTerminals.includes(runId)) {
+        const error = new Error("managed resume runner terminated before binding");
+        error.code = "RESUME_BINDING_BLOCKED";
+        finish(error, undefined);
+        return;
+      }
+      for (const event of buffered.splice(0)) accept(event);
+    },
+    wait() {
+      if (settled) return settledError ? Promise.reject(settledError) : Promise.resolve(settledValue);
+
+      return new Promise((resolve, reject) => { resolveWaiting = resolve; rejectWaiting = reject; });
+    },
+    dispose,
+  });
+}
+
+async function executeControl(input, rpc, supervisorControlPlane, toolCallId, discover, ctx, resolveRootSessionId, diagnosticSink, titleRegistry, managedCodingResume) {
 
   if (!CONTROL_ACTIONS.has(input.action)) {
     return failure("UNSUPPORTED_ACTION", `unsupported subagent RPC action: ${String(input.action)}`);
@@ -1478,20 +1603,76 @@ async function executeControl(input, rpc, supervisorControlPlane, toolCallId, di
   if (input.action === "resume" && !nonempty(input.message)) {
     return failure("INVALID_RESUME_MESSAGE", "resume requires a non-empty message", undefined, "$.message");
   }
+  let managedResumePlan;
+  let resumeBindingWaiter;
+  const sourceRunId = input.action === "resume" ? (input.id ?? input.runId) : undefined;
+  if (input.action === "resume" && nonempty(sourceRunId) && managedCodingResume?.prepare) {
+    let ownerState = "unavailable";
+    let owner;
+    try {
+      const identity = await supervisorControlPlane?.identityForRun?.(sourceRunId);
+      owner = identity?.owner;
+      ownerState = identity?.ownerState ?? (owner ? "owned" : "unavailable");
+    } catch {
+      ownerState = "unavailable";
+    }
+    try {
+      managedResumePlan = await managedCodingResume.prepare({ sourceRunId, ownerState, owner });
+    } catch (error) {
+      const code = error?.code ?? "RESUME_BINDING_BLOCKED";
+      return failure(code, error instanceof Error ? error.message : String(error));
+    }
+    if (managedResumePlan) {
+      try {
+        resumeBindingWaiter = createResumeBindingWaiter(
+          ctx?.events ?? managedCodingResume.events,
+          managedResumePlan.expectedSessionId,
+          managedResumePlan.expectedAgent,
+          async (event) => {
+            const binding = {
+              runId: event.runId ?? event.id,
+              asyncDir: event.asyncDir,
+              sessionId: event.sessionId,
+              pid: event.pid,
+              agentProfile: event.agent,
+            };
+            if (!nonempty(binding.runId) || typeof binding.asyncDir !== "string" || !path.isAbsolute(binding.asyncDir)
+                || !Number.isSafeInteger(binding.pid) || binding.pid <= 0) {
+              const error = new Error("managed resume runner binding is invalid");
+              error.code = "RESUME_BINDING_BLOCKED";
+              throw error;
+            }
+            await managedCodingResume.register(binding);
+            return managedCodingResume.activate({ plan: managedResumePlan, resumedRun: binding });
+          },
+        );
+      } catch (error) {
+        return failure(error?.code ?? "RESUME_BINDING_BLOCKED", error instanceof Error ? error.message : String(error));
+      }
+    }
+  }
   const { action, ...params } = input;
   if (action === "steer" && supervisorControlPlane && supervisorControlPlane.enabled?.() !== false) {
     const target = canonicalSteerTarget(params);
-    if (typeof target.runId !== "string") return controlFailure(target.code ?? "SUPERVISOR_STEER_TARGET_UNRESOLVED");
+    if (typeof target.runId !== "string") return controlFailure(target.code ?? "SUPERVISOR_STEER_TARGET_UNRESOLVED", undefined, target.hint, target.diagnostic);
     // 缺 index 是已冻结的 fail closed 决策（不推断唯一 child/不默认 0/不广播）：只在文案上给出
     // 可执行的下一步，不新增任何绕过、推断或放宽分支。
     if (params.index === undefined) {
       return controlFailure(
         "SUPERVISOR_STEER_CHILD_AMBIGUOUS",
         undefined,
-        "steer requires an explicit integer index: re-issue subagent_run_steer with the target child's 0-based index within this run (a single-child run still needs index: 0). No value is inferred.",
+        "steer 必须显式提供 `$.index`：请传入目标 child 在该 run 内的 0 基下标（单 child 的 run 也必须写 index: 0）；本层不推断 child、不默认 0、不广播。",
+        { keypath: "$.index", fields: ["$.index"], reason: "缺少显式 child index" },
       );
     }
-    if (!Number.isSafeInteger(params.index) || params.index < 0) return controlFailure("SUPERVISOR_STEER_TARGET_INVALID");
+    if (!Number.isSafeInteger(params.index) || params.index < 0) {
+      return controlFailure(
+        "SUPERVISOR_STEER_TARGET_INVALID",
+        undefined,
+        "`$.index` 必须是 0 或安全正整数：请传入目标 child 在该 run 内的实际下标，本层不推断也不默认 0。",
+        { keypath: "$.index", fields: ["$.index"], reason: "index 不是安全的非负整数" },
+      );
+    }
     const identity = await supervisorControlPlane.identityForRun?.(target.runId);
     const owner = identity?.owner;
     // identityForRun 缺失或未返回三态时一律当作 unavailable，不得默认放行。
@@ -1538,7 +1719,29 @@ async function executeControl(input, rpc, supervisorControlPlane, toolCallId, di
       }
     }
   }
-  const reply = await rpc[action](params);
+  let reply;
+  try {
+    reply = await rpc[action](params);
+  } catch (error) {
+    resumeBindingWaiter?.dispose();
+    throw error;
+  }
+  if (action === "resume" && managedResumePlan && reply?.isError !== true) {
+    const resumedRunId = reply?.details?.runId ?? reply?.details?.asyncId;
+    if (!nonempty(resumedRunId)) {
+      resumeBindingWaiter?.dispose();
+      return failure("RESUME_BINDING_BLOCKED", "resume reply did not provide the new run identity");
+    }
+    resumeBindingWaiter.setExpectedRunId(resumedRunId);
+    try {
+      await resumeBindingWaiter.wait();
+    } catch (error) {
+      await stopSpawnedRunsBestEffort(rpc, [resumedRunId]);
+      return failure(error?.code ?? "RESUME_BINDING_BLOCKED", error instanceof Error ? error.message : String(error));
+    }
+  } else {
+    resumeBindingWaiter?.dispose();
+  }
   if (action === "resume" && reply?.isError !== true) {
     // 只沿用公开回复确认的新身份；不猜测提前 started 事件或目录、前缀的旧身份。
     const oldRunId = params.id ?? params.runId;
@@ -1800,6 +2003,12 @@ type TypedSubagentExtensionOptions = {
   workspaceService?: unknown;
   resolveRootSessionId?: (sessionManager: unknown) => string;
   registerAuthorizedRun?: (authorization: unknown) => Promise<void>;
+  managedCodingResume?: {
+    events?: { on(type: string, handler: (event: unknown) => void): (() => void) | undefined };
+    prepare: (input: { sourceRunId: string; ownerState: string; owner: unknown }) => Promise<any> | any;
+    register: (binding: { runId: string; asyncDir: string; sessionId: string; pid: number; agentProfile: string }) => Promise<void> | void;
+    activate: (input: { plan: any; resumedRun: { runId: string; asyncDir: string; sessionId: string; pid: number; agentProfile: string } }) => Promise<unknown> | unknown;
+  };
   inspectExecutionProof?: (runId: string) => unknown;
   resolveCanonicalOrigin?: typeof defaultCanonicalOrigin;
   inspectWorkspaceSource?: typeof defaultWorkspaceSource;
@@ -1840,6 +2049,7 @@ export function createTypedSubagentExtension(
     workspaceService,
     resolveRootSessionId,
     registerAuthorizedRun,
+    managedCodingResume,
     resolveCanonicalOrigin = defaultCanonicalOrigin,
     inspectWorkspaceSource = defaultWorkspaceSource,
     discoverAgents: discover = defaultDiscoverAgents,
@@ -1878,14 +2088,39 @@ export function createTypedSubagentExtension(
   }
 
   const token = Symbol("typed-subagent-runtime");
+  const catalog = createAdmittedAgentCatalog({
+    async readAdmittedAgents(ctx) {
+      const discovery = await discover(ctx.cwd, "both", ctx.model?.provider);
+      if (discovery.admission !== "repository-configured") {
+        throw Object.assign(new Error("AGENT_ADMISSION_UNAVAILABLE"), { code: "AGENT_ADMISSION_UNAVAILABLE" });
+      }
+      return {
+        admission: discovery.admission,
+        agents: discovery.agents.map(({ name, description }) => ({ name, description })),
+      };
+    },
+  });
+  let closing = false;
+  let runtimeIdentity: { manager: ExtensionContext["sessionManager"]; sessionId: string; cwd: string };
+  const matchesRuntime = (ctx: ExtensionContext) => !closing && !disposed
+    && registry.get(pi)?.token === token
+    && runtimeIdentity?.manager === ctx.sessionManager
+    && runtimeIdentity.sessionId === ctx.sessionManager.getSessionId()
+    && runtimeIdentity.cwd === ctx.cwd;
+  const closeCatalog = () => {
+    closing = true;
+    catalog.invalidate();
+  };
   const resources = [
     { dispose: () => supervisorAdapter?.dispose?.(), done: !supervisorAdapter?.dispose },
     ...extraDisposables.map((disposable) => ({ dispose: () => disposable?.dispose?.(), done: !disposable?.dispose })),
     { dispose: () => rpc.dispose?.(), done: !rpc.dispose },
+    { dispose: () => catalog.dispose(), done: false },
   ];
   let disposed = false;
   let disposeFlight;
   const dispose = async () => {
+    closeCatalog();
     if (disposed) return;
     if (disposeFlight) return disposeFlight;
     disposeFlight = (async () => {
@@ -1945,7 +2180,7 @@ export function createTypedSubagentExtension(
           return result;
         }
         if (Object.hasOwn(input, "action")) {
-          const result = await executeControl(input, rpc, supervisorControlPlane, toolCallId, discover, ctx, resolveRootSessionId, diagnosticSink, titleRegistry);
+          const result = await executeControl(input, rpc, supervisorControlPlane, toolCallId, discover, ctx, resolveRootSessionId, diagnosticSink, titleRegistry, managedCodingResume);
           trace("tool-returned");
           return result;
         }
@@ -2029,6 +2264,10 @@ export function createTypedSubagentExtension(
   let requiredChildExtensionsRegistration;
   let ready;
   try {
+    pi.on("before_agent_start", (event, ctx) => {
+      if (matchesRuntime(ctx)) catalog.apply(event, ctx);
+      else delete event.systemPromptOptions.sections.advertised_subagents;
+    });
     for (const definition of subagentOperationTools) pi.registerTool(definition);
     for (const definition of workspaceOperationTools) pi.registerTool(definition);
 
@@ -2154,6 +2393,7 @@ export function createTypedSubagentExtension(
     shutdownDebt = { attempted: false, completed: false, inFlight: undefined, run: undefined, event: undefined, ctx: undefined };
     shutdownDebt.run = async (event, ctx, force = false) => {
       if (shutdownDebt.completed || (!force && registry.get(pi)?.token !== token)) return;
+      closeCatalog();
       if (!shutdownDebt.attempted) {
         bindSessionDebtLane(ctx);
         shutdownDebt.event = event;
@@ -2182,7 +2422,12 @@ export function createTypedSubagentExtension(
     registry.set(pi, { token, dispose, debt: shutdownDebt, lane: debtLane });
     let startFlight;
     let started = false;
-    ready = async (event, ctx) => {
+    ready = async (event, ctx: ExtensionContext) => {
+      if (disposed || registry.get(pi)?.token !== token) return;
+      if (closing) {
+        if (shutdownDebt.attempted && !shutdownDebt.completed) await shutdownDebt.run(event, ctx, true);
+        return;
+      }
       if (started) return;
       if (startFlight) return startFlight;
       startFlight = (async () => {
@@ -2191,7 +2436,9 @@ export function createTypedSubagentExtension(
           await shutdownDebt.run(event, ctx, true);
           return;
         }
+        runtimeIdentity = { manager: ctx.sessionManager, sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd };
         await repayDebts(debtLane, shutdownDebt, ctx);
+        if (!matchesRuntime(ctx)) return;
         // required-child 注册键必须等于上游全部查找点使用的 Pi session ID（getSessionId）；
         // 持久会话下 sessionFile ≠ sessionId，沿用文件路径键会令 required 查找精确匹配落空。
         const sessionId = ctx?.sessionManager?.getSessionId();
@@ -2212,6 +2459,9 @@ export function createTypedSubagentExtension(
           });
         }
         await beforeSessionStart(event, ctx);
+        if (!matchesRuntime(ctx)) return;
+        await catalog.initialize(ctx);
+        if (!matchesRuntime(ctx)) return;
         started = true;
       })();
       try {
@@ -2224,7 +2474,11 @@ export function createTypedSubagentExtension(
       if (registry.get(pi)?.token !== token) return;
       await ready(event, ctx);
     });
-    pi.on("session_shutdown", shutdownDebt.run);
+    pi.on("session_shutdown", (event, ctx) => {
+      // 入口先同步失效，不能等 shutdown debt、broker drain 或最终资源释放。
+      closeCatalog();
+      return shutdownDebt.run(event, ctx);
+    });
     if (supervisorOperationTools.length > 0) {
       pi.on("session_start", async (event, ctx) => {
         if (registry.get(pi)?.token !== token) return;

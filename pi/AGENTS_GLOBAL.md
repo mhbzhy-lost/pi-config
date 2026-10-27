@@ -47,7 +47,7 @@ DAG 用于描述各子任务之间的依赖关系，当某个子任务的前置�
 
 每次派发到结果处置按固定顺序推进，细节以对应小节为准，不复制工具参数手册：
 
-1. `subagent_roster` 查看当前可用 agent 与档位；
+1. 读取本会话初始化注入的准入名册（`advertised_subagents` section），按其中的 name/description 选择可用角色；名册不可用时报告阻塞，真实派发仍由 runtime 做准入校验；
 2. 角色选择：review 用 `reviewer`，复杂开发用 `delegate`，确定性执行用 `executor`（见「模型分级」）；
 3. 按「派发格式」用 `subagent_start` 派发 subagent，任务附完整合同、WritePaths、验收标准与停止条件；
 4. 处理 child 的 reply 与 steer：需要决策时用 `supervisor_request_pending`/`supervisor_request_reply`，需要纠偏时用 `subagent_run_steer`；只补充指导，不代写 child 结论；
@@ -74,12 +74,12 @@ subagent_start({ agent: "reviewer", task: "审阅当前 diff 并报告风险" })
 
 当前模型注册面是「每操作一个工具」，不存在旧的单工具 union 入口：
 
-- 启动与名册：`subagent_roster`、`subagent_start`；
+- 启动：`subagent_start`；准入名册由本会话初始化注入，不需要工具调用；
 - run 操作：`subagent_run_status`、`subagent_run_steer`、`subagent_run_interrupt`、`subagent_run_resume`、`subagent_run_stop`；
 - 受管 workspace：`managed_workspace_list`、`managed_workspace_status`、`managed_workspace_dispose`、`managed_workspace_release`；
 - 主管请求：`supervisor_request_pending`、`supervisor_request_status`、`supervisor_request_reply`。
 
-旧名一次性映射（仅供识别历史文本与上游通知里的旧示例）：`subagent` 的 `{action:"list"}`→`subagent_roster`，无 `action` 的派发→`subagent_start`，`{action:"status|steer|interrupt|resume|stop"}`→对应 `subagent_run_*`；`subagent_worktree` 的 `{action:"list|status|dispose|release"}`→对应 `managed_workspace_*`；`subagent_supervisor` 的 `{action:"pending|status|reply"}`→对应 `supervisor_request_*`。上游 completion/决策通知仍可能带旧调用示例：那是历史 raw 文本，不构成新工具的 schema，也不表示旧调用还能执行。本仓自有的 spawn/reminder 回执已改用新工具名。
+旧名一次性映射（仅供识别历史文本与上游通知里的旧示例）：`subagent` 的 `{action:"list"}` 与后来的 `subagent_roster` 均为已退役的历史名册查询，当前使用本会话注入的准入名册；无 `action` 的派发→`subagent_start`，`{action:"status|steer|interrupt|resume|stop"}`→对应 `subagent_run_*`；`subagent_worktree` 的 `{action:"list|status|dispose|release"}`→对应 `managed_workspace_*`；`subagent_supervisor` 的 `{action:"pending|status|reply"}`→对应 `supervisor_request_*`。上游 completion/决策通知仍可能带旧调用示例：那是历史 raw 文本，不构成新工具的 schema，也不表示旧调用还能执行。本仓自有的 spawn/reminder 回执已改用新工具名。
 
 ### 派发适合性
 
@@ -105,7 +105,7 @@ child 边界文字按保守措辞写入 task：`contact_supervisor` 在该 child
 
 ### 模型分级
 
-- 默认省略 `subagent_start` 的 `model`，由 runtime 按 agent profile 的 `models` 候选顺序选择首个当前可用模型。只有用户明确指定本次派发模型时才传入 `model`；不得自行从 roster 选模、重复填写首个候选或按任务难度换模。
+- 默认省略 `subagent_start` 的 `model`，由 runtime 按 agent profile 的 `models` 候选顺序选择首个当前可用模型。只有用户明确指定本次派发模型时才传入 `model`；不得自行从名册选模、重复填写首个候选或按任务难度换模。
 - 用户明确指定模型时，遵照用户指令，保留用户给出的裸 model-id 或 qualified `provider/model` 形式，交由 runtime 校验；解析或候选校验失败时停止派发并报告，不自主换模或显式指定其他模型重派。
 - review 任务使用 review 档（`reviewer`）；复杂开发使用 primary 档（`delegate`）；确定性执行使用 deterministic 档（`executor`）。
 - `reviewer` 是**只读档**：工具面只有 `read,grep,find,ls,bash`，没有写入、编辑或派发能力。不得把落盘、改文件、新建记录、提交或任何需要写权限的任务派给 `reviewer`；需要产出文件时改用 `executor`/`delegate`，审阅结果由主会话或写档档位落盘。

@@ -29,7 +29,7 @@ function setup({ sessionId = "s" }: { sessionId?: string } = {}) {
     },
     emit(type, event) { for (const listener of [...(listeners.get(type) ?? [])]) listener(event); },
   };
-  const pi = { events, registerTool(tool) { tools.push(tool); }, on() {} };
+  const pi = { events, registerTool(tool) { assert.notEqual(tool.name, "subagent_roster", "fresh runtime must not register the retired roster"); tools.push(tool); }, on() {} };
   const rpc = {
     async ping() { return { version: 1, methods: ["spawn"], session: { sessionId, cwd: "/repo" } }; },
     async spawn(params, options) {
@@ -48,7 +48,7 @@ function setup({ sessionId = "s" }: { sessionId?: string } = {}) {
 
 // S4：注册面为每操作独立工具；按名解析，不以 tools 数组位置为权威。
 const CONTROL_TOOL_BY_ACTION: Record<string, string> = {
-  list: "subagent_roster", status: "subagent_run_status", steer: "subagent_run_steer",
+  status: "subagent_run_status", steer: "subagent_run_steer",
   interrupt: "subagent_run_interrupt", resume: "subagent_run_resume", stop: "subagent_run_stop",
 };
 function toolByName(tools: any[], name: string) {

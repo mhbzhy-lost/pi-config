@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { piHostAliases, piHostJitiUrl } from "./helpers/pi-host.mjs";
 
 const { createJiti } = await import(piHostJitiUrl);
@@ -30,7 +31,6 @@ const repoRoot = resolve(import.meta.dirname, "..");
 
 // S4：模型注册面已切换为每操作独立工具；测试一律按工具名解析，不以 tools 数组位置为权威。
 const SUBAGENT_TOOL_BY_ACTION = Object.freeze({
-  list: "subagent_roster",
   status: "subagent_run_status",
   steer: "subagent_run_steer",
   interrupt: "subagent_run_interrupt",
@@ -43,7 +43,7 @@ const SUPERVISOR_TOOL_BY_ACTION = Object.freeze({
   reply: "supervisor_request_reply",
 });
 const REGISTERED_OPERATION_TOOL_NAMES = Object.freeze([
-  "subagent_roster", "subagent_start", "subagent_run_status", "subagent_run_steer",
+  "subagent_start", "subagent_run_status", "subagent_run_steer",
   "subagent_run_interrupt", "subagent_run_resume", "subagent_run_stop",
   "managed_workspace_list", "managed_workspace_status", "managed_workspace_dispose", "managed_workspace_release",
   "supervisor_request_pending", "supervisor_request_status", "supervisor_request_reply",
@@ -57,6 +57,7 @@ function toolByName(host, name) {
 function assertRegisteredOperationTools(host) {
   const names = host.tools.map((tool) => tool.name);
   assert.deepEqual([...names].sort(), [...REGISTERED_OPERATION_TOOL_NAMES].sort(), "registered model tool set");
+  assert.equal(names.includes("subagent_roster"), false, "fresh runtime must not register the retired roster");
   assert.deepEqual(names.filter((name) => LEGACY_UNION_TOOL_NAMES.includes(name)), [], "legacy union tools must not be registered");
 }
 const enhancedPackageRoot = join(repoRoot, "packages/pi-subagents-enhanced");
@@ -64,14 +65,14 @@ const enhancedPackageRoot = join(repoRoot, "packages/pi-subagents-enhanced");
 function createTypedSubagentExtension(pi, options = {}) {
   return createTypedSubagentExtensionProduction(pi, {
     registerAuthorizedRun() {},
-    discoverAgents() { return { agents: [{ name: "executor" }, { name: "reviewer" }] }; },
+    discoverAgents() { return { admission: "repository-configured", agents: [{ name: "executor", description: "执行任务" }, { name: "reviewer", description: "只读审阅" }] }; },
     ...options,
   });
 }
 
 function installHeadlessTypedSubagentRuntime(pi, options = {}) {
   return installHeadlessTypedSubagentRuntimeProduction(pi, {
-    discoverAgents() { return { agents: [{ name: "executor" }, { name: "reviewer" }] }; },
+    discoverAgents() { return { admission: "repository-configured", agents: [{ name: "executor", description: "执行任务" }, { name: "reviewer", description: "只读审阅" }] }; },
     ...options,
   });
 }
@@ -557,7 +558,7 @@ test("ExtensionRunner lifecycle records only supported actual pi.on events witho
     workingStateTrace(entry) { trace.push(entry); },
   });
 
-  for (const handler of pi.handlers.get("session_start") ?? []) await handler({}, { sessionManager: { getSessionId: () => "session-1" } });
+  for (const handler of pi.handlers.get("session_start") ?? []) await handler({}, { cwd: "/repo", sessionManager: { getSessionId: () => "session-1" } });
   const emitLifecycle = async (type, payload, context) => {
     for (const handler of pi.handlers.get(type) ?? []) await handler(payload, context);
   };
@@ -660,7 +661,8 @@ test("project operation tools retain injected display-only renderers with a per-
     renderSubagentResult,
   });
 
-  const expected = ["subagent_roster", "subagent_start", "subagent_run_status", "subagent_run_steer", "subagent_run_interrupt", "subagent_run_resume", "subagent_run_stop"];
+  const expected = ["subagent_start", "subagent_run_status", "subagent_run_steer", "subagent_run_interrupt", "subagent_run_resume", "subagent_run_stop"];
+  assert.equal(pi.tools.some((tool) => tool.name === "subagent_roster"), false);
   for (const name of expected) {
     const tool = toolByName(pi, name);
     assert.equal(typeof tool.renderCall, "function", `${name} keeps an injected display-only renderCall`);
@@ -910,6 +912,7 @@ test("reload repays old generation shutdown debt before activating new upstream 
   const pi = createPi();
   const cleanupStore = {};
   const order = [];
+  const context = { cwd: "/repo", sessionManager: SessionManager.inMemory("/repo") };
   let failDrain = true;
   installHeadlessTypedSubagentRuntime(pi, {
     cleanupStore, rpc: createRpc({ dispose() { order.push("old-project"); } }),
@@ -924,8 +927,8 @@ test("reload repays old generation shutdown debt before activating new upstream 
     },
   });
   const oldShutdown = pi.handlers.get("session_shutdown")[0];
-  await assert.rejects(() => oldShutdown({ reason: "reload" }, {}), /drain failed/);
-  installHeadlessTypedSubagentRuntime(pi, {
+  await assert.rejects(() => oldShutdown({ reason: "reload" }, context), /drain failed/);
+  const replacement = installHeadlessTypedSubagentRuntime(pi, {
     cleanupStore, rpc: createRpc(),
     bootstrap(api) {
       api.registerTool({ name: "subagent_supervisor", execute() {} });
@@ -934,8 +937,9 @@ test("reload repays old generation shutdown debt before activating new upstream 
     async beforeUpstreamSessionStart() { order.push("new-project"); },
   });
   failDrain = false;
-  for (const handler of pi.handlers.get("session_start") ?? []) await handler({ reason: "reload" }, {});
+  for (const handler of pi.handlers.get("session_start") ?? []) await handler({ reason: "reload" }, context);
   assert.deepEqual(order, ["old-drain", "old-drain", "old-upstream", "old-project", "new-project", "new-generation"]);
+  await replacement.dispose();
 });
 
 test("retain-on-beforeDispose-failure retries cleanup before disposing RPC", async () => {
@@ -966,8 +970,9 @@ test("every registered operation schema exposes an object root to OpenAI-compati
 
   // 根节点必须是显式单一 object：deepseek 要求顶层 type:object（历史 bug），
   // glm 对顶层联合组合子生成空 arguments（docs/bugs/2026-09-14-glm-empty-tool-args-from-root-union-schema.md）。
-  // 无 supervisorAdapter 时只注册 7 subagent + 4 workspace 操作工具。
-  assert.equal(pi.tools.length, 11, "registered operation tool count without a supervisor adapter");
+  // 无 supervisorAdapter 时只注册 6 subagent + 4 workspace 操作工具，roster 已退役。
+  assert.equal(pi.tools.length, 10, "registered operation tool count without a supervisor adapter");
+  assert.equal(pi.tools.some((tool) => tool.name === "subagent_roster"), false);
   for (const tool of pi.tools) {
     const schema = tool.parameters;
     assert.equal(schema.type, "object", `${tool.name} root must be a single object`);
@@ -1072,7 +1077,7 @@ test("headless installation wires the completion notifier to session lifecycle",
   });
 
   for (const handler of pi.handlers.get("session_start") ?? []) {
-    await handler({ reason: "startup" }, { sessionManager: { id: "session-1", getSessionId: () => "session-1" } });
+    await handler({ reason: "startup" }, { cwd: "/repo", sessionManager: { id: "session-1", getSessionId: () => "session-1" } });
   }
   assert.equal(notifierState.currentSessionId, "session-1");
 
@@ -1105,7 +1110,7 @@ test("workspace reminder listener registers before the completion notifier and d
       return { dispose() {} };
     },
   });
-  for (const handler of pi.handlers.get("session_start") ?? []) await handler({}, { sessionManager: { id: "session-1", getSessionId: () => "session-1" } });
+  for (const handler of pi.handlers.get("session_start") ?? []) await handler({}, { cwd: "/repo", sessionManager: { id: "session-1", getSessionId: () => "session-1" } });
   await pi.events.emit("subagent:async-complete", { runId: "leaf" });
   assert.deepEqual(order, ["reminder", "notifier"]);
   for (const handler of pi.handlers.get("session_shutdown") ?? []) await handler({}, {});
@@ -1139,7 +1144,7 @@ test("production upstream completion emits decorate each same-agent leaf once", 
     },
   });
   for (const handler of pi.handlers.get("session_start") ?? []) {
-    await handler({}, { sessionManager: { id: "session-1", getSessionId: () => "session-1" } });
+    await handler({}, { cwd: "/repo", sessionManager: { id: "session-1", getSessionId: () => "session-1" } });
   }
 
   registry.prepare({ agent: "delegate", task: "first", title: "First task" });
@@ -1197,7 +1202,7 @@ test("confirmed facade workflow success is filtered before the completion notifi
     },
   });
   for (const handler of pi.handlers.get("session_start") ?? []) {
-    await handler({}, { sessionManager: { id: "session-1", getSessionId: () => "session-1" } });
+    await handler({}, { cwd: "/repo", sessionManager: { id: "session-1", getSessionId: () => "session-1" } });
   }
 
   const started = await execute(toolByName(pi, "subagent_start"), {
@@ -1811,7 +1816,7 @@ test("reload and shutdown dispose only the current RPC client", async () => {
   const current = createTypedSubagentExtension(pi, { rpc: second, cleanupStore });
   const secondShutdown = pi.handlers.get("session_shutdown")[1];
 
-  await current.ready();
+  await current.ready({}, { cwd: "/repo", sessionManager: SessionManager.inMemory("/repo") });
   assert.equal(first.disposed(), 1);
   await firstShutdown();
   assert.equal(second.disposed(), 0);
@@ -2509,6 +2514,10 @@ test("steer 拒绝 id 与 runId 冲突的别名目标，不得按其中一个放
   });
   const result = await toolByName(pi, "subagent_run_steer").execute("steer-conflict", { index: 0, id: FULL_RUN_ID, runId: OTHER_FULL_RUN_ID, message: "hi" }, signal, undefined, ctx);
   assert.equal(result.details.code, "SUPERVISOR_STEER_TARGET_CONFLICT", JSON.stringify(result));
+  // 参数错误诊断必须指出冲突的两个字段，且不冒充已评估下游 owner/runtime。
+  assert.equal(result.details.keypath, "$.id", JSON.stringify(result));
+  assert.deepEqual(result.details.fields, ["$.id", "$.runId"], JSON.stringify(result));
+  assert.match(result.content[0].text, /`\$\.id` 与 `\$\.runId`/);
   assert.deepEqual(steerCalls(rpc), [], "冲突目标绝不得投递");
 });
 
@@ -2516,6 +2525,9 @@ test("steer 拒绝 dir 别名目标，避免绕过 owner 判定", async () => {
   const { pi, rpc } = createSteerScenario({ readOwnerReceipt: async (runId) => ({ runId, rootSessionId: "root-1", ownerGeneration: 1 }) });
   const result = await toolByName(pi, "subagent_run_steer").execute("steer-dir", { index: 0, dir: `/tmp/async/${FULL_RUN_ID}`, message: "hi" }, signal, undefined, ctx);
   assert.equal(result.details.code, "SUPERVISOR_STEER_TARGET_ALIAS", JSON.stringify(result));
+  assert.equal(result.details.keypath, "$.dir", JSON.stringify(result));
+  assert.deepEqual(result.details.fields, ["$.dir"], JSON.stringify(result));
+  assert.match(result.content[0].text, /`\$\.dir` 不能作为 steer 的定位字段/);
   assert.deepEqual(steerCalls(rpc), []);
 });
 
@@ -2525,6 +2537,8 @@ test("steer 拒绝前缀形态 runId，避免授权目标与上游扫描解析�
   });
   const result = await toolByName(pi, "subagent_run_steer").execute("steer-prefix", { index: 0, runId: FULL_RUN_PREFIX, message: "hi" }, signal, undefined, ctx);
   assert.equal(result.details.code, "SUPERVISOR_STEER_TARGET_AMBIGUOUS", JSON.stringify(result));
+  assert.equal(result.details.keypath, "$.runId", JSON.stringify(result));
+  assert.deepEqual(result.details.fields, ["$.runId"], JSON.stringify(result));
   assert.deepEqual(steerCalls(rpc), []);
 });
 
@@ -2580,17 +2594,19 @@ test("替换代偿失败携原异常诊断，ready 仍阻断并允许恢复重�
   const pi = createPi(), cleanupStore = {}, diagnostics = [];
   const cause = new Error("存储不可用"), failure = new Error("旧代清理失败", { cause });
   let blocked = true, started = 0;
-  createTypedSubagentExtension(pi, { rpc: createRpc(), cleanupStore, beforeDispose() { if (blocked) throw failure; } });
+  const context = { cwd: "/repo", sessionManager: SessionManager.inMemory("/repo") };
+  const previous = createTypedSubagentExtension(pi, { rpc: createRpc(), cleanupStore, beforeDispose() { if (blocked) throw failure; } });
+  await previous.ready({}, context);
   const next = createTypedSubagentExtension(pi, { rpc: createRpc(), cleanupStore,
     diagnosticSink(entry) { diagnostics.push(entry); }, beforeSessionStart() { started++; } });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(diagnostics[0]?.phase, "subagent-ready-debt-retry-failed");
   assert.equal(diagnostics[0]?.error, failure);
   assert.equal(diagnostics[0]?.cause, cause);
-  await assert.rejects(next.ready({}, {}), error => error === failure);
+  await assert.rejects(next.ready({}, context), error => error === failure);
   assert.equal(started, 0);
   blocked = false;
-  await next.ready({}, {});
+  await next.ready({}, context);
   assert.equal(started, 1);
   await next.dispose();
 });
@@ -2627,7 +2643,7 @@ test("required-child 注册键对齐 Pi session ID：持久会话按 ID 命中�
 
     const pi = createPi();
     const extension = createTypedSubagentExtension(pi, { rpc: createRpc() });
-    await extension.ready({ reason: "startup" }, { sessionManager: manager });
+    await extension.ready({ reason: "startup" }, { cwd: fixtureRoot, sessionManager: manager });
 
     // 公开 resolve 出口按 ID 精确命中，快照只含 id/path 且无 requireForAllRunners（no requiredall）。
     const snapshot = resolveRequiredChildExtensions(manager.getSessionId());
@@ -2663,7 +2679,7 @@ test("required-child 注册键对齐 Pi session ID：in-memory 无 sessionFile �
     const keysBefore = new Set(globalThis[REQUIRED_CHILD_REGISTRY_KEY]?.bySession.keys() ?? []);
     const pi = createPi();
     const extension = createTypedSubagentExtension(pi, { rpc: createRpc() });
-    await extension.ready({ reason: "startup" }, { sessionManager: manager });
+    await extension.ready({ reason: "startup" }, { cwd: fixtureRoot, sessionManager: manager });
 
     assert.deepEqual(resolveRequiredChildExtensions(manager.getSessionId()).map((entry) => entry.id), ["root-session-owner", "integration-queue"]);
     assert.deepEqual(addedRegistryKeys(keysBefore), [manager.getSessionId()]);
@@ -2685,7 +2701,7 @@ test("required-child 注册在 ctx.sessionManager.getSessionId 为空值时保�
   const keysBefore = new Set(globalThis[REQUIRED_CHILD_REGISTRY_KEY]?.bySession.keys() ?? []);
   const pi = createPi();
   const extension = createTypedSubagentExtension(pi, { rpc: createRpc() });
-  await extension.ready({ reason: "startup" }, { sessionManager: { getSessionId: () => "" } });
+  await extension.ready({ reason: "startup" }, { cwd: "/repo", sessionManager: { getSessionId: () => "" } });
   assert.deepEqual(addedRegistryKeys(keysBefore), []);
   await extension.dispose();
 });
@@ -3055,7 +3071,7 @@ test("unbound supervisor target deactivates the three supervisor_request_* opera
   const sessionId = `deactivate-${randomUUID()}`;
   const errors = [];
   for (const handler of pi.handlers.get("session_start") ?? []) {
-    try { await handler({}, { sessionManager: { getSessionId: () => sessionId } }); } catch (error) { errors.push(error?.code ?? error?.message); }
+    try { await handler({}, { cwd: "/repo", sessionManager: { getSessionId: () => sessionId } }); } catch (error) { errors.push(error?.code ?? error?.message); }
   }
   // 只有 supervisor 那个 session_start handler 抛错；ready handler 正常完成。
   assert.deepEqual(errors, ["SUPERVISOR_TARGET_UNAVAILABLE"]);

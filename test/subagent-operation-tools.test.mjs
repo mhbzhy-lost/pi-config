@@ -1,7 +1,7 @@
-// S1 合同测试：subagent_roster / subagent_start / subagent_run_* 七工具薄 factory。
+// S1 合同测试：subagent_start / subagent_run_* 六工具薄 factory，roster 已退役。
 // 依据：docs/plans/2026-10-16-subagent-operation-tools-guidance.md §S1 与
 // docs/plans/records/2026-10-16-operation-tools/contract.md §2.1/§3。
-// 覆盖：七 schema（单 object 根、无顶层组合子、字段不扩）、真实 callback spy 委托、
+// 覆盖：六 schema（单 object 根、无顶层组合子、字段不扩）、真实 callback spy 委托、
 // 调用方 action 与跨面/未知字段 fail closed（不触下游）、缺/空/错型必填 agent/task 与
 // steer/resume message 不触回调、raw 引用不变。
 import assert from "node:assert/strict";
@@ -9,7 +9,6 @@ import test from "node:test";
 
 import { Compile } from "../pi/npm/node_modules/typebox/build/compile/index.mjs";
 import {
-  SUBAGENT_ROSTER_PARAMETERS,
   SUBAGENT_START_PARAMETERS,
   SUBAGENT_RUN_STATUS_PARAMETERS,
   SUBAGENT_RUN_STEER_PARAMETERS,
@@ -20,7 +19,6 @@ import {
 } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/operation-tools.ts";
 
 const TOOL_NAMES = [
-  "subagent_roster",
   "subagent_start",
   "subagent_run_status",
   "subagent_run_steer",
@@ -45,7 +43,7 @@ function codingStart() {
   return { agent: "executor", task: "落地实现", writePaths: ["src/index.ts"], acceptance: { criteria: ["通过合同测试"] } };
 }
 
-test("seven model-only tools are produced with frozen single-object parameter schemas", () => {
+test("six model-only tools are produced with frozen single-object parameter schemas", () => {
   const { tools } = makeHarness();
   assert.deepEqual(tools.map((tool) => tool.name), TOOL_NAMES);
   for (const tool of tools) {
@@ -63,7 +61,6 @@ test("seven model-only tools are produced with frozen single-object parameter sc
 
 test("each schema validates its frozen field surface and rejects unknown fields", () => {
   const validators = {
-    subagent_roster: Compile(SUBAGENT_ROSTER_PARAMETERS),
     subagent_start: Compile(SUBAGENT_START_PARAMETERS),
     subagent_run_status: Compile(SUBAGENT_RUN_STATUS_PARAMETERS),
     subagent_run_steer: Compile(SUBAGENT_RUN_STEER_PARAMETERS),
@@ -73,7 +70,6 @@ test("each schema validates its frozen field surface and rejects unknown fields"
   };
   // 合法输入（含空参数）逐工具通过。
   const valid = [
-    ["subagent_roster", {}],
     ["subagent_start", { agent: "delegate", task: "只读调研" }],
     ["subagent_start", codingStart()],
     ["subagent_start", { ...codingStart(), model: " provider/model-id ", thinkingLevel: "high", title: "t", cwd: "/repo", worktree: true, output: false, outputMode: "inline", artifacts: false, progress: true, skill: "review", reads: ["a"] }],
@@ -90,8 +86,6 @@ test("each schema validates its frozen field surface and rejects unknown fields"
   }
   // 未知字段/跨面字段/不支持字段逐工具拒绝（additionalProperties:false，字段不扩）。
   const invalid = [
-    ["subagent_roster", { action: "list" }],
-    ["subagent_roster", { agent: "delegate" }],
     ["subagent_start", { agent: "delegate", task: "t", action: "status" }],
     ["subagent_start", { agent: "delegate", task: "t", id: "run-1" }],
     ["subagent_start", { agent: "delegate", task: "t", context: "reuse" }],
@@ -110,6 +104,8 @@ test("each schema validates its frozen field surface and rejects unknown fields"
     ["subagent_run_steer", { message: "" }],
     ["subagent_run_steer", { message: "go", mode: "auto" }],
     ["subagent_run_steer", { message: "go", model: "provider/x" }],
+    // steer 不再声明 dir：带 dir 的调用在 schema 参数层即被拒绝（status/interrupt/resume/stop 的 dir 不受影响）。
+    ["subagent_run_steer", { message: "go", index: 0, dir: "/repo/.pi/worktrees/w1" }],
     ["subagent_run_interrupt", { message: "x" }],
     ["subagent_run_resume", {}],
     ["subagent_run_resume", { message: "" }],
@@ -153,18 +149,17 @@ test("callbacks receive ToolDefinition.execute argument order unchanged", async 
   assert.deepEqual(calls.control.at(-1), ["tc-2", { action: "status", id: "run-1" }, signal, onUpdate, ctx]);
 });
 
-test("roster delegates an empty args surface to the fixed list action", async () => {
-  const { byName, calls, sentinel } = makeHarness();
-  assert.equal(await byName.subagent_roster.execute("tc-3", {}, undefined, undefined, { cwd: "/repo" }), sentinel);
-  assert.deepEqual(calls.control, [["tc-3", { action: "list" }, undefined, undefined, { cwd: "/repo" }]]);
+test("roster is retired without a replacement list tool or dispatcher call", () => {
+  const { byName, calls, tools } = makeHarness();
+  assert.equal(Object.hasOwn(byName, "subagent_roster"), false);
+  assert.deepEqual(tools.map((tool) => tool.name), TOOL_NAMES);
+  assert.deepEqual(calls.control, []);
   assert.deepEqual(calls.start, []);
 });
 
 test("unknown action in caller args fails closed on every tool without reaching the dispatcher", async () => {
   const { byName, calls } = makeHarness();
   const cases = [
-    ["subagent_roster", { action: "status" }],
-    ["subagent_roster", { action: "list" }],
     ["subagent_start", { agent: "delegate", task: "t", action: "status" }],
     ["subagent_run_status", { id: "r", action: "stop" }],
     ["subagent_run_steer", { message: "go", action: "resume" }],
@@ -235,7 +230,6 @@ test("cross-face and unknown fields fail closed without reaching the dispatcher"
     ["subagent_run_interrupt", { message: "x" }],
     ["subagent_run_resume", { message: "go", view: "transcript" }],
     ["subagent_run_stop", { message: "x" }],
-    ["subagent_roster", { agent: "delegate" }],
   ];
   let tc = 100;
   for (const [name, input] of cases) {

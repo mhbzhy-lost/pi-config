@@ -5,8 +5,7 @@ import { createTypedSubagentExtension } from "../packages/pi-subagents-enhanced/
 import { registerBuiltinAgentsViaEvents } from "../packages/pi-subagents-enhanced/src/compat/pi-subagents-0.75.ts";
 import { assertRunAuthorization } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/run-authorization.ts";
 
-// S4 之后模型面是 14 个独立工具，`tools[0]` 位置依赖会命中 subagent_roster。
-// 这里按工具名解析，roster 只接受空对象，派发字段一律走 subagent_start。
+// 模型面按工具名解析；roster 已退役，内部 list 诊断不再由模型工具注册。
 function operationTool(tools, name) {
   const tool = tools.find((candidate) => candidate.name === name);
   assert.ok(tool, `harness 未注册 ${name}`);
@@ -39,12 +38,13 @@ const codingContract = {
 
 };
 
-test("real repository admission list exposes all three trusted profiles without RPC or registry access", async () => {
+test("real repository internal admission list exposes all three trusted profiles without registering roster or accessing RPC/registry", async () => {
   const { pi, rpc, tools } = harness();
   const admission = registerBuiltinAgentsViaEvents({ pi, agentDir: new URL("../pi/", import.meta.url).pathname });
   rpc.ping = async () => { throw new Error("list must not call RPC"); };
-  createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, discoverAgents: admission.discoverAgents });
-  const result = await operationTool(tools, "subagent_roster").execute("real-list", {}, undefined, undefined, {
+  const runtime = createTypedSubagentExtension(pi, { rpc, cleanupStore: {}, discoverAgents: admission.discoverAgents });
+  assert.equal(tools.some((tool) => tool.name === "subagent_roster"), false);
+  const result = await runtime.tool.execute("real-list", { action: "list" }, undefined, undefined, {
     cwd: "/repo", modelRegistry: { getAvailable() { throw new Error("list must not call registry"); } },
   });
   try {
@@ -55,11 +55,11 @@ test("real repository admission list exposes all three trusted profiles without 
   } finally { admission.dispose(); }
 });
 
-test("repository admission list exposes trusted profiles without RPC or registry access", async () => {
+test("internal repository admission list preserves diagnostic metadata without registering roster or accessing RPC/registry", async () => {
   const { pi, rpc, tools } = harness();
   let calls = 0;
   rpc.ping = async () => { throw new Error("list must not call RPC"); };
-  createTypedSubagentExtension(pi, {
+  const runtime = createTypedSubagentExtension(pi, {
     rpc,
     cleanupStore: {},
     discoverAgents() {
@@ -71,7 +71,8 @@ test("repository admission list exposes trusted profiles without RPC or registry
       ] };
     },
   });
-  const result = await operationTool(tools, "subagent_roster").execute("list", {}, undefined, undefined, {
+  assert.equal(tools.some((tool) => tool.name === "subagent_roster"), false);
+  const result = await runtime.tool.execute("list", { action: "list" }, undefined, undefined, {
     cwd: "/repo",
     modelRegistry: { getAvailable() { throw new Error("list must not call registry"); } },
   });

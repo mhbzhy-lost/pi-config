@@ -18,21 +18,17 @@ const EMPTY_DIAGNOSTIC = "Required Pi shared AGENTS_SHARED.md is empty";
 
 // AGENTS_SHARED 本体必须完全角色中立；角色区别由 runtime 以 scope 显式选择，
 // 不让模型自行判断角色。共享块对 main/child 注入同一份源文字。
-const SHARED_BLOCK_OPEN =
-  '<pi_shared_instructions source="PI_CODING_AGENT_DIR/AGENTS_SHARED.md">';
-const SHARED_BLOCK_CLOSE = "</pi_shared_instructions>";
+// SDK 以 section key 自动包裹外层 XML；来源说明留在正文。
+const SHARED_INSTRUCTIONS_SOURCE = "来源：PI_CODING_AGENT_DIR/AGENTS_SHARED.md";
 
 // child 专属的子执行边界块由 runtime 独立追加（不来自 AGENTS_SHARED，不按标题
 // 解析抽取），只复用既有规范：既有 contact_supervisor need_decision 门禁、dispatch
 // 合同的 writePaths/criteria、工单需用户确认；不发明新 authority/工具/权限。
-const CHILD_BOUNDARIES_BLOCK_OPEN = '<pi_child_execution_boundaries source="runtime">';
-const CHILD_BOUNDARIES_BLOCK_CLOSE = "</pi_child_execution_boundaries>";
 const CHILD_EXECUTION_BOUNDARIES = [
-  CHILD_BOUNDARIES_BLOCK_OPEN,
+  "来源：runtime",
   "- 不得新增委派（不得派生新的 subagent），不得接管或重排主计划 DAG；只推进当前任务范围。",
   "- 关键前提矛盾、将超出 writePaths、acceptance criteria 客观不可能，或权限/产品决策阻塞时：停止相关操作，经 contact_supervisor（reason: \"need_decision\"）上报并等待决定；不得自行推断安全开关或新增 fallback。",
   "- 工单/申请流程未经用户确认不得提交；需要时经主管代询。",
-  CHILD_BOUNDARIES_BLOCK_CLOSE,
 ].join("\n");
 
 // child 运行时 ACK 沿用 installed public 机制（pi-subagents runtime-acknowledged-extensions
@@ -60,10 +56,6 @@ function notifyConfigurationError(ctx, message) {
   } catch {
     // 通知失败不得重新打开 provider 路径。
   }
-}
-
-function sharedBlock(instructions) {
-  return [SHARED_BLOCK_OPEN, instructions, SHARED_BLOCK_CLOSE].join("\n");
 }
 
 export function createAgentsSharedExtension(pi, {
@@ -94,34 +86,26 @@ export function createAgentsSharedExtension(pi, {
   });
 
   pi.on("before_agent_start", async (event) => {
-    const base = typeof event.systemPrompt === "string" ? event.systemPrompt : "";
-    // 自有两个块各自去重：重复 hook 或双重加载都只保留一个，不 strip 用户消息
-    // 或其它 feature 的 tag。
-    const additions = [];
-
-    if (!base.includes(SHARED_BLOCK_OPEN)) {
-      // 未经过 input 的 startup before hook 仍可加载。此处读取失败只说明输入门禁
-      // 覆盖不到该路径：不改写 system prompt 冒充 provider 错误，也不在 before hook
-      // throw 声称 fail-closed（Host 会 catch before hook 异常，throw 不构成拦截）。
-      const loaded = pendingInstructions === undefined
-        ? await loadInstructions(agentsSharedPath, readFile)
-        : { instructions: pendingInstructions };
-      pendingInstructions = undefined;
-      if (loaded.instructions !== undefined) {
-        additions.push(sharedBlock(loaded.instructions));
-      }
+    // 每轮持续声明自有 sections；只更新/撤回自己的 key，不解析其它 owner 的正文。
+    // 未经过 input 的 startup before hook 仍可加载。此处读取失败只说明输入门禁
+    // 覆盖不到该路径：不改写 system prompt 冒充 provider 错误，也不在 before hook
+    // throw 声称 fail-closed（Host 会 catch before hook 异常，throw 不构成拦截）。
+    const loaded = pendingInstructions === undefined
+      ? await loadInstructions(agentsSharedPath, readFile)
+      : { instructions: pendingInstructions };
+    pendingInstructions = undefined;
+    if (loaded.instructions === undefined) {
+      delete event.systemPromptOptions.sections.pi_shared_instructions;
     } else {
-      pendingInstructions = undefined;
+      event.systemPromptOptions.sections.pi_shared_instructions =
+        [SHARED_INSTRUCTIONS_SOURCE, loaded.instructions].join("\n");
     }
 
-    if (scope === "child" && !base.includes(CHILD_BOUNDARIES_BLOCK_OPEN)) {
-      additions.push(CHILD_EXECUTION_BOUNDARIES);
+    if (scope === "child") {
+      event.systemPromptOptions.sections.pi_child_execution_boundaries = CHILD_EXECUTION_BOUNDARIES;
+    } else {
+      delete event.systemPromptOptions.sections.pi_child_execution_boundaries;
     }
-
-    if (additions.length === 0) return undefined;
-    return {
-      systemPrompt: [base, ...additions].join("\n\n"),
-    };
   });
 
   pi.on("session_start", async () => {

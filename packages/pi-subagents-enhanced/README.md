@@ -20,7 +20,9 @@
 
 ## Subagent 独立操作工具
 
-fresh Host 的模型工具按对象与操作拆分：`subagent_start`/`subagent_roster`/`subagent_run_*`、`managed_workspace_*` 与 `supervisor_request_*`。旧union名称只用于历史记录显示，不在fresh Host注册；所有新工具仍复用原typed dispatcher、workspace service、supervisor adapter、owner/CAS与terminal proof。workspace处置以实时status/action_token为权威，coding child-owned integration不会因工具拆分改变。
+fresh Host 的 main 模型工具按对象与操作拆分：`subagent_start`/`subagent_run_*`、`managed_workspace_*` 与 `supervisor_request_*`。`subagent_roster` 已退役，旧 union 名称与 roster 只用于历史记录显示，不在 fresh runtime 注册，也没有隐藏、codemode 或别名替代入口；所有操作工具仍复用原 typed dispatcher、workspace service、supervisor adapter、owner/CAS 与 terminal proof。workspace 处置以实时 status/action_token 为权威，coding child-owned integration 不会因工具拆分改变。
+
+准入名册在每个 session/runtime generation 的 ready 链初始化一次，同一结构化 `advertised_subagents` section 在每次模型请求持续声明；compaction 后下一请求继续声明，无需依赖普通历史消息。new/resume session、reload 或 cwd 导致 runtime 替换时重新初始化；profile 修改需 reload 生效。条目只投影 canonical name 与完整 description，并声明默认不传 model、仅用户显式指定才传 model；真实 dispatch 仍逐次执行准入、可用模型与 authority 校验。admission 未就绪、快照失效或未启用 `subagent_start` 时撤回自有 section，不用固定角色兜底。名册复用既有 admission，不新增发现器、package exports，不启用原生旧 `subagent` union 或 `advertise`。fresh child 不新增父级编排名册，历史 transcript/result 与 roster→list 渲染映射保留。已经运行的旧 Host 需 fresh 启动或 reload 才加载新注册面，不会因源码列表改变自动卸载旧工具。详见 `../../docs/architecture/subagent-catalog-injection.md`。
 
 ## Standalone subagent workspace management
 

@@ -2,8 +2,8 @@
  * `customPrompt` / `forceSystemPrompt` 完整替换默认禁止策略测试。
  *
  * 用户授权范围：「测试集中保留检查，确保 customPrompt/forceSystemPrompt 默认不在本仓使用，
- * 例外白名单且逻辑确保 promptGuidelines 保留」。本文件**只新增测试与测试自有 helper**，
- * 不改生产代码、不改 rules/skills、不改上游 vendored 包。
+ * 例外白名单且逻辑确保 promptGuidelines 保留」。本文件维护既有行为矩阵与测试自有
+ * helper；GLOBAL/SHARED 结构化迁移后，自有完整替换白名单归零，不改 rules/skills/上游包。
  *
  * 证据边界（如实声明，不宣称形式验证）：
  * - 行为矩阵用**真实 SDK `ExtensionRunner.emitBeforeAgentStart`** 编排**真实生产 handler**
@@ -83,48 +83,18 @@ const REQUIRED_TEXT_PROBED_FILES = [
   "pi/extensions/subagent/config.json",
 ];
 
-/**
- * 自有生产 `before_agent_start` 完整替换 site 白名单。
- *
- * 定位不用易漂移的行号，而用「精确 path + enclosing 具名函数链 + handler 内序号 +
- * 结构化表达式 shape 指纹」四元组；任何一项漂移都会让测试红。
- * 每条必须挂**已执行的 preservation test id**，该测试用真实生产 handler + 真实
- * `ExtensionRunner` 证明 guideline canary 保留；behavior 红 → 白名单条目在本文件内即失效。
- */
-const REPLACEMENT_WHITELIST = [
-  {
-    path: "src/agents-global/index.ts",
-    enclosing: "function createAgentsGlobalExtension > arrow",
-    ordinal: 1,
-    shape: "id(base).slice(num,id(ownBlock).start)+id(fresh)+id(base).slice(id(ownBlock).end)",
-    reason:
-      "GLOBAL 自有块最小替换分支：base 中已存在 <pi_global_instructions> 且本轮快照不同时，只把 open..close 区间换成新块，区间外逐字保留（不 strip 其它 feature 的 tag、不吞 <rules> guidelines）。",
-    preservationTest: "behavior#global-block-replace-preserves-base-and-canary",
-    supportingTests: ["behavior#global-block-replace-keeps-foreign-block-outside-own-region"],
-  },
-  {
-    path: "src/agents-global/index.ts",
-    enclosing: "function createAgentsGlobalExtension > arrow",
-    ordinal: 2,
-    shape: "[id(base),id(globalBlock)(id(loaded).instructions)].join(str)",
-    reason:
-      "GLOBAL 纯追加分支：`[base, globalBlock(...)].join(\"\\n\\n\")`，base 是 SDK 当轮已渲染的完整 prompt（含 <rules> 里的 toolGuidelines/promptGuidelines），只在尾部追加自有块。",
-    preservationTest: "behavior#global-append-preserves-base-and-canary",
-    supportingTests: ["behavior#global-then-shared-order-preserves-canary"],
-  },
-  {
-    path: "src/agents-shared/index.ts",
-    enclosing: "function createAgentsSharedExtension > arrow",
-    ordinal: 1,
-    shape: "[id(base),...id(additions)].join(str)",
-    reason:
-      "SHARED 纯追加分支：`[base, ...additions].join(\"\\n\\n\")`，additions 只可能是共享块与 child 边界块，main/child 两种 scope 都在 base 之后追加，不重写 base。",
-    preservationTest: "behavior#shared-append-preserves-base-and-canary",
-    supportingTests: [
-      "behavior#shared-child-append-preserves-base-and-adds-boundaries",
-      "behavior#shared-then-global-order-preserves-canary",
-    ],
-  },
+/** 自有生产 before_agent_start 不再允许完整替换；新增 site 一律默认拒绝。 */
+const REPLACEMENT_WHITELIST = [];
+
+/** 既有 preservation 矩阵独立于空白名单维护，继续核对真实 handler 的执行事实。 */
+const REQUIRED_PRESERVATION_TESTS = [
+  "behavior#global-append-preserves-base-and-canary",
+  "behavior#global-block-replace-preserves-base-and-canary",
+  "behavior#global-block-replace-keeps-foreign-block-outside-own-region",
+  "behavior#shared-append-preserves-base-and-canary",
+  "behavior#shared-child-append-preserves-base-and-adds-boundaries",
+  "behavior#global-then-shared-order-preserves-canary",
+  "behavior#shared-then-global-order-preserves-canary",
 ];
 
 /**
@@ -147,10 +117,8 @@ const PROFILE_ROSTER = ["delegate.md", "executor.md", "reviewer.md"];
 
 /** 期望的 site 计数：静态事实一旦漂移（新增替换入口、DTO、读访问）测试即红，逼迫显式复核。 */
 const EXPECTED_SITE_COUNTS = Object.freeze({
-  "handler-return-replacement": 3,
   "data-dto": 1,
   "type-declaration": 2,
-  "read-access": 4,
   "flag-classifier-literal": 2,
   "append-flag-literal": 2,
 });
@@ -160,11 +128,11 @@ const SHARED_FIXTURE = "# PI AGENTS SHARED 正文\n- 共享规则一\n- 共享�
 const FOREIGN_BLOCK = '<foreign_feature_tag source="other-feature">\n外部 feature 的自有内容\n</foreign_feature_tag>';
 
 /* -------------------------------------------------------------------------- */
-/* preservation test 注册表：白名单 id 必须真的被执行过                          */
+/* preservation test 注册表：迁移后仍必须完整执行既有真实 handler 矩阵          */
 /* -------------------------------------------------------------------------- */
 
 const executedTests = new Set();
-/** 只有被白名单引用的 preservation test 才进这个集合；用无关伪 handler 让绿会被 orphan 断言抓住。 */
+/** 实际执行的 preservation test 集合，不能因完整替换白名单清空而静默放弃行为证据。 */
 const executedPreservationTests = new Set();
 
 function behaviorTest(id, fn) {
@@ -174,7 +142,7 @@ function behaviorTest(id, fn) {
   });
 }
 
-/** 白名单 preservation test：真实生产 handler + 真实 ExtensionRunner，且被 policy#... 守卫核对执行事实。 */
+/** 既有 preservation test：真实生产 handler + 真实 ExtensionRunner。 */
 function preservationTest(id, fn) {
   test(id, async () => {
     await fn();
@@ -207,7 +175,9 @@ preservationTest("behavior#global-append-preserves-base-and-canary", async () =>
   const global = installAgentsGlobal({ instructions: GLOBAL_FIXTURE });
   const run = await runBeforeAgentStart({ extensions: [global.extension] });
   assert.equal(run.errors.length, 0);
-  // base 逐字保留为前缀：这是「纯追加」而不是「重排/截断后拼接」的可验证形式。
+  assert.equal(run.systemPromptOptions.forceSystemPrompt, undefined, "GLOBAL 不得引入 forceSystemPrompt");
+  assert.equal(run.systemPromptOptions.sections.pi_global_instructions, `来源：PI_CODING_AGENT_DIR/AGENTS_GLOBAL.md\n${GLOBAL_FIXTURE}`);
+  assert.equal(run.final.split(GLOBAL_BLOCK_OPEN).length - 1, 1, "SDK 只包一层 GLOBAL XML");
   assert.ok(run.final.startsWith(run.base), "GLOBAL 追加后 base 必须逐字保留为前缀");
   assert.ok(run.final.includes(GLOBAL_BLOCK_OPEN), "GLOBAL 自有块必须存在");
   assert.ok(run.final.includes(GLOBAL_FIXTURE), "GLOBAL 正文必须注入");
@@ -217,11 +187,10 @@ preservationTest("behavior#global-append-preserves-base-and-canary", async () =>
 });
 
 preservationTest("behavior#global-block-replace-preserves-base-and-canary", async () => {
-  // 双重加载场景：两个**真实** GLOBAL factory 实例，快照内容不同。
-  // 第一个实例走纯追加分支写入 v1 块，第二个实例命中「自有块已存在且内容不同」的最小替换分支。
+  // 双重加载场景：两个真实 GLOBAL factory 写同一个自有 section key，后者替换正文。
   const first = installAgentsGlobal({ extensionPath: "<src/agents-global/index.ts#first>", instructions: "GLOBAL v1 正文" });
   const second = installAgentsGlobal({ extensionPath: "<src/agents-global/index.ts#second>", instructions: "GLOBAL v2 正文（已更新）" });
-  // 替换分支消费 input 门禁捕获的 pending 快照；不绕过正常事件顺序。
+  // 保留正常事件顺序：两个实例各自消费 input 门禁捕获的 pending 快照。
   const input = await runInput({ extensions: [first.extension, second.extension] });
   assert.deepEqual(input.result, { action: "continue" });
   const run = await runBeforeAgentStart({ extensions: [first.extension, second.extension] });
@@ -233,18 +202,23 @@ preservationTest("behavior#global-block-replace-preserves-base-and-canary", asyn
     1,
     "自有块必须只有一个（去重语义不被替换分支破坏）",
   );
-  assertCanaryRetained(run.final, "GLOBAL 自有块最小替换");
+  assert.equal(run.systemPromptOptions.forceSystemPrompt, undefined, "section 替换不得变成完整 override");
+  assert.equal(run.systemPromptOptions.sections.pi_global_instructions, "来源：PI_CODING_AGENT_DIR/AGENTS_GLOBAL.md\nGLOBAL v2 正文（已更新）");
+  assertCanaryRetained(run.final, "GLOBAL 自有 section 替换");
 });
 
 preservationTest("behavior#global-block-replace-keeps-foreign-block-outside-own-region", async () => {
-  // 关键回归：替换分支只能动 open..close 区间，块外内容（含 guidelines 与其它 feature 的 tag）
-  // 必须逐字保留。用一个已经含 base + 外部 tag + GLOBAL v1 块的 prompt 作为第二轮起点。
+  // 正规结构化续轮：上一轮的 options 与外部 section 交给 Runner，不能以 force
+  // 伪造历史再要求自有 hook 改写外部 override。只允许自有 section 正文发生变化。
   const first = installAgentsGlobal({ extensionPath: "<src/agents-global/index.ts#first>", instructions: "GLOBAL v1 正文" });
-  const seeded = await runBeforeAgentStart({ extensions: [first.extension] });
-  const seededBase = `${seeded.final}\n\n${FOREIGN_BLOCK}`;
+  const seeded = await runBeforeAgentStart({
+    extensions: [first.extension],
+    options: createCanaryOptions({ extra: { sections: { foreign_feature: FOREIGN_BLOCK } } }),
+  });
+  const seededBase = seeded.final;
 
   const second = installAgentsGlobal({ extensionPath: "<src/agents-global/index.ts#second>", instructions: "GLOBAL v2 正文" });
-  // 第二个实例必须先经真实 runner 的 input 门禁拿到本轮快照，否则生产逻辑按设计不动 base。
+  // 第二个实例先经真实 runner 的 input 门禁拿到本轮快照。
   const seededInput = await runInput({ extensions: [second.extension] });
   assert.deepEqual(seededInput.result, { action: "continue" });
   const probeBefore = createExtensionRecorder("<probe:seeded-base>");
@@ -257,8 +231,7 @@ preservationTest("behavior#global-block-replace-keeps-foreign-block-outside-own-
   ]);
   const run = await runBeforeAgentStart({
     extensions: [probeBefore.extension, second.extension],
-    // 把上一轮结果 + 外部 tag 作为本轮起点（真实 Host 的 forced prompt 续轮形状）。
-    options: createCanaryOptions({ extra: { forceSystemPrompt: seededBase } }),
+    options: seeded.systemPromptOptions,
   });
   assert.equal(run.errors.length, 0);
   assert.equal(observedBase, seededBase, "handler 必须看到逐字的既有 base");
@@ -270,6 +243,9 @@ preservationTest("behavior#global-block-replace-keeps-foreign-block-outside-own-
   const afterOwn = run.final.slice(closeIndex + GLOBAL_BLOCK_CLOSE.length);
   assert.equal(beforeOwn, seededBase.slice(0, seededBase.indexOf(GLOBAL_BLOCK_OPEN)), "自有块之前的内容必须逐字保留");
   assert.equal(afterOwn, seededBase.slice(seededBase.indexOf(GLOBAL_BLOCK_CLOSE) + GLOBAL_BLOCK_CLOSE.length), "自有块之后的内容（含外部 feature tag）必须逐字保留");
+  assert.equal(run.systemPromptOptions.forceSystemPrompt, undefined);
+  assert.equal(run.systemPromptOptions.sections.foreign_feature, FOREIGN_BLOCK, "外部 section 正文逐字保留");
+  assert.equal(seeded.systemPromptOptions.sections.pi_global_instructions, "来源：PI_CODING_AGENT_DIR/AGENTS_GLOBAL.md\nGLOBAL v1 正文", "不得改写传入的上一轮 options");
   assert.ok(run.final.includes(FOREIGN_BLOCK), "替换分支不得吞掉块外的其它 feature 内容");
   assert.ok(run.final.includes("GLOBAL v2 正文"), "本轮新快照必须生效");
   assertCanaryRetained(run.final, "GLOBAL 块外内容保留");
@@ -277,9 +253,15 @@ preservationTest("behavior#global-block-replace-keeps-foreign-block-outside-own-
 
 preservationTest("behavior#shared-append-preserves-base-and-canary", async () => {
   const shared = installAgentsShared({ instructions: SHARED_FIXTURE, scope: "main" });
-  const run = await runBeforeAgentStart({ extensions: [shared.extension] });
+  const run = await runBeforeAgentStart({
+    extensions: [shared.extension],
+    options: createCanaryOptions({ extra: { sections: { pi_child_execution_boundaries: "上一轮 child 边界" } } }),
+  });
   assert.equal(run.errors.length, 0);
-  assert.ok(run.final.startsWith(run.base), "SHARED main scope 追加后 base 必须逐字保留为前缀");
+  assert.equal(run.systemPromptOptions.forceSystemPrompt, undefined);
+  assert.equal(run.systemPromptOptions.sections.pi_shared_instructions, `来源：PI_CODING_AGENT_DIR/AGENTS_SHARED.md\n${SHARED_FIXTURE}`);
+  assert.equal(run.systemPromptOptions.sections.pi_child_execution_boundaries, undefined, "main 撤回自己的 child section");
+  assert.equal(run.final.split(SHARED_BLOCK_OPEN).length - 1, 1, "SDK 只包一层 SHARED XML");
   assert.ok(run.final.includes(SHARED_BLOCK_OPEN), "SHARED 自有块必须存在");
   assert.ok(run.final.includes(SHARED_FIXTURE), "SHARED 正文必须注入");
   assert.ok(!run.final.includes(SHARED_CHILD_BLOCK_OPEN), "main scope 不得注入 child 边界块");
@@ -290,11 +272,24 @@ preservationTest("behavior#shared-child-append-preserves-base-and-adds-boundarie
   const shared = installAgentsShared({ instructions: SHARED_FIXTURE, scope: "child" });
   const run = await runBeforeAgentStart({ extensions: [shared.extension] });
   assert.equal(run.errors.length, 0);
+  assert.equal(run.systemPromptOptions.forceSystemPrompt, undefined);
+  assert.equal(run.systemPromptOptions.sections.pi_shared_instructions, `来源：PI_CODING_AGENT_DIR/AGENTS_SHARED.md\n${SHARED_FIXTURE}`);
+  assert.deepEqual(run.systemPromptOptions.sections.pi_child_execution_boundaries.split("\n"), [
+    "来源：runtime",
+    "- 不得新增委派（不得派生新的 subagent），不得接管或重排主计划 DAG；只推进当前任务范围。",
+    '- 关键前提矛盾、将超出 writePaths、acceptance criteria 客观不可能，或权限/产品决策阻塞时：停止相关操作，经 contact_supervisor（reason: "need_decision"）上报并等待决定；不得自行推断安全开关或新增 fallback。',
+    "- 工单/申请流程未经用户确认不得提交；需要时经主管代询。",
+  ], "child 边界正文逐字保持，不新增权限");
+  assert.equal(run.systemPromptOptions.sections.pi_global_instructions, undefined, "SHARED child 不得发布 GLOBAL");
+  assert.equal(run.final.split(SHARED_CHILD_BLOCK_OPEN).length - 1, 1, "SDK 只包一层 child XML");
   assert.ok(run.final.startsWith(run.base), "SHARED child scope 追加后 base 必须逐字保留为前缀");
   assert.ok(run.final.includes(SHARED_BLOCK_OPEN), "child 仍必须收到同一份共享块");
   assert.ok(run.final.includes(SHARED_CHILD_BLOCK_OPEN), "child scope 必须追加运行时边界块");
   assertCanaryRetained(run.final, "SHARED child 追加");
   assert.equal(shared.emittedEvents.length, 0, "before_agent_start 阶段不得发 ACK（ACK 属 session_start）");
+  await run.runner.emit({ type: "session_start" });
+  assert.equal(run.errors.length, 0);
+  assert.deepEqual(shared.emittedEvents, [{ name: "subagent:acknowledge-extension", payload: { id: "agents-shared" } }], "child startup 成功后保留 required ACK");
 });
 
 preservationTest("behavior#global-then-shared-order-preserves-canary", async () => {
@@ -302,6 +297,8 @@ preservationTest("behavior#global-then-shared-order-preserves-canary", async () 
   const shared = installAgentsShared({ instructions: SHARED_FIXTURE, scope: "main" });
   const run = await runBeforeAgentStart({ extensions: [global.extension, shared.extension] });
   assert.equal(run.errors.length, 0);
+  assert.equal(run.systemPromptOptions.forceSystemPrompt, undefined);
+  assert.equal(run.systemPromptOptions.sections.pi_child_execution_boundaries, undefined);
   assert.ok(run.final.startsWith(run.base), "GLOBAL→SHARED 顺序下 base 仍必须逐字保留");
   assertCanaryRetained(run.final, "GLOBAL→SHARED");
   assert.ok(run.final.indexOf(GLOBAL_BLOCK_OPEN) < run.final.indexOf(SHARED_BLOCK_OPEN), "两块必须各自独立存在且按加载顺序排列");
@@ -314,6 +311,7 @@ preservationTest("behavior#shared-then-global-order-preserves-canary", async () 
   const global = installAgentsGlobal({ instructions: GLOBAL_FIXTURE });
   const run = await runBeforeAgentStart({ extensions: [shared.extension, global.extension] });
   assert.equal(run.errors.length, 0);
+  assert.equal(run.systemPromptOptions.forceSystemPrompt, undefined);
   assert.ok(run.final.startsWith(run.base), "SHARED→GLOBAL 顺序下 base 仍必须逐字保留");
   assertCanaryRetained(run.final, "SHARED→GLOBAL");
   assert.ok(run.final.includes(SHARED_CHILD_BLOCK_OPEN), "child 边界块不得被后加载的 GLOBAL 吞掉");
@@ -351,10 +349,16 @@ behaviorTest("behavior#negative-customPrompt-drops-guidelines", async () => {
 });
 
 behaviorTest("behavior#negative-forceSystemPrompt-is-opaque-and-drops-guidelines", async () => {
+  const global = installAgentsGlobal({ instructions: GLOBAL_FIXTURE });
+  const shared = installAgentsShared({ instructions: SHARED_FIXTURE });
   const run = await runBeforeAgentStart({
-    extensions: [],
+    extensions: [global.extension, shared.extension],
     options: createCanaryOptions({ extra: { forceSystemPrompt: "FORCED-ONLY-CONTENT" } }),
   });
+  assert.equal(run.systemPromptOptions.forceSystemPrompt, "FORCED-ONLY-CONTENT", "自有 hooks 不得清除或替换其他 owner 的 force");
+  assert.equal(run.final, "FORCED-ONLY-CONTENT", "外部强制覆盖保持不透明，自有 sections 无法解除遮蔽");
+  assert.ok(run.systemPromptOptions.sections.pi_global_instructions.includes(GLOBAL_FIXTURE));
+  assert.ok(run.systemPromptOptions.sections.pi_shared_instructions.includes(SHARED_FIXTURE));
   assert.equal(run.base, "FORCED-ONLY-CONTENT", "forceSystemPrompt 的 content 不透明、无 sections");
   assert.ok(!run.base.includes(GUIDELINE_CANARY.prompt), "forceSystemPrompt 下 promptGuidelines canary 消失");
   assert.ok(!run.base.includes("<rules>"), "forceSystemPrompt 下不存在结构化 section");
@@ -394,34 +398,65 @@ behaviorTest("behavior#negative-real-handlers-unreadable-file-never-fabricate-re
   // 真实生产 handler 在规范文件缺失时不得伪造错误 system prompt 冒充 provider 拦截。
   const global = installAgentsGlobal({ instructions: new Error("ENOENT: fixture AGENTS_GLOBAL.md missing") });
   const sharedMain = installAgentsShared({ instructions: new Error("ENOENT: fixture AGENTS_SHARED.md missing"), scope: "main" });
-  const run = await runBeforeAgentStart({ extensions: [global.extension, sharedMain.extension] });
+  const run = await runBeforeAgentStart({
+    extensions: [global.extension, sharedMain.extension],
+    options: createCanaryOptions({ extra: { sections: {
+      foreign_feature: FOREIGN_BLOCK,
+      pi_global_instructions: "上轮 GLOBAL",
+      pi_shared_instructions: "上轮 SHARED",
+    } } }),
+  });
   assert.equal(run.errors.length, 0);
   assert.equal(run.systemPromptOptions.forceSystemPrompt, undefined, "读取失败不得改写成错误 system prompt");
-  assert.equal(run.final, run.base, "读取失败时 base 逐字不动");
+  assert.deepEqual(run.systemPromptOptions.sections, { foreign_feature: FOREIGN_BLOCK }, "无有效数据只撤回自有 keys");
+  assert.equal(run.final, run.base.slice(0, run.base.indexOf(GLOBAL_BLOCK_OPEN)).trimEnd(), "撤回自有 sections 后其它正文逐字保持");
   assertCanaryRetained(run.final, "真实 handler 读取失败路径");
+  const input = await runInput({ extensions: [global.extension, sharedMain.extension] });
+  assert.deepEqual(input.result, { action: "handled" }, "缺文件仍由 input 门禁短路");
+  await run.runner.emit({ type: "session_start" });
+  assert.equal(run.errors.length, 2, "GLOBAL/SHARED startup 读取失败仍报告扩展错误");
+  assert.deepEqual(sharedMain.emittedEvents, [], "读取失败不得发 required ACK");
 
-  // child scope 的边界块来自 runtime 而非 AGENTS_SHARED，因此仍会追加；
-  // 关键是它仍然是「base 逐字保留 + 追加」，canary 不丢。
-  const sharedChild = installAgentsShared({ instructions: new Error("ENOENT"), scope: "child" });
+  // child scope 的边界正文来自 runtime，仍由独立 section 持续声明。
+  const sharedChild = installAgentsShared({ instructions: " \n\t", scope: "child" });
   const childRun = await runBeforeAgentStart({ extensions: [sharedChild.extension] });
   assert.ok(childRun.final.startsWith(childRun.base), "child 边界块仍必须是追加而不是替换");
   assert.ok(childRun.final.includes(SHARED_CHILD_BLOCK_OPEN), "child 边界块与 AGENTS_SHARED 可读性无关");
   assert.ok(!childRun.final.includes(SHARED_BLOCK_OPEN), "共享文件不可读时不得注入空的共享块");
   assertCanaryRetained(childRun.final, "child 边界块追加");
+  const childInput = await runInput({ extensions: [sharedChild.extension] });
+  assert.deepEqual(childInput.result, { action: "handled" }, "空文件仍由 input 门禁短路");
+  await childRun.runner.emit({ type: "session_start" });
+  assert.equal(childRun.errors.length, 1, "child 空文件 startup 仍报告扩展错误");
+  assert.match(childRun.errors[0].error, /Required Pi shared AGENTS_SHARED.md is empty/);
+  assert.deepEqual(sharedChild.emittedEvents, [], "空文件不得发 required ACK");
 });
 
 behaviorTest("behavior#input-gate-loads-snapshot-through-real-runner", async () => {
   // 真实 runner 的 emitInput 门禁：生产 handler 在 input 阶段加载快照，
-  // before_agent_start 消费同一快照，两个阶段都不引入 customPrompt/forceSystemPrompt。
-  const global = installAgentsGlobal({ instructions: GLOBAL_FIXTURE });
-  const shared = installAgentsShared({ instructions: SHARED_FIXTURE, scope: "main" });
+  // before_agent_start 消费同一快照，不额外读取，也不引入完整 override。
+  let globalReads = 0;
+  let sharedReads = 0;
+  const global = installAgentsGlobal({ instructions: () => { globalReads++; return GLOBAL_FIXTURE; } });
+  const shared = installAgentsShared({ instructions: () => { sharedReads++; return SHARED_FIXTURE; }, scope: "main" });
   const input = await runInput({ extensions: [global.extension, shared.extension] });
   assert.equal(input.errors.length, 0);
   assert.deepEqual(input.result, { action: "continue" }, "input 门禁必须放行而不是 handled 短路");
   const run = await runBeforeAgentStart({ extensions: [global.extension, shared.extension] });
   assert.equal(run.systemPromptOptions.customPrompt, undefined);
+  assert.equal(run.systemPromptOptions.forceSystemPrompt, undefined);
+  assert.deepEqual([globalReads, sharedReads], [1, 1], "before hook 必须使用 input 快照，不重复读取");
   assert.ok(run.final.includes(GLOBAL_FIXTURE) && run.final.includes(SHARED_FIXTURE), "input 阶段的快照必须被 before_agent_start 消费");
   assertCanaryRetained(run.final, "input 门禁 + before_agent_start");
+  const repeated = await runBeforeAgentStart({ extensions: [global.extension, shared.extension] });
+  assert.equal(repeated.errors.length, 0);
+  assert.deepEqual(repeated.systemPromptOptions.sections, run.systemPromptOptions.sections, "新一轮 options 仍必须声明全部有效正文");
+  assert.equal(repeated.systemPromptOptions.forceSystemPrompt, undefined);
+  assertCanaryRetained(repeated.final, "重复轮次 sections");
+  await run.runner.emit({ type: "session_start" });
+  assert.equal(run.errors.length, 0);
+  assert.deepEqual(global.emittedEvents, [], "GLOBAL 不发 child required ACK");
+  assert.deepEqual(shared.emittedEvents, [{ name: "subagent:acknowledge-extension", payload: { id: "agents-shared" } }], "SHARED startup 读取成功且 handler 安装后 ACK");
 });
 
 /* -------------------------------------------------------------------------- */
@@ -482,9 +517,10 @@ test("policy#customPrompt-and-forceSystemPrompt-absent-from-production", () => {
   const report = scanProduction();
   const banned = report.violations.filter((item) => item.rule.startsWith("banned-override"));
   assert.deepEqual(banned, [], `customPrompt/forceSystemPrompt/systemPromptOverride 默认不得出现在自有生产代码：\n${formatViolations(banned)}`);
-  // 反向自证扫描不是空转：白名单/DTO/只读访问 site 确实被识别到。
-  assert.ok(report.sites.some((site) => site.kind === "read-access"), "扫描必须识别到 event.systemPrompt 只读访问");
-  assert.ok(report.sites.some((site) => site.kind === "handler-return-replacement"), "扫描必须识别到 handler 返回替换 site");
+  // 反向自证扫描不是空转：DTO/类型/flag 精确 sites 仍被识别，完整 override 为零。
+  assert.equal(report.sites.filter((site) => site.kind === "handler-return-replacement").length, 0);
+  assert.equal(REPLACEMENT_WHITELIST.length, 0);
+  assert.equal(report.sites.filter((site) => site.kind === "data-dto").length, DATA_DTO_SITES.length);
 });
 
 test("policy#profile-frontmatter-requires-explicit-append", async () => {
@@ -518,15 +554,15 @@ test("policy#no-system-md-in-own-scope-and-append-system-md-is-legal", () => {
 });
 
 test("policy#whitelist-preservation-tests-actually-executed", () => {
-  const required = new Set();
+  const required = new Set(REQUIRED_PRESERVATION_TESTS);
   for (const entry of REPLACEMENT_WHITELIST) {
     required.add(entry.preservationTest);
     for (const supporting of entry.supportingTests ?? []) required.add(supporting);
   }
   const missing = [...required].filter((id) => !executedPreservationTests.has(id));
-  assert.deepEqual(missing, [], `白名单引用的 preservation test 未执行（白名单条目因此不生效）：${JSON.stringify(missing)}`);
+  assert.deepEqual(missing, [], `既有真实 handler preservation test 未执行：${JSON.stringify(missing)}`);
   const orphans = [...executedPreservationTests].filter((id) => !required.has(id));
-  assert.deepEqual(orphans, [], `存在与白名单无关的 preservation test id（不得用无关伪 handler 让白名单变绿）：${JSON.stringify(orphans)}`);
+  assert.deepEqual(orphans, [], `存在未登记的 preservation test id：${JSON.stringify(orphans)}`);
 });
 
 /* -------------------------------------------------------------------------- */

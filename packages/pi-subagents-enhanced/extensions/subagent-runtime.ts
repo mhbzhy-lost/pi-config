@@ -22,6 +22,8 @@ import { createRenewableTypedSubagentRpcClient, createTypedSubagentRpcClient } f
 import { createCoordinatorProofOutbox } from "../src/subagent-dispatch/coordinator-proof-outbox.ts";
 import { classifyTerminalProofBinding } from "../src/subagent-dispatch/terminal-proof-binding.ts";
 import { resolveRootSessionId } from "../src/subagent-dispatch/root-broker-protocol.ts";
+import { createRunAuthorization } from "../src/subagent-dispatch/run-authorization.ts";
+import { parseIntegrationResumeIntentV1 } from "../src/subagent-dispatch/recovery-resume-contract.ts";
 import { COORDINATOR_OPERATIONS } from "../src/subagent-dispatch/root-broker-protocol.ts";
 import { closeAndUnbindRootBroker, inspectRootBrokerExecutionProof, registerRootBrokerAuthorizedRun, startAndBindRootBroker } from "../src/subagent-dispatch/root-broker-registry.ts";
 import { RootBrokerServer, rootBrokerTerminalProofId, type TerminalProofDeliveryOutcome } from "../src/subagent-dispatch/root-broker-server.ts";
@@ -470,6 +472,62 @@ export default function subagentRuntime(pi: ExtensionAPI): void {
         throw error;
       }
       await registerRootBrokerAuthorizedRun(pi, authorization, broker.rootSessionId);
+    },
+    managedCodingResume: {
+      events: pi.events,
+      async prepare({ sourceRunId, ownerState, owner }: any) {
+        if (!coordinatorRuntime?.client || !brokerReady || !broker) {
+          if (ownerState === "owned") {
+            throw Object.assign(new Error("managed resume coordinator identity is unavailable"), { code: "RESUME_BINDING_BLOCKED" });
+          }
+          return undefined;
+        }
+        const owned = await coordinatorRuntime.client.listOwned({ runId: sourceRunId });
+        if (!Array.isArray(owned)) throw Object.assign(new Error("managed resume workspace ownership is unavailable"), { code: "RESUME_BINDING_BLOCKED" });
+        if (owned.length === 0) return undefined;
+        if (owned.length !== 1) throw Object.assign(new Error("managed resume requires exactly one owned workspace"), { code: "RESUME_BINDING_BLOCKED" });
+        if (ownerState !== "owned" || !owner || owner.runId !== sourceRunId || owner.rootSessionId !== broker.rootSessionId) {
+          throw Object.assign(new Error("managed resume owner identity is unavailable"), { code: "RESUME_BINDING_BLOCKED" });
+        }
+        const record = owned[0];
+        if (record?.owner?.kind !== "standalone-subagent" || record.owner.rootSessionId !== broker.rootSessionId
+            || record?.run?.runId !== sourceRunId || !Number.isSafeInteger(owner.ownerGeneration) || owner.ownerGeneration <= 0) {
+          throw Object.assign(new Error("managed resume owner binding is invalid"), { code: "RESUME_BINDING_BLOCKED" });
+        }
+        const expectedAgent = record?.run?.agentProfile;
+        if (typeof expectedAgent !== "string" || expectedAgent.length === 0) {
+          throw Object.assign(new Error("managed resume source agent identity is unavailable"), { code: "RESUME_BINDING_BLOCKED" });
+        }
+        const intents = await coordinatorRuntime.client.recoveryStatus();
+        const matches = Array.isArray(intents)
+          ? intents.filter((entry: any) => entry?.version === "integration-resume-intent.v1" && entry.sourceRunId === sourceRunId)
+          : [];
+        if (matches.length !== 1) throw Object.assign(new Error("managed resume intent is unavailable or ambiguous"), { code: "RESUME_BINDING_BLOCKED" });
+        const intent = parseIntegrationResumeIntentV1(matches[0], { rootSessionId: broker.rootSessionId });
+        if (intent.workspaceId !== record.workspaceId || intent.leaseId !== record.leaseId || intent.state !== "pending" || intent.resumedRun !== null) {
+          throw Object.assign(new Error("managed resume intent is not activatable"), { code: "RESUME_BINDING_BLOCKED" });
+        }
+        return Object.freeze({ intent, expectedAgent, expectedSessionId: broker.lifecycleSessionId });
+      },
+      async register(binding: any) {
+        if (!brokerReady || !broker) throw Object.assign(new Error("Root Broker is unavailable for managed resume"), { code: "RESUME_BINDING_BLOCKED" });
+        const authorization = createRunAuthorization({ kind: "coding", binding, goal: null });
+        await registerRootBrokerAuthorizedRun(pi, authorization, broker.rootSessionId);
+      },
+      async activate({ plan, resumedRun }: any) {
+        if (!coordinatorRuntime?.client || !broker) throw Object.assign(new Error("managed resume coordinator is unavailable"), { code: "RESUME_BINDING_BLOCKED" });
+        const intent = plan.intent;
+        return coordinatorRuntime.client.activateResume({
+          resumeIntentId: intent.resumeIntentId,
+          workspaceId: intent.workspaceId,
+          leaseId: intent.leaseId,
+          sourceRunId: intent.sourceRunId,
+          resumedRun,
+          ownerScope: intent.ownerScope,
+          generation: intent.generation,
+          authorization: "root",
+        });
+      },
     },
     inspectExecutionProof: (runId: string) => {
       if (!brokerReady || !broker) return { state: "unknown" };

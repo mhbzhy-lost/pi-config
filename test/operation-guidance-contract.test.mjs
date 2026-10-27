@@ -1,7 +1,7 @@
 // S5 引导迁移合同测试（计划 §2.3、§S5；docs/plans/records/2026-10-16-operation-tools/contract.md §2.1-§2.3/§4）。
 //
 // 边界（如实声明，不夸大）：
-// - 本文件只做「文本迁移」合同核对：14 个新工具 description/prompt 短说明与 S0 对象/必填/权威一致；
+// - 本文件只做「文本迁移」合同核对：roster 退役后的 13 个工具 description/prompt 短说明与 S0 对象/必填/权威一致；
 //   本仓自有 spawn/reminder 回执不再无条件建议 integrate/discard，改指 managed_workspace_status 实时权威；
 //   AGENTS_GLOBAL 旧调用示例切到新工具名并保留治理/授权/恢复政策；bash_async 第4条只补 Host/RPC 限定。
 // - 对 extension.ts / completion-reminder.ts 的 receipt 断言采用「源码文本 + 真实 factory」两层：
@@ -58,20 +58,20 @@ function byName(tools) {
 }
 
 /* ------------------------------------------------------------------ */
-/* 1. 14 新工具 description/prompt 与 S0 对象/必填/权威一致             */
+/* 1. 13 个工具 description/prompt 与 S0 对象/必填/权威一致             */
 /* ------------------------------------------------------------------ */
 
-test("引导合同：14 新工具名齐备、旧 union 名不进入新工具面", () => {
+test("引导合同：13 个操作工具名齐备、roster 与旧 union 名不进入工具面", () => {
   const names = [...subagentTools(), ...workspaceTools(), ...supervisorTools()].map((tool) => tool.name);
-  assert.equal(names.length, 14, `新模型工具必须恰好 14 个：${names.join(",")}`);
-  assert.deepEqual(names.slice(0, 7), [
-    "subagent_roster", "subagent_start", "subagent_run_status", "subagent_run_steer",
+  assert.equal(names.length, 13, `模型工具必须恰好 13 个：${names.join(",")}`);
+  assert.deepEqual(names.slice(0, 6), [
+    "subagent_start", "subagent_run_status", "subagent_run_steer",
     "subagent_run_interrupt", "subagent_run_resume", "subagent_run_stop",
   ]);
-  assert.deepEqual(names.slice(7, 11), [...WORKSPACE_OPERATION_TOOL_NAMES]);
-  assert.deepEqual(names.slice(11), ["supervisor_request_pending", "supervisor_request_status", "supervisor_request_reply"]);
-  for (const legacy of ["subagent", "subagent_worktree", "subagent_supervisor"]) {
-    assert.equal(names.includes(legacy), false, `旧 union 名 ${legacy} 不得重新出现在新工具面`);
+  assert.deepEqual(names.slice(6, 10), [...WORKSPACE_OPERATION_TOOL_NAMES]);
+  assert.deepEqual(names.slice(10), ["supervisor_request_pending", "supervisor_request_status", "supervisor_request_reply"]);
+  for (const legacy of ["subagent_roster", "subagent", "subagent_worktree", "subagent_supervisor"]) {
+    assert.equal(names.includes(legacy), false, `已退役工具名 ${legacy} 不得重新出现在模型工具面`);
   }
 });
 
@@ -119,7 +119,7 @@ test("引导合同：supervisor reply/pending/status 把「提交≠消费」写
   assert.match(by.supervisor_request_reply.description, /只代表提交已记录，不代表子代理已收到、已消费/);
   assert.match(by.supervisor_request_reply.description, /to 为可选，仅在无控制面或控制面停用路径/);
   assert.match(by.supervisor_request_status.description, /queued 不等于 child 已收到或已消费/);
-  // gate 计划的 inspect/clear 仍由该计划注册，本迁移不创建第 15/16 工具。
+  // gate 计划的 inspect/clear 仍由该计划注册，本迁移不增加工具。
   assert.equal(Object.hasOwn(by, "subagent_supervisor_inspect"), false);
   assert.equal(Object.hasOwn(by, "subagent_supervisor_clear"), false);
 });
@@ -138,10 +138,11 @@ test("引导合同：subagent_start/run_* 把 workspace 处置权威指向 manag
   assert.match(by.subagent_run_resume.description, /stopped 的 run 不可 resume/);
   assert.match(by.subagent_run_resume.description, /不提供模型换模/);
   assert.match(by.subagent_run_steer.description, /supervisor gate/);
-  assert.match(by.subagent_roster.description, /无参数/);
-  // 新 14 工具的自有文案不得残留旧 union 调用示例（旧 factory 的兼容文本不在此列）。
+  assert.equal(Object.hasOwn(by, "subagent_roster"), false);
+  // 当前 13 工具的自有文案不得残留 roster 指引或旧 union 调用示例（旧 factory 的兼容文本不在此列）。
   for (const tool of [...subagentTools(), ...workspaceTools(), ...supervisorTools()]) {
     const corpus = [tool.description, tool.promptSnippet ?? "", ...(tool.promptGuidelines ?? [])].join("\n");
+    assert.doesNotMatch(corpus, /subagent_roster/);
     for (const legacyCall of [/subagent\(\{/, /subagent_worktree\(\{/, /subagent_supervisor\(\{/]) {
       assert.doesNotMatch(corpus, legacyCall, `${tool.name} 旁文本不得给出旧 union 调用示例`);
     }
@@ -207,7 +208,7 @@ test("引导合同：AGENTS_GLOBAL 示例切到新工具名并给一次旧→新
   assert.doesNotMatch(md, /subagent\(\{/, "GLOBAL 不得再保留旧 subagent({…}) 调用示例");
   assert.doesNotMatch(md, /subagent_worktree\(\{/, "GLOBAL 不得再保留旧 subagent_worktree({…}) 调用示例");
   for (const name of [
-    "subagent_roster", "subagent_start", "subagent_run_status", "subagent_run_steer", "subagent_run_interrupt",
+    "subagent_start", "subagent_run_status", "subagent_run_steer", "subagent_run_interrupt",
     "subagent_run_resume", "subagent_run_stop", "managed_workspace_list", "managed_workspace_status",
     "managed_workspace_dispose", "managed_workspace_release", "supervisor_request_pending",
     "supervisor_request_status", "supervisor_request_reply",
@@ -218,6 +219,9 @@ test("引导合同：AGENTS_GLOBAL 示例切到新工具名并给一次旧→新
   assert.match(md, /旧名一次性映射/);
   assert.match(md, /不构成新工具的 schema/);
   assert.match(md, /历史 raw 文本/);
+  assert.match(md, /读取本会话初始化注入的准入名册（`advertised_subagents` section）/);
+  assert.match(md, /`\{action:"list"\}` 与后来的 `subagent_roster` 均为已退役的历史名册查询/);
+  assert.doesNotMatch(md, /`subagent_roster` 查看|→`subagent_roster`/);
 });
 
 test("引导合同：AGENTS_GLOBAL 保留治理/授权/恢复/预算政策，只下移逐操作参数", () => {

@@ -99,7 +99,9 @@ PowerShell 当前不启用，属于非目标；未来启用前必须覆盖 Secur
 
 ## Subagent 独立操作工具
 
-fresh Host 的 main 模型工具按操作拆分为 `subagent_start`、`subagent_roster`、`subagent_run_status/steer/interrupt/resume/stop`、`managed_workspace_list/status/dispose/release` 与 `supervisor_request_pending/status/reply`。旧 union 工具名只保留历史记录显示，不在fresh Host注册；操作工具继续复用既有dispatcher、workspace service、supervisor adapter和权限/receipt门禁。clear/inspect分支因上游absence不可证保持blocked。详见 `docs/architecture/subagent-operation-tools.md`。
+fresh Host 的 main 模型工具按操作拆分为 `subagent_start`、`subagent_run_status/steer/interrupt/resume/stop`、`managed_workspace_list/status/dispose/release` 与 `supervisor_request_pending/status/reply`。`subagent_roster` 已退役，旧 union 工具名与 roster 只保留历史记录显示，不在 fresh runtime 注册，也没有隐藏、codemode 或别名替代入口；操作工具继续复用既有 dispatcher、workspace service、supervisor adapter 和权限/receipt 门禁。clear/inspect 分支因上游 absence 不可证保持 blocked。详见 `docs/architecture/subagent-operation-tools.md`。
+
+每个 session/runtime generation 初始化一次当前准入角色名册；同一结构化 `advertised_subagents` section 在每次模型请求持续声明，compaction 后下一请求继续声明，不依赖普通历史消息。新建/恢复 session、reload 或 cwd 导致 runtime 替换时重新初始化，profile 修改需 reload 才生效。名册条目仅含 canonical name 与完整 description，并声明默认省略 model、仅用户显式指定才传 model；真实 `subagent_start` 仍逐次执行准入、可用模型及 authority 校验，名册不授予权限。准入未就绪、快照失效或未启用 `subagent_start` 时撤回该 section。实现复用既有 admission，不新增发现器或 exports，也不启用原生旧 `subagent` union 或 `advertise`。fresh child 不新增父级编排名册；旧 transcript/tool result 与历史 roster 渲染映射保留。源码修改需 fresh Host 或 reload 生效，已经运行的旧 Host 不会自动卸载 roster。生命周期与边界见 `docs/architecture/subagent-catalog-injection.md`。
 
 ## 统一后台活动区（TUI footer）
 
