@@ -215,11 +215,11 @@ test("public Pi module loader rejects an empty module root", async () => {
   await assert.rejects(loadPublicPiModule({ resolveGlobalNodeModules: async () => "   " }), /non-empty npm global module root/);
 });
 
-test("compat probe plan harness version gate pins Pi 1.0.4 precisely", () => {
+test("compat probe plan harness version gate pins Pi 1.4.0 precisely", () => {
   // 纯合成报告：除 piVersion 外全部满足探针其余契约，隔离出版本门禁单一变量。
   const compliant = {
-    piVersion: "1.0.4",
-    version: "0.75.0",
+    piVersion: "1.4.0",
+    version: "0.80.0",
     typeboxVersion: "1.1.38",
     typeboxCompileResolvable: true,
     rpcVersion: 1,

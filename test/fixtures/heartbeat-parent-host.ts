@@ -23,7 +23,14 @@ export default function heartbeatParentProbe(pi: ExtensionAPI) {
     }),
   ];
   pi.on("session_start", async (_event, ctx) => {
-    pi.setActiveTools(["subagent", "subagent_worktree"]);
+    // 只激活 1.3.0 实际注册的 typed 工具面：typed start + 公开 managed workspace 四工具。
+    // 旧 union 名 subagent/subagent_worktree 在 1.3.0 只保留定义、不注册，传入会被 SDK 当作未知名忽略，
+    // 结果整体替换成空 active 集，父回合再也拿不到 typed start 工具；这里不得回退到旧名。
+    pi.setActiveTools([
+      "subagent_start",
+      "managed_workspace_list", "managed_workspace_status",
+      "managed_workspace_dispose", "managed_workspace_release",
+    ]);
     const sessionId = ctx.sessionManager.getSessionId();
     const registry = await rootBrokerRegistryEntry(pi, sessionId);
     // 第二次 post-title 父身份取样：与 registry 各自独立调用 captureProcessBirthIdentity。

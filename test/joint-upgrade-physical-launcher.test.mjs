@@ -10,9 +10,9 @@ const { repoRoot: c, candidateRoot, hostRoot: h } = resolveJointUpgradeLayout();
 test('physical launcher显式root/Node，不信任ambient bundle或错误entry，不回退global',()=>{
  const launcher=path.resolve(import.meta.dirname,'../scripts/pi-launcher.zsh');
  const env={...candidateEnvironment({candidateRoot:candidateRoot,hostRoot:h,nodeBin:process.execPath}),PI_HOST_NODE:process.execPath,PI_HOST_ROOT:h};
- const good=spawnSync('/bin/zsh',['-f',launcher,'--version'],{env,encoding:'utf8',timeout:15000});assert.equal(good.status,0,good.stderr);assert.equal(good.stdout.trim(),'1.0.4');
+ const good=spawnSync('/bin/zsh',['-f',launcher,'--version'],{env,encoding:'utf8',timeout:15000});assert.equal(good.status,0,good.stderr);assert.equal(good.stdout.trim(),'1.4.0');
  for(const extra of [{PI_REAL_BIN:path.join(h,'dist/bundle/cli.js')},{PI_HOST_ROOT:'/missing/host'},{PI_HOST_NODE:'/missing/node'}]){
-  const denied=spawnSync('/bin/zsh',['-f',launcher,'--version'],{env:{...env,...extra},encoding:'utf8',timeout:15000});assert.notEqual(denied.status,0,'不能回退其他runtime');assert.doesNotMatch(denied.stdout,/^1\.0\.4$/m);
+  const denied=spawnSync('/bin/zsh',['-f',launcher,'--version'],{env:{...env,...extra},encoding:'utf8',timeout:15000});assert.notEqual(denied.status,0,'不能回退其他runtime');assert.doesNotMatch(denied.stdout,/^1\.4\.0$/m);
  }
 });
 

@@ -12,7 +12,7 @@ Pi Coding Agent 的独立配置与周边运行时。仓库内 `pi/` 是 Pi 全�
 
 ## 安装 Pi
 
-新机器唯一入口是 `./init-pi.sh`（见下节）：它在本仓 root 安装 Pi 四核心包 `1.0.4` 的物理 `node_modules`，运行时通过仓库内 dist CLI 启动；`packages/pi-subagents-enhanced` 的 peer 依赖消费同一 root 的物理包。本仓不推荐、也不需要全局 `npm install -g` 安装 Pi。机器上可能残留历史全局安装的旧版 `pi`（如 0.87.x），它与本仓运行时无关；版本判定以物理 `package.json` 为准，勿混用。升级 Pi 前必须重新运行单元测试、Doctor、真实 `pi-subagents` 兼容门禁和 Goal Engine 回归。
+新机器唯一入口是 `./init-pi.sh`（见下节）：它在本仓 root 安装 Pi 四核心包 `1.4.0` 的物理 `node_modules`，运行时通过仓库内 dist CLI 启动；`packages/pi-subagents-enhanced` 的 peer 依赖消费同一 root 的物理包。本仓不推荐、也不需要全局 `npm install -g` 安装 Pi。机器上可能残留历史全局安装的旧版 `pi`（如 0.87.x），它与本仓运行时无关；版本判定以物理 `package.json` 为准，勿混用。升级 Pi 前必须重新运行单元测试、Doctor、真实 `pi-subagents` 兼容门禁和 Goal Engine 回归。
 
 ## 初始化
 
@@ -22,8 +22,8 @@ Pi Coding Agent 的独立配置与周边运行时。仓库内 `pi/` 是 Pi 全�
 
 `init-pi.sh` 是新机器的唯一初始化入口，重复执行安全。它会：
 
-- 安装并固定 Pi `1.0.4`。
-- 通过 `npm ci` 与 `npm run setup:subagents-enhanced` 准备运行时与本仓 package（含受控 `pi-subagents@0.75.0` 依赖闭包）。
+- 安装并固定 Pi `1.4.0`。
+- 通过 `npm ci` 与 `npm run setup:subagents-enhanced` 准备运行时与本仓 package（含受控 `pi-subagents@0.80.0` 依赖闭包；`pi/npm` 的 `@amaster.ai/pi-task-scheduler`、`@amaster.ai/pi-shared`、`croner` 保持 `0.1.9`/`0.1.9`/`10.0.1`）。
 - 在 `~/.zshrc` 写入受控区块，加载 `scripts/pi-shell.zsh`。
 - 运行单元测试、doctor 和真实 Pi RPC 集成测试。
 
@@ -74,6 +74,8 @@ Shell 集成固定：
 
 Skill 发现的唯一 owner 是 Pi 原生 resource discovery（用户 `~/.agents/skills`、受信项目祖先 `.agents/skills` 与 `.pi/skills`）；本仓已退役旧 `skill-whitelist` 扫描入口，不再注册 `resources_discover`。退役技能经 `pi/settings.template.json` 的 `skills` selector 按其声明 scope 排除，不构成全局权限白名单。managed skill 的同步与校验工具（`src/skill-whitelist/skill.ts` 等）保留。shell 入口的 `--no-skills` 已去除（M09 计划范围追加项，owner 3f3117d4…，fake physical CLI 隔离验收 13/13 exit=0；`pi-lite` 显式保留、用户显式 flag 原样透传、env/owner 不变）。真实 runtime 的 Skill 发现仍未实测：修改需刷新 shell（`source scripts/pi-shell.zsh`）并在 fresh Host 中加载后生效，本仓不自行运行验证。
 
+本仓版本控制内的项目 skill 放在 `.agents/skills/`。`.pi/` 仅用于本机状态、handoff 和临时产物，整个目录由 Git 忽略；初始化仍使用 `pi/` 配置根。
+
 ## T9 Repository Merge Queue 验收
 
 验收 probe 仅用于聚焦合同验证与诊断：
@@ -83,11 +85,11 @@ node --test test/repository-merge-queue-acceptance-probe.test.mjs
 node scripts/probes/repository-merge-queue-acceptance.ts
 ```
 
-真实 probe 必须设置 `PI_REAL_BIN` 指向 Pi 1.0.4，并使用真实 `executor` child model；不得用 fake 或 deterministic model 替代。probe 使用独立临时 repo、session、state、socket roots，失败时保留现场并报告路径；本任务不运行五 child 真实验收或全量 `npm test`。
+真实 probe 必须设置 `PI_REAL_BIN` 指向 Pi 1.3.0，并使用真实 `executor` child model；不得用 fake 或 deterministic model 替代。probe 使用独立临时 repo、session、state、socket roots，失败时保留现场并报告路径；本任务不运行五 child 真实验收或全量 `npm test`。
 
 合同测试还校验 trusted `run/cwd/HEAD/PID` barrier ready、Git 冲突证据（非零 rebase、unmerged、sequencer、digest）、public receipt 生命周期计数，以及统一的 `ACCEPTANCE_OVERALL_TIMEOUT_MS` 门禁。失败现场不得 force cleanup；真实五-child 命令仅在 T11 完成后运行。
 
-## Pi 1.0.4 TUI 与工具职责
+## Pi 1.3.0 TUI 与工具职责
 
 Pi 官方是 fullscreen 的唯一 owner；Shell 不发送 `DECSET/DECRST 1049`。`pi` 默认使用官方 `--tui-mode fullscreen`；`pi-full` 是调用同一 `pi` 入口的薄兼容别名。显式 `pi --tui-mode regular`（或 `pi-full --tui-mode regular`）覆盖默认模式；`pi-inline` 保留为官方 regular 模式入口，`pi-lite` 的只读探索模式不变。新 shell 加载 `scripts/pi-shell.zsh` 后生效；现有 shell 可手动 source 此脚本，不影响已运行的 Pi Host。
 

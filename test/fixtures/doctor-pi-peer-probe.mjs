@@ -36,18 +36,20 @@ if (mode === "native-identities") {
     summary: "Identity probe", evidence: "Native ESM resolves package-local Pi peers",
     recommendedAction: "Keep Doctor fail closed until a separate loader decision",
   };
+  // 0.80.0 renderer 用 theme.bg 作 Box 背景回调（构造期惰性登记、render 时采样），stub 必须补齐 bg 才能真渲染。
   const component = renderer({ customType: "subagent_watchdog_warning", content: details.summary, display: true, details },
-    { expanded: true }, { fg: (_color, text) => text, bold: (text) => text });
+    { expanded: true }, { fg: (_color, text) => text, bold: (text) => text, bg: (_color, text) => text });
   const host = await import(pathToFileURL(hostAliases["@earendil-works/pi-tui"]).href);
   const local = await import(pathToFileURL(localAliases["@earendil-works/pi-tui"]).href);
-  assert.equal(component.constructor, host.Container);
-  assert.equal(component.constructor, local.Container);
-  assert.equal(component instanceof host.Container, true);
-  assert.equal(component instanceof local.Container, true);
+  // 0.80.0 合法返回 SubagentMessageBlock extends Box；断言 Host Box 子类，同时排除异源副本与裸 Box。
+  assert.equal(component instanceof host.Box, true);
+  assert.equal(component instanceof local.Box, true);
+  assert.notEqual(component.constructor, host.Box);
+  assert.notEqual(component.constructor, local.Box);
   const text = component.render(100).join("\n");
   assert.match(text, /Identity probe/);
   assert.match(text, /Native ESM/);
-  console.log("upstream watchdog renderer: Container === enhanced, Container === Host; warning rendered");
+  console.log("upstream watchdog renderer: Box subclass === enhanced, Box subclass === Host; warning rendered");
 } else {
   throw new Error(`Unknown probe mode: ${mode}`);
 }
@@ -58,9 +60,9 @@ for (const specifier of Object.keys(localAliases)) {
   for (const entry of [hostAliases[specifier], localAliases[specifier]]) {
     const metadata = JSON.parse(await readFile(join(dirname(dirname(entry)), "package.json"), "utf8"));
     assert.equal(metadata.name, name);
-    assert.equal(metadata.version, "1.0.4");
+    assert.equal(metadata.version, "1.4.0");
   }
 }
-console.log("Host and enhanced Pi peer versions: all four 1.0.4");
+console.log("Host and enhanced Pi peer versions: all four 1.4.0");
 for (const handler of extension.handlers.get("session_shutdown") ?? []) await handler({ type: "session_shutdown" }, {});
 loaded.runtime.invalidate();

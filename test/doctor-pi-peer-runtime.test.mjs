@@ -69,19 +69,19 @@ test("official Host loader TS factory through native MJS preserves all four iden
   await writeFile(path, 'import * as identities from "./native-peers.mjs";\nexport default function(pi) { pi.registerCommand("peer-identity", { handler() { return identities; } }); }\n');
   const output = runOfficialNativeProbe(root, path, "native-identities");
   for (const [, name] of exportsToCheck) assert.ok(output.includes(`${name}: native === enhanced, native === Host`), output);
-  assert.match(output, /Host and enhanced Pi peer versions: all four 1\.0\.4/);
+  assert.match(output, /Host and enhanced Pi peer versions: all four 1\.4\.0/);
   t.diagnostic(output.trim());
 });
 
-test("official Host loader through production compat/upstream watchdog returns enhanced 与 Host 相同 Container", async (t) => {
+test("official Host loader through production compat/upstream watchdog returns enhanced 与 Host 相同来源的 Box 子类", async (t) => {
   // 实际 public root 注册 native upstream consumer，而非自制 Box/Container 替身。
   const root = await identityProbe(t);
   const path = join(root, "upstream-factory.ts");
   const compat = pathToFileURL(join(enhancedRoot, "src/compat/pi-subagents-0.75.ts")).href;
   await writeFile(path, `import { upstreamSubagentRuntime } from ${JSON.stringify(compat)};\nexport default function(pi) { upstreamSubagentRuntime(pi); }\n`);
   const output = runOfficialNativeProbe(root, path, "watchdog-consumer");
-  assert.match(output, /Container === enhanced, Container === Host; warning rendered/);
-  assert.match(output, /Host and enhanced Pi peer versions: all four 1\.0\.4/);
+  assert.match(output, /Box subclass === enhanced, Box subclass === Host; warning rendered/);
+  assert.match(output, /Host and enhanced Pi peer versions: all four 1\.4\.0/);
   t.diagnostic(output.trim());
 });
 

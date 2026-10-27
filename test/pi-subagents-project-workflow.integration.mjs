@@ -254,7 +254,7 @@ test("project typed worktree commit completes Auto Integration and release", { s
     const contract = {
       title: "Run real workflow leaf",
       agent: "executor",
-      task: "Commit the child marker to README.md through the managed worktree. Use the project-owned typed facade. Only modify README.md. Known fact: pi-subagents is pinned to 0.75.0. Bind only the leaf run. Do not create a worktree.",
+      task: "Commit the child marker to README.md through the managed worktree. Use the project-owned typed facade. Only modify README.md. Known fact: pi-subagents is pinned to 0.79.2. Bind only the leaf run. Do not create a worktree.",
       writePaths: ["README.md"],
       acceptance: { criteria: ["The child returns the deterministic marker."] },
       cwd: projectRoot,
@@ -272,7 +272,9 @@ extensions: ${provider}
 ---
 Return the deterministic child marker without modifying files.
 `);
-    await execFileAsync("git", ["init", "-q"], { cwd: projectRoot });
+    // 显式建立 main 分支：下方 release 证据断言 targetRef 为 refs/heads/main，
+    // 不能依赖宿主/隔离 HOME 的 init.defaultBranch（仓库既有 fixture 同样使用 -b main）。
+    await execFileAsync("git", ["init", "-q", "-b", "main"], { cwd: projectRoot });
     await execFileAsync("git", ["config", "user.email", "test@example.invalid"], { cwd: projectRoot });
     await execFileAsync("git", ["config", "user.name", "Test"], { cwd: projectRoot });
     await execFileAsync("git", ["add", "README.md", ".pi/agents/executor.md"], { cwd: projectRoot });

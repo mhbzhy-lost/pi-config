@@ -6,7 +6,7 @@ import { existsSync } from "node:fs";
 
 /**
  * 默认解析本仓物理 SDK：测试必须消费仓库自带的 node_modules 里的
- * @earendil-works/pi-coding-agent（当前 1.0.4），绝不静默回退到 npm 全局安装
+ * @earendil-works/pi-coding-agent（当前 1.3.0），绝不静默回退到 npm 全局安装
  * （机器上的全局 Pi 是过期旧版本，其 theme/API 面与本仓断言不符）。
  * 物理根缺失时直接报错，不回退 global。
  */

@@ -20,8 +20,8 @@ import { probePhysicalHost } from "../packages/pi-subagents-enhanced/src/host-ru
 
 const execFile = promisify(execFileCallback);
 
-const SUPPORTED_PI_VERSIONS = ["0.82.0", "0.82.1", "0.83.0", "0.84.1", "0.84.2", "0.84.3", "0.84.4", "0.85.1", "0.87.1", "1.0.4"];
-const PI_SUBAGENTS_VERSION = "0.75.0";
+const SUPPORTED_PI_VERSIONS = ["0.82.0", "0.82.1", "0.83.0", "0.84.1", "0.84.2", "0.84.3", "0.84.4", "0.85.1", "0.87.1", "1.0.4", "1.3.0", "1.4.0"];
+const PI_SUBAGENTS_VERSION = "0.80.0";
 const ENHANCED_SUBAGENTS_VERSION = "0.1.0";
 const ENHANCED_SUBAGENTS_SOURCE = "../packages/pi-subagents-enhanced";
 const TYPEBOX_VERSION = "1.1.38";
@@ -350,7 +350,7 @@ export async function inspectConfiguration(repoRoot, options = {}) {
       if (info.isSymbolicLink()) {
         const expected = join(repoRoot, 'node_modules', ...peer.split('/'));
         const metadata = JSON.parse(await readFile(join(expected, 'package.json'), 'utf8'));
-        if (await realpath(local) === await realpath(expected) && metadata.name === peer && metadata.version === '1.0.4') continue;
+        if (await realpath(local) === await realpath(expected) && metadata.name === peer && metadata.version === '1.4.0') continue;
       }
       issues.push(`pi-subagents-enhanced contains a package-local Pi core peer: ${peer}`);
     } catch (error) {

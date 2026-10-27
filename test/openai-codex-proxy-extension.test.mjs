@@ -44,6 +44,7 @@ test("Codex proxy config rejects credentials and reports invalid configuration",
 });
 
 test("Codex proxy extension scopes proxy settings to the openai-codex stream", async () => {
+  const originalProxy = { HTTP_PROXY: process.env.HTTP_PROXY, HTTPS_PROXY: process.env.HTTPS_PROXY };
   let registration;
   const seen = [];
   const proxyFetch = () => {};
@@ -94,8 +95,8 @@ test("Codex proxy extension scopes proxy settings to the openai-codex stream", a
     },
   }]);
   assert.deepEqual(proxyFetches, ["http://127.0.0.1:7897"]);
-  assert.equal(process.env.HTTP_PROXY, undefined);
-  assert.equal(process.env.HTTPS_PROXY, undefined);
+  assert.equal(process.env.HTTP_PROXY, originalProxy.HTTP_PROXY);
+  assert.equal(process.env.HTTPS_PROXY, originalProxy.HTTPS_PROXY);
 });
 
 test("Codex proxy undici resolver works outside the Pi bundle process (node --test argv)", async () => {

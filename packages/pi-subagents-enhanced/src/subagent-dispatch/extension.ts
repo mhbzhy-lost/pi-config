@@ -2033,32 +2033,119 @@ export function createTypedSubagentExtension(
     for (const definition of workspaceOperationTools) pi.registerTool(definition);
 
     if (typeof onSupervisorRequest === "function" || supervisorControlPlane) {
-      pi.on("message_end", async (event, ctx) => {
-        if (disposed || registry.get(pi)?.token !== token) return;
-        const message = event?.message;
-        if (message?.customType !== "subagent_supervisor_request") return;
-        if (supervisorControlPlane && supervisorControlPlane.enabled?.() !== false) {
+      // 观察→注册的唯一实现，两个入口只决定触发时机：
+      // - message_end 覆盖 busy/steer 分支（该分支的 custom 消息仍经 agent loop 派发扩展事件）；
+      // - before_agent_start 覆盖 idle/held 的两段唤醒（只走 _appendCustomMessage，只 _emit Host
+      //   事件，扩展级 message_end 永远收不到）。
+      // details/content/options 全程原样透传：不改写、不补字段、不新增 sender 或授权来源；
+      // 身份与授权仍由 registerSupervisorRequest 的 broker ready/root 相等、owner、generation
+      // 与 captureSupervisorCorrelation 的唯一未闭合 child toolCall 匹配决定。
+      const supervisorRegistrationFlights = new Map<string, Promise<unknown>>();
+      const supervisorObservationScope = (ctx: any) => {
+        let rootSessionId: unknown;
+        try { rootSessionId = resolveRootSessionId?.(ctx?.sessionManager); } catch { /* non-workspace registration fails closed without Host identity. */ }
+        let sessionId: unknown;
+        try { sessionId = ctx?.sessionManager?.getSessionId?.(); } catch { sessionId = undefined; }
+        // 两者都来自当前 Host 会话身份（生产下同源）；保留双分量只是为了显式限定作用域。
+        return {
+          rootSessionId: typeof rootSessionId === "string" ? rootSessionId : undefined,
+          sessionId: typeof sessionId === "string" ? sessionId : undefined,
+        };
+      };
+      const observeSupervisorRequest = async (details: any, scope: { rootSessionId?: string; sessionId?: string }, { skipRegistered = false } = {}) => {
+        if (!(supervisorControlPlane && supervisorControlPlane.enabled?.() !== false)) return undefined;
+        const requestId: unknown = details?.id;
+        // 本代实例内已失败过的条目不再逐回合重放：registrationFailures 就是既有失败记录，
+        // 不新增 TTL/重试权威。durable 已注册（含已完成/过期）由 findRequestAsync 判定。
+        if (typeof requestId === "string" && registrationFailures.has(requestId)) return undefined;
+        // 同一 root+session scope+requestId 的在途注册单飞：message_end 与账本扫描不会并发注册同一
+        // 请求（否则回执消费后再观察会得到 CORRELATION_CALL_AMBIGUOUS 噪声）。纯短生命周期并发
+        // 控制，不落盘、不跨 root 复用。
+        const flightKey = typeof requestId === "string"
+          ? `${scope.rootSessionId ?? ""}\u0000${scope.sessionId ?? ""}\u0000${requestId}` : undefined;
+        const inFlight = flightKey === undefined ? undefined : supervisorRegistrationFlights.get(flightKey);
+        if (inFlight) return inFlight;
+        const flight = (async () => {
+          // disposed 或已被后继实例接管的 scope 不注册。
+          if (disposed || registry.get(pi)?.token !== token) return undefined;
+          if (skipRegistered && typeof requestId === "string") {
+            // fresh/resume 的历史分支会含旧请求：已注册的一律跳过，否则回执消费后会把已闭合的
+            // contact_supervisor toolCall 重新捕获成 pending。
+            let existing;
+            try {
+              existing = await supervisorControlPlane.findRequestAsync(requestId, scope.rootSessionId);
+            } catch (error) {
+              // 无法证明「从未注册」时 fail closed：不注册，并把失败留在既有 registrationFailures 记录里。
+              registrationFailures.set(requestId, "SUPERVISOR_REQUEST_REGISTRATION_FAILED");
+              reportSupervisorDiagnostic(diagnosticSink, { version: 1, phase: "supervisor-registration-failed", errorCode: "SUPERVISOR_REQUEST_REGISTRATION_FAILED", requestId, runId: details?.runId, error, cause: error?.cause });
+              return undefined;
+            }
+            if (existing) return undefined;
+          }
           let result;
           try {
-            let hostRootSessionId;
-            try { hostRootSessionId = resolveRootSessionId?.(ctx?.sessionManager); } catch { /* non-workspace registration fails closed without Host identity. */ }
-            result = await supervisorControlPlane.registerSupervisorRequest(message.details, hostRootSessionId);
+            result = await supervisorControlPlane.registerSupervisorRequest(details, scope.rootSessionId);
           } catch (error) {
             result = { status: "blocked", code: "SUPERVISOR_REQUEST_REGISTRATION_FAILED" };
             result.error = error;
           }
-          const requestId = message.details?.id;
           if (result?.status !== "registered") {
             const errorCode = result?.code ?? "SUPERVISOR_REQUEST_REGISTRATION_FAILED";
             if (typeof requestId === "string") registrationFailures.set(requestId, errorCode);
-            const details = { code: errorCode, requestId, runId: message.details?.runId };
-            reportSupervisorDiagnostic(diagnosticSink, { version: 1, phase: "supervisor-registration-failed", errorCode, ...details, ...(result?.error ? { error: result.error, cause: result.error?.cause } : {}) });
-            pi.sendMessage({ customType: "subagent_supervisor_registration_failed", content: `Supervisor request ${requestId ?? "(missing id)"} was not registered (${errorCode}). Reply is unavailable; interrupt the run and resume it to recover.`, details });
+            const failureDetails = { code: errorCode, requestId, runId: details?.runId };
+            reportSupervisorDiagnostic(diagnosticSink, { version: 1, phase: "supervisor-registration-failed", errorCode, ...failureDetails, ...(result?.error ? { error: result.error, cause: result.error?.cause } : {}) });
+            pi.sendMessage({ customType: "subagent_supervisor_registration_failed", content: `Supervisor request ${requestId ?? "(missing id)"} was not registered (${errorCode}). Reply is unavailable; interrupt the run and resume it to recover.`, details: failureDetails });
           } else if (typeof requestId === "string") {
             registrationFailures.delete(requestId);
           }
+          return result;
+        })();
+        if (flightKey !== undefined) {
+          supervisorRegistrationFlights.set(flightKey, flight);
+          const settle = () => { if (supervisorRegistrationFlights.get(flightKey) === flight) supervisorRegistrationFlights.delete(flightKey); };
+          void flight.then(settle, settle);
         }
+        return flight;
+      };
+      pi.on("message_end", async (event, ctx) => {
+        if (disposed || registry.get(pi)?.token !== token) return;
+        const message = event?.message;
+        if (message?.customType !== "subagent_supervisor_request") return;
+        await observeSupervisorRequest(message.details, supervisorObservationScope(ctx));
         if (typeof onSupervisorRequest === "function") await onSupervisorRequest(message, ctx);
+      });
+      // Host 会 await 本 handler 且在首个 provider 请求之前完成，因此扫描活跃分支完成的注册必然
+      // 早于父模型可能发出的 supervisor_request_reply（无 sleep、无轮询、无 membrane 异步赛跑）。
+      pi.on("before_agent_start", async (_event, ctx) => {
+        if (disposed || registry.get(pi)?.token !== token) return;
+        if (!supervisorControlPlane || supervisorControlPlane.enabled?.() === false) return;
+        if (typeof supervisorControlPlane.findRequestAsync !== "function") return;
+        const sessionManager: any = ctx?.sessionManager;
+        if (typeof sessionManager?.getBranch !== "function") return;
+        let branch;
+        try {
+          // getBranch 限定当前活跃分支：不遍历废弃分支，也不用 getEntries 回放整会话。
+          branch = sessionManager.getBranch();
+        } catch (error) {
+          reportSupervisorDiagnostic(diagnosticSink, { version: 1, phase: "supervisor-registration-scan-failed", error, cause: error?.cause });
+          return;
+        }
+        if (!Array.isArray(branch)) return;
+        const scope = supervisorObservationScope(ctx);
+        for (const entry of branch) {
+          if (entry?.type !== "custom_message" || entry.customType !== "subagent_supervisor_request") continue;
+          // 不猜多键 fallback：注册函数以 details.id 作为 requestId。
+          if (typeof entry.details?.id !== "string") continue;
+          try {
+            // 串行 await：按账本顺序注册，不并发争用同一 durable root 锁。
+            await observeSupervisorRequest(entry.details, scope, { skipRegistered: true });
+          } catch (error) {
+            // 观察失败只进既有 diagnostic，不打断本回合，也不把异常回抛给 Host。
+            reportSupervisorDiagnostic(diagnosticSink, { version: 1, phase: "supervisor-registration-scan-failed", requestId: entry.details.id, runId: entry.details?.runId, error, cause: error?.cause });
+          }
+        }
+        // 纯观察 handler：不返回 message/systemPrompt，本回合输入不被改写。
+        return undefined;
       });
     }
 

@@ -21,7 +21,7 @@ const invoke = (tool, args, afterToolCall) => runToolCall({ id: "a7", name: tool
   tools: [tool], assistantMessage: { role: "assistant", content: [] }, context: { messages: [], tools: [tool] }, afterToolCall,
 });
 
-test("1.0.4 官方 bash 合法结构来自实际执行，cwd 扩展保留 metadata 和非零 error 通道", async () => {
+test("1.3.0 官方 bash 合法结构来自实际执行，cwd 扩展保留 metadata 和非零 error 通道", async () => {
   const directory = await mkdtemp(join(tmpdir(), "a7-bash-"));
   try {
     await mkdir(join(directory, "child"));
@@ -52,16 +52,34 @@ test("真实 write 无 tool_result 注入；原始 content/details 保持原生�
     assert.equal(typeof handlers.get("tool_call"), "function");
     const tool = codingAgent.createWriteToolDefinition(directory);
     assert.equal(tool.outputSchema, undefined);
-    let raw, copy;
+    let raw, snapshot;
     const afterToolCall = async ({ result }) => {
-      raw = result; copy = structuredClone(result);
+      raw = result; snapshot = structuredClone(result);
       return result;
     };
     const actual = await invoke(tool, { path: "src/demo.ts", content: "export const value = 1;\n" }, afterToolCall);
     assert.equal(actual.isError, false);
-    assert.equal(actual.result, raw);
-    assert.deepEqual(raw, copy);
-    assert.equal(raw.structuredContent, undefined);
+    // 真实返回规范（pi-agent-core 1.3.0 finalizeExecutedToolCall + AfterToolCallResult 合并语义）：hook
+    // 返回真值后按字段合并新建外层对象——content/details 沿用原值、显式带 usage/terminate；
+    // structuredContent 为 undefined 时删除该键。因此不要求包装对象与 hook 收到的对象引用相同，
+    // 只核对 content/details 原始内容与结构化字段语义，并证明 raw 本体未被改写。
+    const { content, details, usage, terminate, ...undeclaredFields } = actual.result;
+    assert.deepEqual(undeclaredFields, {}, "合同外的元数据字段不得注入 hook 结果");
+    assert.deepEqual(content, snapshot.content);
+    assert.equal(content.length, 1);
+    assert.equal(content[0].type, "text");
+    assert.equal(details, undefined);
+    assert.equal(Object.hasOwn(actual.result, "details"), true, "details 按合同保留为原生 undefined");
+    assert.equal(usage, undefined);
+    assert.equal(terminate, undefined);
+    assert.equal(actual.result.structuredContent, undefined);
+    assert.equal(Object.hasOwn(actual.result, "structuredContent"), false, "未声明 outputSchema 时不得凭空生成 structuredContent");
+    // 展示层未改写 raw 本体：hook 时刻的快照与 finalize 后的原对象逐字段一致。
+    assert.deepEqual(raw, snapshot);
+    assert.deepEqual(Object.keys(raw).sort(), ["content", "details"]);
+    assert.equal(Object.hasOwn(raw, "structuredContent"), false);
+    assert.equal(Object.hasOwn(raw, "usage"), false, "finalize 的 usage 只落在外层新对象上");
+    assert.equal(Object.hasOwn(raw, "terminate"), false, "finalize 的 terminate 只落在外层新对象上");
     assert.doesNotMatch(raw.content[0].text, /test-driven-development/);
     assert.equal(await readFile(join(directory, "src/demo.ts"), "utf8"), "export const value = 1;\n");
   } finally { await rm(directory, { recursive: true, force: true }); }

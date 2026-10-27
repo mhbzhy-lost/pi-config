@@ -18,7 +18,7 @@ export default function taskSchedulerExtension(pi: ExtensionAPI, bridge: Schedul
   // 入口保存 adapter 返回的只读 observer（F4b）：source/publisher 只消费它的
   // snapshot/subscribe/detail，世代 token 只存在于 adapter 闭包内部，不出现在入口。
   const observer: SchedulerActivityObserver = registerTaskSchedulerAdapter(pi);
-  // SDK ExtensionAPI.events 是必需公开边界（Pi 1.0.4 types.d.ts:1371 非可选；loader.js
+  // SDK ExtensionAPI.events 是必需公开边界（Pi 1.3.0 dist/core/extensions/types.d.ts:1406 非可选；loader.js
   // createExtensionAPI 恒为每个扩展工厂构建 events bus），入口无条件接线 publisher，不为
   // 缺方法 mock 增加 production 兼容；bus 失效由 publisher 内部握手隔离（订阅/emit 各自
   // try/catch），不构成 scheduler 执行失败；RPC 由 mode 门禁不发布（adapter 既有

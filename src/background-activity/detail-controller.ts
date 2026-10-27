@@ -21,6 +21,7 @@
 
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import type { TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import type {
   ActivityRegistry,
   ActivityRow,
@@ -88,6 +89,8 @@ export interface ActivityDetailShell {
   handleThemeChange(): void;
   render(width: number): string[];
   handleInput(data: string): { consume: boolean } | undefined;
+  /** Pi 1.3 fullscreen：`TuiAltScreen` 只对 overlay 调 `handleMouse`，滚轮不再走 raw 输入。 */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined;
   invalidate(): void;
 }
 
@@ -398,6 +401,22 @@ class ActivityDetailShellController implements ActivityDetailShell {
       return CONSUME_INPUT;
     }
     return CONSUME_INPUT; // 未知键吞掉
+  }
+
+  /**
+   * Pi 1.3 fullscreen 滚轮入口：`TuiAltScreen` 把 SGR 滚轮解析成归一化 mouse wheel 事件后
+   * 只调用 overlay 组件的 `handleMouse`（raw SGR 不会进入 `handleInput`）。按事件真实
+   * `wheelDelta` 行数滚正文，返回 handled 阻止渲染器把同一滚轮再交给底层 primary ScrollView
+   * （避免双滚）。非 wheel 事件不消费；MainScreen 的 raw SGR 分支仍在 handleInput 中保留。
+   */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (!this.mounted || event.type !== "wheel") return undefined;
+    const delta = event.wheelDelta;
+    if (typeof delta !== "number" || !Number.isFinite(delta)) return undefined;
+    const lines = Math.trunc(delta);
+    if (lines === 0) return undefined;
+    this.scrollLines(lines);
+    return { handled: true };
   }
 
   // —— 内部：条目与选择 ——

@@ -113,7 +113,7 @@ test("doctor reports unreadable RPC source with filesystem cause instead of misl
     mkdirSync(join(pkg, "src", "extension"), { recursive: true });
     mkdirSync(join(pkg, "extensions"));
     writeFileSync(join(pkg, "extensions", "subagent-runtime.ts"), "");
-    writeFileSync(join(pkg, "package.json"), JSON.stringify({ version: "0.75.0", pi: { extensions: ["./extensions/subagent-runtime.ts"] } }));
+    writeFileSync(join(pkg, "package.json"), JSON.stringify({ version: "0.80.0", pi: { extensions: ["./extensions/subagent-runtime.ts"] } }));
     writeFileSync(rpc, "const methods = [];");
     chmodSync(rpc, 0o000);
     const issues = await inspectConfiguration(root, { readPiVersion: () => "0.87.1", readBasicMemoryVersion: () => "0.22.1", globalSkillsDir: root });
@@ -259,15 +259,15 @@ test('Doctor静态层仅允许已绑定权威root的physical peer，普通同版
  const root=mkdtempSync(join(tmpdir(),'doctor-bound-peers-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
  const pkg=join(root,'packages/pi-subagents-enhanced');mkdirSync(pkg,{recursive:true});mkdirSync(join(root,'skill-overrides'));
  const metadata=JSON.parse(readFileSync(new URL('../packages/pi-subagents-enhanced/package.json',import.meta.url),'utf8'));writeFileSync(join(pkg,'package.json'),JSON.stringify(metadata));
- for(const peer of piPeers){const p=join(root,'node_modules',peer);mkdirSync(p,{recursive:true});writeFileSync(join(p,'package.json'),JSON.stringify({name:peer,version:'1.0.4'}));}
+ for(const peer of piPeers){const p=join(root,'node_modules',peer);mkdirSync(p,{recursive:true});writeFileSync(join(p,'package.json'),JSON.stringify({name:peer,version:'1.4.0'}));}
  await bindPhysicalHostPeers({enhancedPackageRoot:pkg,hostRoot:join(root,'node_modules/@earendil-works/pi-coding-agent')});
- const issues=await inspectConfiguration(root,{readPiVersion:()=> '1.0.4',readBasicMemoryVersion:()=> '0.22.1',globalSkillsDir:root});
+ const issues=await inspectConfiguration(root,{readPiVersion:()=> '1.4.0',readBasicMemoryVersion:()=> '0.22.1',globalSkillsDir:root});
  assert.deepEqual(issues.map(String).filter(x=>/package-local Pi core peer|peer ownership/.test(x)),[]);
  assert.equal(issues.some(x=>String(x).includes('unexpected Pi version')),false);
 });
 
 test('目标physical部署中TypeBox按实际Host exports解析，不要求上游历史nested peer布局',async()=>{
  const repo=new URL('../',import.meta.url).pathname;
- const issues=await inspectConfiguration(repo,{readPiVersion:()=> '1.0.4',readBasicMemoryVersion:()=> '0.22.1',globalSkillsDir:process.env.HOME+'/.agents/skills'});
+ const issues=await inspectConfiguration(repo,{readPiVersion:()=> '1.4.0',readBasicMemoryVersion:()=> '0.22.1',globalSkillsDir:process.env.HOME+'/.agents/skills'});
  assert.deepEqual(issues.map(String).filter(s=>/typebox|TypeBox/.test(s)),[],'Host的1.3.27与scheduler的1.1.38不能混为旧nested peer要求');
 });

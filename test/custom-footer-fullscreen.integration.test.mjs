@@ -34,7 +34,9 @@ test("TuiAltScreen gives focused child overlay input back after official search"
   tui.start();
   const overlayHandle = tui.showOverlay(viewport, { row: 0, col: 0, width: "100%", maxHeight: "100%" });
   overlayHandle.focus();
-  viewport.render(80);
+  // Pi 1.3 fullscreen：滚轮以归一化 mouse 事件只分发给已渲染出几何的 overlay（生产下宿主
+  // 持续渲染，输入前必有帧）；这里同步渲染一帧，让滚轮走真实 handleMouse 协议。
+  tui.renderNow();
   assert.equal(overlayHandle.isFocused(), true);
 
   dispatchInput("\x1b[102;6u");

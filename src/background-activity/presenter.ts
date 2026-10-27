@@ -34,7 +34,7 @@ import {
   truncateToWidth,
   visibleWidth,
 } from "@earendil-works/pi-tui";
-import type { OverlayHandle, TUI } from "@earendil-works/pi-tui";
+import type { OverlayHandle, TUI, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import type {
   ActivityPresenterFactory,
   ActivityRegistry,
@@ -128,6 +128,7 @@ const DETAIL_OVERLAY_MOUNT_OPTIONS: {
 function createOpenShellComponent(shell: ActivityDetailShell): {
   render(width: number): string[];
   handleInput?(data: string): void;
+  handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined;
   invalidate(): void;
   dispose?(): void;
 } {
@@ -136,6 +137,9 @@ function createOpenShellComponent(shell: ActivityDetailShell): {
     handleInput: (data: string) => {
       shell.handleInput(data);
     },
+    // Pi 1.3 fullscreen 下 `TuiAltScreen` 只向 overlay 组件分发归一化 mouse 事件，
+    // 滚轮不会进 handleInput；此处仅转发给壳，消费语义与滚动状态仍归壳。
+    handleMouse: (event: TuiMouseEvent) => shell.handleMouse(event),
     invalidate: () => {
       shell.invalidate();
     },

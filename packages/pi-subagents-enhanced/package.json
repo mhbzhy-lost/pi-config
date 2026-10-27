@@ -36,14 +36,14 @@
     "verify:package": "node scripts/verify-package.ts"
   },
   "dependencies": {
-    "pi-subagents": "0.75.0",
+    "pi-subagents": "0.80.0",
     "typescript": "5.9.3"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "1.0.4",
-    "@earendil-works/pi-ai": "1.0.4",
-    "@earendil-works/pi-coding-agent": "1.0.4",
-    "@earendil-works/pi-tui": "1.0.4"
+    "@earendil-works/pi-agent-core": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-tui": "1.4.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
@@ -54,8 +54,5 @@
   },
   "bundleDependencies": [
     "pi-subagents"
-  ],
-  "overrides": {
-    "@earendil-works/pi-codemode": "1.0.4"
-  }
+  ]
 }

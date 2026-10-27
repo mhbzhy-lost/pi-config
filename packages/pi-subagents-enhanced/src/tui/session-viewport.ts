@@ -1,5 +1,11 @@
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
+import {
+  truncateToWidth,
+  visibleWidth,
+  type Component,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
+} from "@earendil-works/pi-tui";
 
 export class ReadOnlyBrowserEditor extends CustomEditor {
   override render(_width: number): string[] {
@@ -102,6 +108,22 @@ export class SubagentTranscriptViewport implements Component {
 
   handleInput(data: string): void {
     if (!this.disposed) this.options.onInput?.(data);
+  }
+
+  /**
+   * Pi 1.3 fullscreen：`TuiAltScreen` 先把滚轮解析成归一化 mouse wheel 事件并只调用组件
+   * `handleMouse`，raw SGR 不会进入 `handleInput`；因此 overlay 必须在此按事件真实
+   * `wheelDelta` 行数滚动，并返回 handled 阻止渲染器把同一滚轮再交给底层 primary
+   * ScrollView（否则底层 transcript 会被双滚）。非 wheel 事件不消费，交还宿主处理。
+   */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (this.disposed || event.type !== "wheel") return undefined;
+    const delta = event.wheelDelta;
+    if (typeof delta !== "number" || !Number.isFinite(delta)) return undefined;
+    const lines = Math.trunc(delta);
+    if (lines === 0) return undefined;
+    this.scrollLines(lines);
+    return { handled: true };
   }
 
   refresh(): void {

@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 
 const execFile = promisify(execFileCallback);
 const scriptPath = fileURLToPath(import.meta.url);
-const PI_SUBAGENTS_VERSION = "0.75.0";
+const PI_SUBAGENTS_VERSION = "0.80.0";
 const defaultEnhancedPackageRoot = resolve(import.meta.dirname, "../packages/pi-subagents-enhanced");
 const defaultPiNpmDir = resolve(import.meta.dirname, "../pi/npm");
 

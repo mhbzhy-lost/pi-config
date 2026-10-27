@@ -45,6 +45,9 @@ test("真实 TuiAltScreen + production viewport 的 page/wheel、搜索 q/Escape
   tui.start();
   const handle = tui.showOverlay(viewport, { row: 0, col: 0, width: "100%", maxHeight: "100%" });
   handle.focus();
+  // Pi 1.3 fullscreen：滚轮以归一化 mouse 事件只分发给已渲染出几何的 overlay（生产下
+  // 宿主持续渲染，输入前必有帧）；这里同步渲染一帧，让滚轮走真实 handleMouse 协议。
+  tui.renderNow();
   for (const width of [40, 120]) {
     terminal.columns = width;
     assert.ok(viewport.render(width).every((line) => piTui.visibleWidth(line) === width));

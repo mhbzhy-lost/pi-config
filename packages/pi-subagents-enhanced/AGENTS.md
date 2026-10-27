@@ -8,7 +8,7 @@
 
 所有 `pi-subagents/src/*` 深层 import 必须集中在 `src/compat/pi-subagents-0.75.ts`。其他文件只能从该兼容入口消费 upstream API，不得扩散新的深层 import。
 
-`pi-subagents` 版本固定为 `0.75.0`；升级版本前必须同步更新兼容入口、完整验收。
+`pi-subagents` 版本固定为 `0.79.2`；升级版本前必须同步更新兼容入口、完整验收。
 
 ## TypeScript 文件边界
 

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -8,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { createRegistryStore, listLiveRecords, prepareLaunch } from "../src/session-owner/registry.ts";
 
 import { physicalLauncherFixture } from "./helpers/physical-launcher-fixture.mjs";
+import { resolvePiCodingAgentRoot } from "./helpers/pi-runtime.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const launcher = join(repoRoot, "scripts", "pi-launcher.zsh");
@@ -52,10 +54,23 @@ function runInteractiveLauncher(args, env) {
   });
 }
 
+/**
+ * `--pi-binary` 只接受本仓物理 unbundled CLI（`<repo>/node_modules/@earendil-works/pi-coding-agent/dist/cli.js`，
+ * 与 production `resolvePhysicalHost` 的 entry 定义一致）。根解析走仓库既有权威 helper
+ * `test/helpers/pi-runtime.mjs`：显式 `PI_TEST_CODING_AGENT_ROOT` 仍可 pin，缺省本仓物理 SDK；
+ * 物理根或 CLI 缺失直接失败，绝不 `npm root -g` 回退到机器全局旧版 Pi（其越出隔离边界）。
+ */
+function physicalPiBinary() {
+  const hostRoot = resolvePiCodingAgentRoot();
+  const entry = join(hostRoot, "dist", "cli.js");
+  if (!existsSync(entry)) throw new Error(`physical Pi unbundled CLI is missing at ${entry}; refusing to fall back to the global npm root`);
+  return entry;
+}
+
 async function runPrepare(args, env) {
   const decisionDir = await mkdtemp(join(tmpdir(), "pi-session-owner-decision-"));
   await chmod(decisionDir, 0o700);
-  const piBinary = join(spawnSync("npm", ["root", "-g"], { encoding: "utf8" }).stdout.trim(), "@earendil-works", "pi-coding-agent", "dist", "bundle", "cli.js");
+  const piBinary = physicalPiBinary();
   const result = spawnSync("node", [decisionCli, "prepare", "--pid", String(process.pid), "--cwd", repoRoot, "--stdin-tty", "1", "--stdout-tty", "1", "--decision-dir", decisionDir, "--pi-binary", piBinary, "--", ...args], {
     cwd: repoRoot, encoding: "utf8", env: { ...process.env, PI_SUBAGENT_CHILD: undefined, PI_SUBAGENT_FANOUT_CHILD: undefined, ...env },
   });
@@ -88,16 +103,22 @@ for (let i = 0; i < 80; i++) {
 `;
   const children = Array.from({ length: 4 }, () => spawn(process.execPath, ["--input-type=module", "-e", source], { env: { ...process.env, ROOT: root }, stdio: ["ignore", "pipe", "pipe"] }));
   const errors = [];
-  for (const child of children) { child.stderr.on("data", (chunk) => errors.push(chunk.toString())); }
+  // 先监听终态，避免读循环期间worker已退出却漏收事件；close保证stderr已收全。
+  const completions = children.map((child) => {
+    child.stderr.on("data", (chunk) => errors.push(chunk.toString()));
+    return new Promise((resolve) => {
+      child.once("error", (error) => resolve({ code: null, signal: null, error: error.message }));
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    });
+  });
   const reads = [];
   try {
     for (let i = 0; i < 320; i++) {
       try { reads.push(await listLiveRecords(createRegistryStore(root, 1000))); }
       catch (error) { errors.push(String(error)); }
     }
-    await Promise.all(children.map((child) => new Promise((resolve, reject) => {
-      child.once("error", reject); child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`child exited ${code}`)));
-    })));
+    const statuses = await Promise.all(completions);
+    assert.ok(statuses.every((status) => status.code === 0), `${JSON.stringify(statuses)}\n${errors.join("\n")}`);
     assert.deepEqual(errors, [], errors.join("\\n"));
     assert.ok(reads.every((records) => Array.isArray(records)));
   } finally { for (const child of children) child.kill("SIGKILL"); await rm(root, { recursive: true, force: true }); }

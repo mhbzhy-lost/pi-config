@@ -1,3 +1,11 @@
+/**
+ * upstream 兼容入口（文件名为历史命名，当前固定封装 `pi-subagents@0.80.0`）。
+ *
+ * 0.79.2 与 0.75.0 的公开 exports 集合一致：本文件只消费 root 注册、`./agents` 注册与
+ * 本地 transcript 投影，不做深层 `pi-subagents/src/*` import。文件名与公开导出保持不变，
+ * 以免破坏 `extensions/`、`scripts/verify-package.ts` 与 TUI renderer 的既有消费链；
+ * upstream 版本仍由 `package.json`、`scripts/verify-package.ts` 与 Doctor 精确门禁。
+ */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { MarkdownTheme } from "@earendil-works/pi-tui";
 import { parseFrontmatter as hostParseFrontmatter } from "@earendil-works/pi-coding-agent";

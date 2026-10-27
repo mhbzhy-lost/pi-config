@@ -242,7 +242,7 @@ test("pi-lite launches the lean read-only exploration mode", async () => {
         "--no-extensions",
         "--no-prompt-templates",
         "--skill",
-        join(repoRoot, "skill-overrides", "exa-search", "SKILL.md"),
+        join(repoRoot, "skill-overrides", "deepseek-search", "SKILL.md"),
         "--skill",
         join(repoRoot, "skill-overrides", "playwright", "SKILL.md"),
         "--tools",

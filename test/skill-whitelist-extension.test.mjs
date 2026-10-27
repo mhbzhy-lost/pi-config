@@ -152,7 +152,7 @@ test("声明 scope 边界：项目 scope 自动发现与 resources_discover 追�
     assert.equal(entry.metadata?.scope, "project");
   }
 
-  // 源码契约（本仓固定 pi SDK 1.0.4）：resources_discover 回调经 resource loader 的
+  // 源码契约（本仓固定 pi SDK 1.3.0）：resources_discover 回调经 resource loader 的
   // extendResources 追加，该通道不应用 isEnabledByOverrides；第三方 callback、
   // CLI 显式路径不能被用户模板字符串一概排除，本测试只固化该边界，不宣称集合等价。
   const resourceLoaderSource = await readFile(join(sdkRoot, "dist", "core", "resource-loader.js"), "utf8");

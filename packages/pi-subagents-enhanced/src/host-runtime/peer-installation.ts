@@ -18,7 +18,7 @@ export async function bindPhysicalHostPeers({ enhancedPackageRoot, hostRoot }: {
   const targets = await Promise.all(PEERS.map(async name => {
     const target = await realpath(join(host, '..', name));
     const metadata = JSON.parse(await readFile(join(target, 'package.json'), 'utf8'));
-    if (metadata.name !== '@earendil-works/' + name || metadata.version !== '1.0.4') throw new Error('physical peer身份或版本错误：' + name);
+    if (metadata.name !== '@earendil-works/' + name || metadata.version !== '1.4.0') throw new Error('physical peer身份或版本错误：' + name);
     const destination = join(enhanced, 'node_modules/@earendil-works', name);
     if (relative(destination, target) === '') throw new Error('physical peer不能指向自身');
     return { target, destination };

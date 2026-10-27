@@ -157,7 +157,8 @@ async function fixture() {
 async function collectReady(f) {
   return until(async () => {
     assert.equal(f.exit, undefined, "fixture parent 提前退出");
-    const dispatch = f.records.find(entry => entry.type === "tool_execution_end" && entry.toolName === "subagent");
+    // 派发回执只认现行 typed 工具名 subagent_start（旧 union 名 subagent 在 1.3.0 不注册）。
+    const dispatch = f.records.find(entry => entry.type === "tool_execution_end" && entry.toolName === "subagent_start");
     if (!dispatch) return;
     assert.notEqual(dispatch.isError, true); assert.notEqual(dispatch.result?.isError, true);
     const handle = dispatch.result?.details;

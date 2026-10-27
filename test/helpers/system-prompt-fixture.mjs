@@ -8,7 +8,9 @@
  *   sessions / logs / authority / state 一律不打开），只读取调用方显式枚举的仓库自有生产目录。
  *
  * 事实来源（源码为准，非转述）：
- * - SDK `dist/core/extensions/runner.js:1121-1164` `emitBeforeAgentStart`：handler 返回
+ * - SDK `dist/core/extensions/runner.js:1121-1164` `emitBeforeAgentStart(trigger, options)`：
+ *   Pi 1.2 起 trigger 为 `{ messageType: "user", prompt, images? }` 或
+ *   `{ messageType: "custom", message }`（`runner.d.ts:16`）；handler 返回
  *   `{ systemPrompt }` 时执行 `currentOptions.forceSystemPrompt = result.systemPrompt`；
  *   `event.systemPrompt` 是由真实 `buildSystemPrompt(currentOptions)` 渲染的 getter。
  * - SDK `dist/core/system-prompt.js:78-79,126-128`：`customPrompt` 作 preamble 时 else 分支
@@ -173,6 +175,10 @@ export function createCanaryOptions({ cwd, appendSystemPrompt, selectedTools = [
 /**
  * 用真实 `ExtensionRunner.emitBeforeAgentStart` 跑一次 before_agent_start 编排。
  *
+ * 自 Pi 1.2 起 emit 签名是 `emitBeforeAgentStart(trigger, options)`：trigger 必须显式声明
+ * `messageType`，user run 携带 `prompt`/`images`，custom run 携带 `message`。旧写法
+ * `emitBeforeAgentStart(prompt, images, options)` 已不再合法。
+ *
  * 返回：
  * - `base`：第一个探针看到的 prompt（生产 handler 之前的真实渲染结果）；
  * - `final`：最后一个探针看到的 prompt（全部 handler 之后的真实渲染结果）；
@@ -193,7 +199,10 @@ export async function runBeforeAgentStart({ extensions = [], prompt = "policy-pr
   );
   const errors = [];
   runner.onError((error) => errors.push(error));
-  const result = await runner.emitBeforeAgentStart(prompt, [], options ?? createCanaryOptions({ cwd }));
+  const result = await runner.emitBeforeAgentStart(
+    { messageType: "user", prompt, images: [] },
+    options ?? createCanaryOptions({ cwd }),
+  );
   return {
     runner,
     base: first.lastSeen,

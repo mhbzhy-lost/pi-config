@@ -57,6 +57,7 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     await mkdir(join(fixtureRepo, "scripts"), { recursive: true });
     await mkdir(join(fixtureRepo, "pi"), { recursive: true });
     await mkdir(join(fixtureRepo, "packages", "pi-subagents-enhanced"), { recursive: true });
+    await mkdir(join(fixtureRepo, "src", "pi-settings"), { recursive: true });
     await mkdir(join(home, ".local", "share", "opencode"), { recursive: true });
     await mkdir(fakeBin, { recursive: true });
     await copyFile(join(repoRoot, "init-pi.sh"), join(fixtureRepo, "init-pi.sh"));
@@ -64,6 +65,7 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     await copyFile(join(repoRoot, "scripts", "pi-shell.zsh"), join(fixtureRepo, "scripts", "pi-shell.zsh"));
     await copyFile(join(repoRoot, "scripts", "pi-launcher.zsh"), join(fixtureRepo, "scripts", "pi-launcher.zsh"));
     await copyFile(join(repoRoot, "scripts", "ensure-pi-settings.ts"), join(fixtureRepo, "scripts", "ensure-pi-settings.ts"));
+    await copyFile(join(repoRoot, "src", "pi-settings", "index.ts"), join(fixtureRepo, "src", "pi-settings", "index.ts"));
     await copyFile(join(repoRoot, "pi", "settings.template.json"), join(fixtureRepo, "pi", "settings.template.json"));
 
     await chmod(join(fixtureRepo, "init-pi.sh"), 0o755);
@@ -76,7 +78,7 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     const fakeNpm = join(fakeBin, "npm");
     await writeFile(
       fakeNpm,
-      "#!/usr/bin/env bash\nprintf 'npm registry=%s %s markers=%s,%s,%s,%s\\n' \"${NPM_CONFIG_REGISTRY:-}\" \"$*\" \"${PI_SUBAGENT_CHILD:-}\" \"${PI_SUBAGENT_FANOUT_CHILD:-}\" \"${PI_SUBAGENT_PARENT_SESSION:-}\" \"${PI_ROOT_SUBAGENT_BROKER_ENABLED:-}\" >> \"$COMMAND_LOG\"\nif [[ \"$*\" == *\"run setup:subagents-enhanced\"* ]]; then mkdir -p \"$FIXTURE_REPO/packages/pi-subagents-enhanced/node_modules/pi-subagents\"; printf '{\\\"version\\\":\\\"0.75.0\\\"}' > \"$FIXTURE_REPO/packages/pi-subagents-enhanced/node_modules/pi-subagents/package.json\"; fi\n",
+      "#!/usr/bin/env bash\nprintf 'npm registry=%s %s markers=%s,%s,%s,%s\\n' \"${NPM_CONFIG_REGISTRY:-}\" \"$*\" \"${PI_SUBAGENT_CHILD:-}\" \"${PI_SUBAGENT_FANOUT_CHILD:-}\" \"${PI_SUBAGENT_PARENT_SESSION:-}\" \"${PI_ROOT_SUBAGENT_BROKER_ENABLED:-}\" >> \"$COMMAND_LOG\"\nif [[ \"$*\" == *\"run setup:subagents-enhanced\"* ]]; then mkdir -p \"$FIXTURE_REPO/packages/pi-subagents-enhanced/node_modules/pi-subagents\"; printf '{\\\"version\\\":\\\"0.79.2\\\"}' > \"$FIXTURE_REPO/packages/pi-subagents-enhanced/node_modules/pi-subagents/package.json\"; fi\n",
     );
     await chmod(fakeNpm, 0o755);
     for (const [command, executable] of [["chmod", "/bin/chmod"], ["mkdir", "/bin/mkdir"], ["dirname", "/usr/bin/dirname"]]) {

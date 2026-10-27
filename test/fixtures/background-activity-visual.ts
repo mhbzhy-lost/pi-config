@@ -55,7 +55,10 @@ export default function visualFixture(pi: ExtensionAPI) {
     scope = payload.scope;
     publish();
   });
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", (event, ctx) => {
+    // 会话替换会重建 runtime 并重新求值本模块，模块级状态不跨 session 保留；
+    // 因此按公开 typed 事件的 previousSessionFile 重建 switch 目标（new 时才带该字段）。
+    if (event.reason === "new" && event.previousSessionFile) resumeFile = event.previousSessionFile;
     context = ctx; scope = undefined; epoch++;
     for (const kind of kinds) ids.set(kind, createBackgroundActivityRegistrationId());
     if (ctx.mode === "tui") {
@@ -85,7 +88,6 @@ export default function visualFixture(pi: ExtensionAPI) {
         const changed = ctx.ui.setTheme(action);
         if (!changed.success) throw new Error("fixture theme unavailable");
       } else if (action === "new") {
-        resumeFile = ctx.sessionManager.getSessionFile();
         await ctx.newSession({ withSession: async (fresh) => { context = fresh; } });
       } else if (action === "switch") {
         if (!resumeFile) throw new Error("fixture resume 需要已保存的合法会话");

@@ -7,6 +7,9 @@ import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 
+// 父可见请求只读Host RPC records的message_end：pi-subagents idle唤醒下custom消息由session纯追加，不触发扩展message_end，但RPC records（与本文件C8同一观察面）逐字带role/customType/details。
+const parentRequests = records => records.filter(r => r.type === 'message_end' && r.message?.role === 'custom' && r.message?.customType === 'subagent_supervisor_request');
+
 // 全链入口为官方physical CLI + 正式typed runtime + actual detached child，不手写消息/proof。
 for (const scenario of ['ask','interview','progress','timeout','managed','stop','duplicate','ceiling','empty','invalid-reply','repeat-question','child-mcp','two-asks']) test('真实physical parent/Node detached supervisor: '+scenario, { timeout: 60000 }, async t => {
  const repo=resolve(import.meta.dirname,'..'); const host=process.env.PI_TEST_CODING_AGENT_ROOT?.trim()||join(repo,'node_modules/@earendil-works/pi-coding-agent');
@@ -60,10 +63,10 @@ if(scenario==='empty') {const childStart=events.find(e=>e.child&&e.type==='start
  if(scenario==='ceiling'){assert.deepEqual(events.find(e=>e.child&&e.type==='start').tools.map(t=>t.name).sort(),['contact_supervisor','read']);}
  const childResult=events.find(e=>e.child&&e.message?.toolName==='contact_supervisor');
  if(scenario!=='stop') assert.ok(childResult,'真实child没有contact工具结果');
- if(scenario==='progress') { assert.equal(childResult.message.isError,false); assert.match(childResult.message.content[0].text,/queued/); assert.equal(events.some(e=>!e.child&&e.message?.customType==='subagent_supervisor_request'),false); return; }
+ if(scenario==='progress') { assert.equal(childResult.message.isError,false); assert.match(childResult.message.content[0].text,/queued/); assert.equal(parentRequests(records).length,0,'progress非阻塞消息不得在父RPC message_end留下阻塞请求'); return; }
  if(scenario==='managed') { assert.ok(events.find(e=>e.child&&e.type==='root-owner-ready'),'managed child必须通过真实grant建立root.subscribe，不能只是ACK加载'); }
- const request=events.findLast(e=>!e.child&&e.message?.customType==='subagent_supervisor_request');
- assert.ok(request,'父message_end未收到实际阻塞请求：'+JSON.stringify({status,events,stderr}));
+ const request=parentRequests(records).at(-1);
+ assert.ok(request,'父RPC message_end未收到实际阻塞请求：'+JSON.stringify({rpcCustomTypes:records.filter(r=>r.type==='message_end'&&r.message?.role==='custom').map(r=>r.message.customType),status,stderr}));
  if(scenario==='stop') { assert.notEqual(status.state,'complete','stop不能被误标成功');const f=join(root,'workspace/supervisor-control');const persisted=await Promise.all((await readdir(f)).filter(x=>x.endsWith('.json')).map(async x=>JSON.parse(await readFile(join(f,x),'utf8')).value));assert.equal(persisted.flatMap(x=>x.requests).find(x=>x.requestId===request.message.details.requestId).state,'failed','stop不能留下幽灵pending');assert.equal(events.some(e=>!e.child&&e.message?.toolName==='supervisor_request_reply'&&e.message.details?.replyTo),false);return; }
  if(scenario==='invalid-reply') {
    // 合同：Host在tool执行前做schema校验，第2/3次缺replyTo的调用不会进入控制面（details为空对象、无code）。按回执顺序断言，保留“schema非法调用不得投递”的覆盖。
@@ -89,7 +92,7 @@ if(scenario==='empty') {const childStart=events.find(e=>e.child&&e.type==='start
  const consumed=events.find(e=>e.child&&e.message?.toolName==='contact_supervisor'&&e.message.details?.requestId===request.message.details.requestId);assert.ok(consumed,'actual detached child waiter没有消费');assert.equal(consumed.message.isError,false);assert.match(consumed.message.content.map(c=>c.text??'').join('\n'),/joint-reply-nonce/);
  if(scenario==='interview') assert.deepEqual(consumed.message.details.structuredReply,{answer:'joint-reply-nonce'});
  if(scenario==='duplicate') {const replies=events.filter(e=>!e.child&&e.message?.toolName==='supervisor_request_reply'&&!e.message.details?.pending);assert.equal(replies.length,2);assert.equal(replies.filter(e=>e.message.isError===false).length,1);assert.equal(replies.find(e=>e.message.isError===true).message.details.code,'SUPERVISOR_DELIVERY_IDEMPOTENT');}
- if(['repeat-question','two-asks'].includes(scenario)){const asks=events.filter(e=>!e.child&&e.message?.customType==='subagent_supervisor_request');const consumedAll=events.filter(e=>e.child&&e.message?.toolName==='contact_supervisor');assert.equal(asks.length,2);assert.equal(consumedAll.length,2);assert.ok(consumedAll.every(e=>e.message.isError===false));assert.notEqual(asks[0].message.details.requestId,asks[1].message.details.requestId);}
+ if(['repeat-question','two-asks'].includes(scenario)){const asks=parentRequests(records);const consumedAll=events.filter(e=>e.child&&e.message?.toolName==='contact_supervisor');assert.equal(asks.length,2);assert.equal(consumedAll.length,2);assert.ok(consumedAll.every(e=>e.message.isError===false));assert.notEqual(asks[0].message.details.requestId,asks[1].message.details.requestId);}
  assert.equal(status.state,'complete',JSON.stringify(status));
  const folder=join(root,'workspace/supervisor-control');const files=await readdir(folder);const states=await Promise.all(files.filter(x=>x.endsWith('.json')).map(async x=>JSON.parse(await readFile(join(folder,x),'utf8')).value));
  let receipt, authoritative;
@@ -144,7 +147,9 @@ test('C10两个fresh父Host共享native临时通路，同名child与reply UUID�
  for(const result of results)assert.equal(result.code,0,result.out+result.err);
  const roots=results.map(result=>result.out.match(/证据目录：([^\s]+)/)?.[1]);assert.ok(roots.every(Boolean),JSON.stringify(results));
  const captures=await Promise.all(roots.map(async root=>(await readFile(join(root,'capture.jsonl'),'utf8')).trim().split('\n').map(JSON.parse)));
- const requests=captures.map(events=>events.find(e=>!e.child&&e.message?.customType==='subagent_supervisor_request').message.details);
+ const parents=await Promise.all(roots.map(async root=>parentRequests(JSON.parse(await readFile(join(root,'parent-events.json'),'utf8')))));
+ const requests=parents.map(list=>list.at(-1)?.message.details);
+ assert.ok(requests.every(Boolean),'C10父RPC message_end未留下父可见请求：'+JSON.stringify({shared,roots,counts:parents.map(list=>list.length)}));
  assert.notEqual(requests[0].requestId,requests[1].requestId);assert.notEqual(requests[0].runId,requests[1].runId);
  for(let i=0;i<2;i++){const ids=captures[i].filter(e=>e.child&&e.message?.toolName==='contact_supervisor').map(e=>e.message.details?.requestId);assert.deepEqual(ids,[requests[i].requestId]);assert.ok(!ids.includes(requests[1-i].requestId));}
  t.diagnostic(JSON.stringify({shared,roots,requestIds:requests.map(r=>r.requestId)}));

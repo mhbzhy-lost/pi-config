@@ -12,7 +12,7 @@ description: Use only to add, delete, update, or diagnose missing/invalid/reject
 ## Commands
 
 ```bash
-SCRIPT=.pi/skills/manage-providers/manage-providers.py
+SCRIPT=.agents/skills/manage-providers/manage-providers.py
 
 # 查看非敏感定义（不检查凭据）
 python3 $SCRIPT list

@@ -9,10 +9,10 @@ export function resolvePhysicalHost({ hostRoot, nodeBin, env = process.env }: { 
   const node = realpathSync(nodeBin);
   accessSync(node, constants.X_OK);
   const manifest = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
-  if (manifest.name !== '@earendil-works/pi-coding-agent' || manifest.version !== '1.0.4') throw new Error('physical Host身份或版本错误');
+  if (manifest.name !== '@earendil-works/pi-coding-agent' || manifest.version !== '1.4.0') throw new Error('physical Host身份或版本错误');
   for (const peer of ['pi-agent-core', 'pi-ai', 'pi-tui']) {
     const p = JSON.parse(readFileSync(path.join(root, '..', peer, 'package.json'), 'utf8'));
-    if (p.name !== '@earendil-works/' + peer || p.version !== '1.0.4') throw new Error('physical Host peer不一致');
+    if (p.name !== '@earendil-works/' + peer || p.version !== '1.4.0') throw new Error('physical Host peer不一致');
   }
   const entry = realpathSync(path.join(root, 'dist/cli.js'));
   const sdk = realpathSync(path.join(root, 'dist/index.js'));
@@ -34,6 +34,8 @@ export async function probePhysicalHost({ hostRoot, nodeBin, enhancedPackageRoot
     const coding=pathToFileURL(binding.sdk).href;
     const peers=Object.fromEntries(['pi-tui','pi-agent-core','pi-ai'].map(name=>[name,pathToFileURL(path.join(binding.hostRoot,'..',name,'dist',name==='pi-ai'?'compat.js':'index.js')).href]));
     const extension=new URL('./probe-extension.ts',import.meta.url).pathname;
+    // watchdog身份：0.79.2 的 subagent_watchdog_warning 由 renderSubagentMessage 返回 SubagentMessageBlock extends Host Box，
+    // 不再是直接 Container；因此断言"Host Box 子类"：异源 pi-tui 副本与裸 Box 都 fail closed。
     const source=`import * as sdk from ${JSON.stringify(coding)};
       import * as tui from ${JSON.stringify(peers['pi-tui'])}; import * as core from ${JSON.stringify(peers['pi-agent-core'])}; import * as ai from ${JSON.stringify(peers['pi-ai'])};
       const loaded=await sdk.discoverAndLoadExtensions([${JSON.stringify(extension)}],process.cwd(),process.env.PI_CODING_AGENT_DIR);
@@ -41,12 +43,12 @@ export async function probePhysicalHost({ hostRoot, nodeBin, enhancedPackageRoot
       const e=loaded.extensions[0]; const ids=await e.commands.get('physical-host-identity').handler();
       const details={severity:'concern',importance:'high',category:'test-gap',source:'main',state:'displayed',summary:'physical identity',evidence:'actual compat consumer',recommendedAction:'probe'};
       const component=e.messageRenderers.get('subagent_watchdog_warning')({customType:'subagent_watchdog_warning',content:details.summary,display:true,details},{expanded:true},{fg:(_,s)=>s,bold:s=>s});
-      const identities={SessionManager:ids.SessionManager===sdk.SessionManager,Container:ids.Container===tui.Container,Agent:ids.Agent===core.Agent,streamSimple:ids.streamSimple===ai.streamSimple,watchdog:component.constructor===tui.Container};
-      loaded.runtime.invalidate();console.log(JSON.stringify({version:'1.0.4',healthy:Object.values(identities).every(Boolean),identities}));`;
+      const identities={SessionManager:ids.SessionManager===sdk.SessionManager,Container:ids.Container===tui.Container,Agent:ids.Agent===core.Agent,streamSimple:ids.streamSimple===ai.streamSimple,watchdog:component instanceof tui.Box&&component.constructor!==tui.Box};
+      loaded.runtime.invalidate();console.log(JSON.stringify({version:'1.4.0',healthy:Object.values(identities).every(Boolean),identities}));`;
     const result=spawnSync(binding.nodeBin,['--input-type=module','-e',source],{cwd:temporary,env:{PATH:path.dirname(binding.nodeBin)+':/usr/bin:/bin',HOME:temporary,TMPDIR:'/tmp',PI_CODING_AGENT_DIR:path.join(temporary,'agent'),PI_PACKAGE_DIR:binding.hostRoot,PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT:binding.hostRoot,PI_OFFLINE:'1',PI_TELEMETRY:'0'},encoding:'utf8',timeout:30000,maxBuffer:4*1024*1024});
     if(result.status!==0)throw new Error('physical Host-backed probe失败: '+result.stderr);
     const report=JSON.parse(result.stdout.trim());
-    if(report.version!=='1.0.4'||report.healthy!==true)throw new Error('physical identity不一致: '+result.stdout);
+    if(report.version!=='1.4.0'||report.healthy!==true)throw new Error('physical identity不一致: '+result.stdout);
     return report;
   } finally { await rm(temporary,{recursive:true,force:true}); }
 }

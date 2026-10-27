@@ -4,6 +4,14 @@
 > 基线事实：全量 integration gate **0 fail**（`/tmp/rc-gate-final.log`：42 文件、344 tests / 334 pass / 0 fail / 10 skipped、876s、`GATE_EXIT=0`，排除清单为空）；本批自 `92b0302` 起 41 个提交，`main` 相对 `origin/main`（`a9875d6`）**ahead 89**，未 push。
 > 细节证据见同目录 `integration-gate-baseline.md`、`f8-takeover-gap.md`、`contact-supervisor-runid-triage.md`、`session-owner-wrapper-triage.md`、`steer-locator-contract.md`、`closure-matrix.md`。
 
+> **当前状态指针与冻结说明（2026-10-21 Pi 1.3.0 升级收尾追加；正文逐字保留、不逐行改写旧数字）**
+>
+> - 本文正文是 **1.0.4 运行时收口轮**的历史账本，只供追溯。正文中已过期的表述**保留原样**，引用前必须先叠加下列更正：`A1` 的「ahead 89 / 未 push」已过期（`main` 与 `origin/main` 同步在 `35e3e77`）；`G1` 孤立 fixture 已于 `24dc18a` 删除；`F8` 编号在两份账本里指两件不同事项（本文 `F8` = R10 heartbeat 正常结算复跑；`2026-10-16-subagent-operation-followups.md` 的 `F8` = 五-child「主 Agent 接管」验收），引用一律带账本前缀。
+> - **冻结清单（1.0.4 小补强冻结）**：`A2` 启动诊断顺序、`C1`/`F8(作)` typed resume → activation 与跨 Host handoff（含 `C2`）、`C3` child 作用域、`E1` 空闲通知、`E2` `resume(model)`、`E3` `pi -c` guard、`D2` scheduler 并发，**均不再作为 Pi 1.3.0 升级前置，也不再逐项等待用户旧裁决**；恢复讨论的唯一触发条件是「Pi 1.3.0 目标版实际需要」，届时另立合同。`F1`–`F7`、`F9` 等证据/授权阻塞项同理维持冻结。
+> - **独立清理事务**：`A3` 未跟踪 observation 文件、`G2` probe dead 分支、`G3` `resolveTargetChild` 死码可清，但属**独立事务**，不带入升级 diff；无证据支持删除任何大领域模块（root broker、workspace/queue/proof、session-owner、typed tools、heartbeat 全部保留）。
+> - **现场事务独立**：本文涉及的 observation 未跟踪文件、`pi/crashes.json`、models 备份、4 个旧 heartbeat 证据根与 3 次 probe 临时现场，全部**原地保留、不复制**到升级 checkout；原仓 `pi-config` 未被本次升级访问或修改。
+> - 升级侧的当前结论、三处必要生产适配与逐轮定向验收证据见 `docs/investigations/2026-10-21-pi-1.3-combined-assessment.md` §8 与升级收尾唯一入口 `docs/todos/2026-10-21-pi-1.3-upgrade-closeout.md`。
+
 ## A. 需用户一句话裁决（阻塞在主会话，未裁决前不动）
 
 | # | 事项 | 现状与坐标 | 推进条件 |

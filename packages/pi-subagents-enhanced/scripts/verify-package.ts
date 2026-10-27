@@ -10,7 +10,7 @@ const execFile = promisify(execFileCallback);
 const scriptPath = fileURLToPath(import.meta.url);
 const defaultPackageRoot = resolve(import.meta.dirname, "..");
 const defaultNpmCache = resolve(defaultPackageRoot, "../..", "var/tmp/npm-cache");
-const UPSTREAM_VERSION = "0.75.0";
+const UPSTREAM_VERSION = "0.80.0";
 const expectedExtensions = ["./extensions/subagent-runtime.ts", "./extensions/custom-footer.ts"];
 const expectedFiles = ["AGENTS.md", "README.md", "extensions", "child-extensions", "scripts", "src"];
 const expectedExports = {
@@ -169,7 +169,7 @@ export async function npmPackDryRun(packageRoot: string) {
 export async function verifyEnhancedPackage({ packageRoot = defaultPackageRoot, runPack = npmPackDryRun } = {}) {
   const manifest = await json(resolve(packageRoot, "package.json"));
   if (manifest.name !== "pi-subagents-enhanced" || manifest.version !== "0.1.0") throw new Error("Enhanced package identity must be pi-subagents-enhanced@0.1.0.");
-  if (manifest.dependencies?.["pi-subagents"] !== UPSTREAM_VERSION || manifest.dependencies?.typescript !== "5.9.3" || JSON.stringify(manifest.bundleDependencies) !== JSON.stringify(["pi-subagents"]) || Object.hasOwn(manifest, "bundledDependencies")) throw new Error("Enhanced package must declare pi-subagents@0.75.0 and canonical bundleDependencies.");
+  if (manifest.dependencies?.["pi-subagents"] !== UPSTREAM_VERSION || manifest.dependencies?.typescript !== "5.9.3" || JSON.stringify(manifest.bundleDependencies) !== JSON.stringify(["pi-subagents"]) || Object.hasOwn(manifest, "bundledDependencies")) throw new Error("Enhanced package must declare pi-subagents@0.80.0 and canonical bundleDependencies.");
   if (JSON.stringify(manifest.pi?.extensions) !== JSON.stringify(expectedExtensions)) throw new Error("Enhanced package must declare exactly the runtime and footer extensions.");
   if (JSON.stringify(manifest.exports) !== JSON.stringify(expectedExports)) throw new Error("Enhanced package exports must expose only canonical prompt, dispatch, TUI, and workspace APIs.");
   if (JSON.stringify(manifest.files) !== JSON.stringify(expectedFiles)) throw new Error("Enhanced package files allowlist is incomplete or unexpected.");

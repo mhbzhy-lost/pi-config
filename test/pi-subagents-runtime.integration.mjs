@@ -148,6 +148,10 @@ async function runScenario(mode) {
   const packageRoot = await mkdtemp(join(tmpdir(), "pi-subagents-top-level-probe-"));
   const projectRoot = await mkdtemp(join(tmpdir(), "pi-subagents-top-level-project-"));
   const runtimeTmp = await mkdtemp(join(tmpdir(), "pi-subagents-top-level-runtime-"));
+  // 上游 0.79.2 src/shared/types.js:106-109 优先采用显式 PI_SUBAGENTS_TEMP_ROOT，因此本 fixture
+  // 显式把 Host 的临时根限定到本次运行的隔离目录：既尊重该变量（探针按同一变量定位产物），
+  // 又保证 route 数量断言只覆盖本次运行，不受调用方共享临时根里历史 route 的影响。
+  const subagentsTempRoot = join(runtimeTmp, "subagents");
   const configRoot = join(packageRoot, "config");
   const probe = join(packageRoot, "top-level-rpc-probe.mjs");
   const outputPath = join(projectRoot, `${mode}-output.txt`);
@@ -183,7 +187,8 @@ Use the deterministic compatibility marker from the assigned task.
     await writeFile(join(configRoot, "agents", "reviewer.md"), `---\nname: reviewer\ndescription: deterministic reviewer profile\nmodel: fake/deterministic\ntools: read\n---\nReturn the deterministic compatibility marker.\n`);
     await writeFile(probe, `
       import { readFile, readdir } from "node:fs/promises";
-      import { join } from "node:path";
+      import { tmpdir } from "node:os";
+      import { join, resolve } from "node:path";
       import { createSubagentsRpcClient } from ${JSON.stringify(clientModule)};
       const schema = {
         type: "object",
@@ -330,7 +335,13 @@ Use the deterministic compatibility marker from the assigned task.
           description: "Count nested route metadata and event files while the executor is active.",
           parameters: { type: "object", properties: {}, additionalProperties: false },
           async execute() {
-            const root = ${JSON.stringify(join(runtimeTmp, `pi-subagents-uid-${process.getuid()}`, "nested-subagent-events"))};
+            // 与被 spawn 的 Host 选择同一临时根：显式变量优先，缺省按上游对应版本的
+            // os.tmpdir() + "pi-subagents-uid-<uid>" 算法（src/shared/types.js:106-109）。
+            const configuredTempRoot = process.env.PI_SUBAGENTS_TEMP_ROOT?.trim();
+            const tempRootDir = configuredTempRoot
+              ? resolve(configuredTempRoot)
+              : join(tmpdir(), "pi-subagents-uid-" + process.getuid());
+            const root = join(tempRootDir, "nested-subagent-events");
             const files = [];
             const visit = async (dir) => {
               let entries;
@@ -390,7 +401,7 @@ Use the deterministic compatibility marker from the assigned task.
             PI_ROOT_SUBAGENT_BROKER_ENABLED: _broker, PI_SUBAGENT_ORCHESTRATOR_SESSION_ID: _orchestrator,
             PI_SUBAGENT_RUN_ID: _run, ...topLevelEnv } = process.env;
 
-          return { ...buildTopLevelRuntimeEnv(topLevelEnv), TMPDIR: runtimeTmp, PI_CODING_AGENT_DIR: configRoot, PI_CODING_WORKSPACE_DIR: join(packageRoot,"state"), OPENAI_API_KEY: "not-used" };
+          return { ...buildTopLevelRuntimeEnv(topLevelEnv), TMPDIR: runtimeTmp, PI_SUBAGENTS_TEMP_ROOT: subagentsTempRoot, PI_CODING_AGENT_DIR: configRoot, PI_CODING_WORKSPACE_DIR: join(packageRoot,"state"), OPENAI_API_KEY: "not-used" };
         })(),
         input: JSON.stringify({ id: `top-level-rpc-${mode}`, type: "prompt", message: prompt }),
         until: (record) => {
@@ -479,7 +490,7 @@ test("installed runtime resolves a supported Pi and exact dependency versions", 
   const piVersion = execFileSync(piBinary, ["--version"], { encoding: "utf8" }).trim();
   assert.ok(SUPPORTED_PI_VERSIONS.includes(piVersion), `unsupported Pi version: ${piVersion}`);
   const piSubagentsVersion = execFileSync("node", ["-p", `require(${JSON.stringify(join(upstreamPackageRoot, "package.json"))}).version`], { encoding: "utf8" }).trim();
-   assert.equal(piSubagentsVersion, "0.75.0");
+   assert.equal(piSubagentsVersion, "0.79.2");
   const requireFromExtension = createRequire(join(upstreamPackageRoot, "package.json"));
   assert.match(requireFromExtension.resolve("typebox/compile"), /typebox/);
   assert.ok(requireFromExtension.resolve('typebox/compile'));

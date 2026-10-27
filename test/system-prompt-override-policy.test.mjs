@@ -17,6 +17,7 @@
  *   sessions / logs / authority / state 一律不打开；`pi/` 只做 depth-1 **文件名**枚举。
  */
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,6 +26,7 @@ import {
   GLOBAL_BLOCK_CLOSE,
   GLOBAL_BLOCK_OPEN,
   GUIDELINE_CANARY,
+  REPO_ROOT,
   SHARED_BLOCK_OPEN,
   SHARED_CHILD_BLOCK_OPEN,
   classifyProfileSystemPromptMode,
@@ -795,7 +797,23 @@ test("policy#scan-coverage-accounts-for-every-file-and-excludes-state-dirs", () 
     accounted.size >= REQUIRED_SCANNED_FILES.length + REQUIRED_TEXT_PROBED_FILES.length,
     `扫描必须实际覆盖哨兵清单，实际 ${accounted.size} 个文件`,
   );
-  assert.deepEqual(report.files.ignored, ["pi/extensions/.DS_Store", "scripts/.DS_Store"], "只有显式登记的 OS 垃圾文件可以被忽略");
+  // 忽略清单按现场真实输入核对，不硬编码「本机恰好存在哪些垃圾文件」：
+  // 干净 clone 里没有任何 .DS_Store 时允许为空，但只要出现被忽略条目，就必须同时满足
+  // 「显式登记的 OS 垃圾文件名 + 落在显式枚举的扫描根内 + 磁盘上真实存在 + 不进源码/文本证据」。
+  const registeredJunkBasenames = [".DS_Store", "Thumbs.db"];
+  for (const path of report.files.ignored) {
+    const basename = path.split("/").at(-1);
+    assert.ok(registeredJunkBasenames.includes(basename), `只有显式登记的 OS 垃圾文件可以被忽略，实际出现：${path}`);
+    assert.ok(
+      SCAN_ROOTS.some((root) => path.startsWith(`${root}/`)),
+      `被忽略条目必须落在显式枚举的扫描根内：${path}`,
+    );
+    assert.ok(existsSync(join(REPO_ROOT, path)), `被忽略条目必须在现场真实存在，不得凭期待登记：${path}`);
+    assert.ok(
+      !report.files.source.includes(path) && !report.files.text.includes(path),
+      `OS 垃圾文件不得进入源码/文本证据：${path}`,
+    );
+  }
   // 扫描外边界必须真实成立：不得混入 vendored / 真实用户状态 / 测试目录。
   for (const path of [...report.files.source, ...report.files.text]) {
     assert.ok(!path.includes("node_modules"), `不得扇入 vendored 依赖：${path}`);

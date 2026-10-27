@@ -65,6 +65,14 @@ function notifyProviderSource(contract) {
     import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
     const contract = ${JSON.stringify(contract)};
     const childReport = ${JSON.stringify(childAcceptanceReport())};
+    const childDoneMarker = ${JSON.stringify(CHILD_DONE_MARKER)};
+    // 目标版本（pi-subagents@0.79.2）已发布文案，固定在本 fixture 内作为既有目标合同：
+    //  - 完成通知头：src/runs/background/notify.js formatSingleCompletion；
+    //  - 父唤醒文案：src/shared/parent-wake.js PARENT_WAKE_TEXT —— createParentWake 在父空闲时
+    //    先 sendMessage(通知, { triggerTurn: false })，再 sendUserMessage(PARENT_WAKE_TEXT, { deliverAs: "steer" })。
+    // 仅作为测试侧识别合同，不引入任何上游 deep import，也不向 production 扩散。
+    const NOTICE_HEADER = "Background task completed: ";
+    const PARENT_WAKE_PREFIX = "Inspect subagent updates above.";
     function text(message) {
       return typeof message?.content === "string" ? message.content
         : message?.content?.filter((part) => part?.type === "text").map((part) => part.text).join("\\n") ?? "";
@@ -85,15 +93,31 @@ function notifyProviderSource(contract) {
           const toolResults = messages.filter((message) => message?.role === "toolResult");
           const lastUser = users.at(-1) ?? "";
           const dispatched = toolResults.find((message) => message.toolName === "subagent_start" && /Started /.test(text(message)));
+          // 派发回执文案为 'Started <agent>: <title> (<runId>).'，从本次回执取回 runId。
+          const dispatchedRunId = dispatched ? /Started [^:]+: [^(]*\\(([^()]+)\\)/.exec(text(dispatched))?.[1] : undefined;
+          // 本次 run 的完成通知是否已进入父会话上下文：通知体同时携带该 run 的 retention 目录
+          // （async-subagent-runs/<runId>）与该子代理的完成产物预览，二者同时命中才算同一次完成。
+          const runNoticeIndex = dispatchedRunId
+            ? users.findIndex((message) => message.startsWith(NOTICE_HEADER)
+              && message.includes("async-subagent-runs/" + dispatchedRunId)
+              && message.includes(childDoneMarker))
+            : -1;
           let tool;
           let output;
           if (lastUser.includes(${JSON.stringify(CHILD_OBJECTIVE_MARKER)})) {
             // 子代理回合：typed dispatch prompt 内嵌 objective 标记，直接返回确定性完成产物。
             output = childReport;
           } else if (dispatched) {
-            // 派发后的父会话回合：若最后一条 user 消息是完成通知（上游原生 notify 经
-            // convertToLlm 以 user 消息进入模型上下文），返回 NOTIFIED 终态标记。
-            output = lastUser.startsWith("Background task") ? "NOTIFY_PARENT_NOTIFIED" : "NOTIFY_PARENT_DISPATCHED";
+            // 派发后的父会话回合有两种，必须区分：
+            //  1) 初次 dispatch 回合：工具结果入上下文后模型续跑，lastUser 仍是父 prompt，尚未发生唤醒。
+            //  2) 真实后续父回合：上游 notify 先以 triggerTurn=false 追加通知（convertToLlm 转成 user
+            //     消息），随后 createParentWake 以 PARENT_WAKE_TEXT 起新回合；父不空闲时则由通知本身
+            //     （triggerTurn=true）起回合。两种入口都必须已有本次 run 的通知，否则不算父被唤醒。
+            const parentWoken = (lastUser.startsWith(PARENT_WAKE_PREFIX) && runNoticeIndex !== -1 && runNoticeIndex < users.length - 1)
+              || (lastUser.startsWith(NOTICE_HEADER) && runNoticeIndex === users.length - 1);
+            if (parentWoken) output = "NOTIFY_PARENT_NOTIFIED";
+            else if (lastUser.startsWith(PARENT_WAKE_PREFIX) || lastUser.startsWith(NOTICE_HEADER)) output = "NOTIFY_PARENT_WAKE_UNLINKED";
+            else output = "NOTIFY_PARENT_DISPATCHED";
           } else if (lastUser.includes(${JSON.stringify(PARENT_PROMPT)})) {
             tool = { name: "subagent_start", arguments: contract };
           } else {
@@ -173,6 +197,9 @@ function spawnRpcHost(command, args, { cwd, env, input, timeoutMs = 300_000 }) {
     }
   });
   child.stderr.on("data", (chunk) => { stderr += chunk; });
+  // stdin 只用于 EOF teardown：spawn 失败或子进程已退出后 end() 可能报流错误，
+  // 不得变成未捕获异常而掩盖真正的断言失败。
+  child.stdin.on("error", () => {});
   child.once("error", (error) => { spawnError = error; });
   const closed = new Promise((resolveClosed) => {
     child.once("close", (status, signal) => {
@@ -275,7 +302,15 @@ test("async typed dispatch delivers the upstream subagent-notify custom message 
   const provider = join(root, "notify-provider.mjs");
   const parentProbe = join(root, "notify-parent-probe.mjs");
 
+  // 本用例创建的 Host 由本用例负责释放：无论断言成功还是失败，都对本 Host 执行既有 EOF
+  // （endInput）并等待既有 closed，避免失败路径一直挂到 300s 总 timer；Host 完全关闭后才删
+  // session/根目录，避免自己删 session 时 Host 仍在写。不新增 kill 路径、不改 deadline。
+  let host;
   t.after(async () => {
+    if (host) {
+      host.endInput();
+      await host.closed;
+    }
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     await rm(runtimeTmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
@@ -328,7 +363,7 @@ extensions: ${provider}
   await writeFile(provider, notifyProviderSource(contract));
   await writeFile(parentProbe, parentProbeSource());
 
-  const host = spawnRpcHost(piBinary, [
+  host = spawnRpcHost(piBinary, [
     "--mode", "rpc", "--no-extensions",
     "-e", provider,
     "-e", projectRuntime,

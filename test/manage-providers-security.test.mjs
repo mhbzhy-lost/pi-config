@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 
-const script = resolve(".pi/skills/manage-providers/manage-providers.py");
+const script = resolve(".agents/skills/manage-providers/manage-providers.py");
 
 function run(dir, ...args) {
   return spawnSync("python3", [script, ...args], {

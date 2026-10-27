@@ -37,7 +37,8 @@ __pycache__/
 
 # Pi runtime (subagent artifacts)
 /.pi-subagents/
-/.pi/subagents/
+# 项目skill归属.agents/skills；.pi仅保留本机状态、handoff和临时产物。
+/.pi/
 /pi/pi-subagents/last-seen-version.json
 /src/session-owner/.pi/
 /.state/goal-engine/

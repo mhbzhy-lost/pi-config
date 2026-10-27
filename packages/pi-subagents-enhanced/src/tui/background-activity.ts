@@ -100,7 +100,7 @@ export type HostScopeIdentity = Readonly<{
 
 /**
  * 详情壳挂载视图。createFooter 的形状直接由 SDK `ExtensionUIContext['setFooter']`
- * 推导（Pi 1.0.4 d.ts：(tui, theme, footerData) => Component & { dispose?() }）；
+ * 推导（Pi 1.3.0 dist/core/extensions/types.d.ts:111：(tui, theme, footerData) => Component & { dispose?() }）；
  * 根 presenter 只返回该 factory，不得自行调用 setFooter。
  */
 export type MountedActivityView = {

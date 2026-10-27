@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 export function physicalLauncherFixture(fakeExecutable) {
  const modules=join(dirname(fakeExecutable),'physical/node_modules/@earendil-works');const root=join(modules,'pi-coding-agent');
  for(const name of ['pi-coding-agent','pi-agent-core','pi-ai','pi-tui']){
-  const dir=join(modules,name);mkdirSync(join(dir,'dist'),{recursive:true});writeFileSync(join(dir,'package.json'),JSON.stringify({name:'@earendil-works/'+name,version:'1.0.4',type:'module',exports:{'.':{import:'./dist/index.js'}}}));
+  const dir=join(modules,name);mkdirSync(join(dir,'dist'),{recursive:true});writeFileSync(join(dir,'package.json'),JSON.stringify({name:'@earendil-works/'+name,version:'1.4.0',type:'module',exports:{'.':{import:'./dist/index.js'}}}));
  }
  writeFileSync(join(root,'dist/index.js'),"throw Error('fixture不得为continue加载SDK');\n");
  const contents=readFileSync(fakeExecutable,'utf8');

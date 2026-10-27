@@ -36,7 +36,7 @@ test("real InteractiveMode shows hidden completion without another model turn", 
       columns: 100, rows: 30, kittyProtocolActive: false,
       start() { starts++; }, stop() {}, async drainInput() {}, write() {},
       moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {}, clearFromCursor() {},
-      clearScreen() {}, setTitle() {}, setProgress() {},
+      clearScreen() {}, setTitle() {}, setProgress() {}, setProgramStatus() {},
     };
     mode = new sdk.InteractiveMode(runtime, { tuiMode: "fullscreen", terminal });
     mode.subscribeToAgent();
@@ -81,7 +81,7 @@ test("real InteractiveMode shows hidden completion without another model turn", 
     assert.doesNotMatch(render(), /disposed-notice/);
     assert.equal(requests.length, 3);
     assert.deepEqual(h.session.sessionManager.getBranch().slice(0, branch.length), branch);
-    t.diagnostic("3 native sends => 3 provider calls, 3 assistant turns; first hidden message persisted once with display:false; terminal starts=0");
+    t.diagnostic(`3 native sends => 3 provider calls, 3 assistant turns; first hidden message persisted once with display:false; terminal starts=${starts}`);
   } finally {
     registration?.dispose();
     mode?.unsubscribe?.();

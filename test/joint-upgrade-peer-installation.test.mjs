@@ -14,7 +14,7 @@ test('安装将enhanced的四core peer绑定到权威physical root，重复运�
  await mkdir(enhanced); await writeFile(join(enhanced,'package.json'),JSON.stringify({name:'pi-subagents-enhanced'}));
  for(const name of ['pi-coding-agent','pi-agent-core','pi-ai','pi-tui']) {
   const source=join(temp,'node_modules/@earendil-works',name);const duplicate=join(enhanced,'node_modules/@earendil-works',name);
-  for(const dir of [source,duplicate]) {await mkdir(dir,{recursive:true});await writeFile(join(dir,'package.json'),JSON.stringify({name:'@earendil-works/'+name,version:'1.0.4',type:'module',exports:{'.':{import:'./index.js'}}}));await writeFile(join(dir,'index.js'),'export class Identity {}\n');}
+  for(const dir of [source,duplicate]) {await mkdir(dir,{recursive:true});await writeFile(join(dir,'package.json'),JSON.stringify({name:'@earendil-works/'+name,version:'1.4.0',type:'module',exports:{'.':{import:'./index.js'}}}));await writeFile(join(dir,'index.js'),'export class Identity {}\n');}
  }
  await mkdir(join(enhanced,'node_modules/pi-subagents'),{recursive:true});await writeFile(join(enhanced,'node_modules/pi-subagents/package.json'),'{}');
  const upstreamBefore=await realpath(join(enhanced,'node_modules/pi-subagents'));

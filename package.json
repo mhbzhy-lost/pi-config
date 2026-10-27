@@ -28,13 +28,10 @@
     "typescript": "7.0.2"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "1.0.4",
-    "@earendil-works/pi-ai": "1.0.4",
-    "@earendil-works/pi-coding-agent": "1.0.4",
-    "@earendil-works/pi-tui": "1.0.4",
+    "@earendil-works/pi-agent-core": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-tui": "1.4.0",
     "pi-subagents-enhanced": "file:./packages/pi-subagents-enhanced"
-  },
-  "overrides": {
-    "@earendil-works/pi-codemode": "1.0.4"
   }
 }
