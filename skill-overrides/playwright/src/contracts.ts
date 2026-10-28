@@ -17,7 +17,13 @@ export type LocatorSpec =
   | { kind: 'role'; role: string; name: string; exact?: boolean }
   | { kind: 'testId'; value: string }
   | { kind: 'css'; value: string };
+export type AoneEnvironment = 'daily' | 'prepub' | 'publish';
+export type AoneConfigCommand = { op: 'aone-config-readonly'; action: 'verify' }
+  | { op: 'aone-config-readonly'; action: 'export'; environment: AoneEnvironment };
+export const AONE_EXPORT_MAX_BYTES = 1024 * 1024;
+export type AoneArtifactName = `aone-config-${AoneEnvironment}.env`;
 export type Command =
+  | AoneConfigCommand
   | { op: 'navigate'; url: string }
   | { op: 'snapshot' }
   | { op: 'click'; locator: LocatorSpec }
@@ -35,6 +41,7 @@ export type SafeResult =
   | { kind: 'snapshot'; value: string; maxLength: 65536 }
   | { kind: 'tabs'; tabs: Array<{ tabId: string; url: string; title: string }> }
   | { kind: 'artifact'; name: string; bytes: number }
+  | { kind: 'aone-config-artifact'; name: AoneArtifactName; bytes: number }
   | { kind: 'auth-check'; onExpectedOrigin: boolean; authenticatedView: boolean };
 export type Session = {
   page: Page; context: BrowserContext; authMode: boolean; artifactRoot: string;
@@ -86,6 +93,13 @@ export function validateUrl(v: unknown): asserts v is string {
 export function validateCommand(v: unknown): asserts v is Command {
   if (!record(v) || !str(v.op)) fault('protocol', 'invalid-command');
   switch (v.op) {
+    case 'aone-config-readonly':
+      if (v.action === 'verify') keys(v, ['op', 'action']);
+      else if (v.action === 'export') {
+        keys(v, ['op', 'action', 'environment']);
+        if (!['daily', 'prepub', 'publish'].includes(v.environment as string)) fault('protocol', 'invalid-command');
+      } else fault('protocol', 'invalid-command');
+      break;
     case 'navigate': keys(v, ['op', 'url']); validateUrl(v.url); break;
     case 'snapshot': keys(v, ['op']); break;
     case 'click': keys(v, ['op', 'locator']); validateLocator(v.locator); break;
@@ -114,6 +128,11 @@ export function validateSafeResult(v: unknown): asserts v is SafeResult {
       if (Buffer.byteLength(v.value) > limit) fault('operation', 'result-too-large'); break;
     }
     case 'auth-check': keys(v, ['kind', 'onExpectedOrigin', 'authenticatedView']); if (typeof v.onExpectedOrigin !== 'boolean' || typeof v.authenticatedView !== 'boolean') fault('protocol', 'invalid-result'); break;
+    case 'aone-config-artifact':
+      keys(v, ['kind', 'name', 'bytes']);
+      if (!['aone-config-daily.env', 'aone-config-prepub.env', 'aone-config-publish.env'].includes(v.name as string)
+        || !Number.isSafeInteger(v.bytes) || (v.bytes as number) < 1 || (v.bytes as number) > AONE_EXPORT_MAX_BYTES) fault('protocol', 'invalid-result');
+      break;
     case 'artifact': keys(v, ['kind', 'name', 'bytes']); if (!str(v.name) || !Number.isSafeInteger(v.bytes) || (v.bytes as number) < 0) fault('protocol', 'invalid-result'); break;
     case 'tabs':
       keys(v, ['kind', 'tabs']); if (!Array.isArray(v.tabs)) fault('protocol', 'invalid-result');

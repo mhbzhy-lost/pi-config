@@ -34,3 +34,25 @@ test('socket哈希包含scope并检查真实字节长度', () => {
 test('异步期限不无限等待', async () => {
   await assert.rejects(bounded(new Promise(() => {}), 10, 'operation', 'operation-timeout'), /operation-timeout/);
 });
+
+test('Aone只接受固定verify/export环境合同，拒绝所有额外输入通道', () => {
+  validateCommand({ op: 'aone-config-readonly', action: 'verify' });
+  for (const environment of ['daily', 'prepub', 'publish']) {
+    validateCommand({ op: 'aone-config-readonly', action: 'export', environment });
+    for (const bytes of [1, 1024 * 1024]) validateSafeResult({ kind: 'aone-config-artifact', name: `aone-config-${environment}.env`, bytes });
+  }
+  const invalid = [
+    { action: 'import' }, { action: 'delete' }, { action: 'apply' }, { action: 'export' },
+    { action: 'verify', environment: 'daily' },
+    ...['all', 'project', 'DAILY', '', null, ['daily']].map(environment => ({ action: 'export', environment })),
+    ...['url', 'selector', 'locator', 'script', 'code', 'path', 'name', 'app', 'origin'].map(field => ({ action: 'export', environment: 'daily', [field]: 'synthetic-secret' })),
+  ];
+  for (const input of invalid) assert.throws(() => validateCommand({ op: 'aone-config-readonly', ...input }), /invalid-command/);
+  for (const name of ['../aone-config-daily.env', 'aone-config-project.env', 'config.env', 'aone-config-daily.env/extra']) {
+    assert.throws(() => validateSafeResult({ kind: 'aone-config-artifact', name, bytes: 10 }), /invalid-result/);
+  }
+  for (const bytes of [0, -1, 0.5, 1024 * 1024 + 1, NaN, Infinity, '10']) {
+    assert.throws(() => validateSafeResult({ kind: 'aone-config-artifact', name: 'aone-config-daily.env', bytes }), /invalid-result/);
+  }
+  assert.throws(() => validateSafeResult({ kind: 'aone-config-artifact', name: 'aone-config-daily.env', bytes: 1, body: 'synthetic-secret' }));
+});

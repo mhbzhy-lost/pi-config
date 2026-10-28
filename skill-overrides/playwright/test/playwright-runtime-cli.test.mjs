@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, realpath, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { invoke } from './helpers/playwright-runtime.mjs';
+import { invoke, options, helperPath } from './helpers/playwright-runtime.mjs';
+import { startRuntime, stopRuntime } from '../src/lifecycle.ts';
 
 test('绝对skill入口跨cwd可用，帮助和参数不启动Chrome', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'pw-cli-')));
@@ -22,4 +23,27 @@ test('默认测试发现不拾取browser gate，文档不教旧工具协议', as
   assert.ok(!/@playwright\/mcp|playwright\.py|tools\/call|browser_run_code_unsafe/.test(skill));
   const auth = await readFile(new URL('../docs/authentication.md', import.meta.url), 'utf8');
   assert.match(auth, /auth-check/);
+});
+
+test('Aone命令JSON沿用v1和原生命周期，CLI拒绝任意字段且不回显', async () => {
+  // 合成CLI使用短临时HOME，避免macOS长TMPDIR触发既有socket长度门禁。
+  const root = await realpath(await mkdtemp('/tmp/pw-'));
+  const sdkRoot = join(root, '.playwright-sdk');
+  const scope = { stateRoot: join(sdkRoot, 'instances'), profileRoot: join(sdkRoot, 'profiles'), artifactRoot: join(sdkRoot, 'artifacts') };
+  const ref = { scope, instance: 'aone-json' };
+  try {
+    await startRuntime(scope, options('aone-json', { authMode: true }), { daemonPath: helperPath });
+    const send = command => invoke(['--instance', 'aone-json', 'command', JSON.stringify(command)], { HOME: root }, root);
+    const verify = await send({ op: 'aone-config-readonly', action: 'verify' });
+    assert.equal(verify.code, 1);
+    // 合成daemon没有frame能力；此错误证明新命令已通过协议和auth门禁进入固定分派。
+    assert.deepEqual(verify.data.error, { stage: 'aone-config-readonly', code: 'management-controls-unverified' });
+    const exp = await send({ op: 'aone-config-readonly', action: 'export', environment: 'daily' });
+    assert.equal(exp.code, 1); assert.deepEqual(exp.data.error, { stage: 'auth', code: 'auth-mode-restricted' });
+    const bad = await send({ op: 'aone-config-readonly', action: 'export', environment: 'daily', script: 'synthetic-secret' });
+    assert.equal(bad.code, 1); assert.equal(bad.data.error.code, 'invalid-command');
+    assert.ok(!JSON.stringify(bad.data).includes('synthetic-secret'));
+    const status = await invoke(['--instance', 'aone-json', 'status'], { HOME: root }, root);
+    assert.equal(status.code, 0);
+  } finally { await stopRuntime(ref); await rm(root, { recursive: true, force: true }); }
 });

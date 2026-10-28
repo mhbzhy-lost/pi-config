@@ -1,3 +1,4 @@
+import { aoneConfigReadonly } from './aone-config-readonly.ts';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -19,10 +20,12 @@ function publicUrl(raw: string): string {
 }
 export async function executeOperation(session: Session, command: Command): Promise<SafeResult> {
   validateCommand(command);
-  if (session.authMode && !['navigate', 'auth-check'].includes(command.op)) fault('auth', 'auth-mode-restricted');
+  if (session.authMode && !['navigate', 'auth-check'].includes(command.op)
+    && !(command.op === 'aone-config-readonly' && command.action === 'verify')) fault('auth', 'auth-mode-restricted');
   let result: SafeResult = { kind: 'status', value: 'ok' };
   const { page } = session;
   switch (command.op) {
+    case 'aone-config-readonly': result = await aoneConfigReadonly(session, command); break;
     case 'navigate': await page.goto(command.url); break;
     case 'snapshot': result = { kind: 'snapshot', value: await page.locator('body').ariaSnapshot(), maxLength: 65536 }; break;
     case 'click': await (await strict(page, command.locator)).click(); break;
