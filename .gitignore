@@ -20,6 +20,7 @@ __pycache__/
 /pi/run-history.jsonl
 /pi/missions/
 /pi/profiles/
+/pi/crashes.json
 
 # Sessions and logs
 /var/
