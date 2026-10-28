@@ -1,0 +1,5 @@
+{
+  "enabled": false,
+  "maxConcurrentTasks": 2,
+  "maxNoProgressTurns": 3
+}

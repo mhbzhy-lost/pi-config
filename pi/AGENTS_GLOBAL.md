@@ -29,6 +29,8 @@ subagent 启动时必须提供完整的信息，不得仅出现「完成 B1-B9 �
 - **Subagent-Driven：**由本会话按计划 DAG 编排当前宿主提供的 subagent。
 - **Inline：**由本会话在当前会话串行执行。
 
+用户已选择 Subagent-Driven，且计划含 `goal-runtime.plan.v1` 契约、Goal feature 已启用并已注册 `plan_execute` 时，使用 `plan_execute` 绑定并推进计划，无需另输 `/goal`；持续以 `plan_checkpoint` 保存决策与来源，通过 `plan_verify` 取得真实检查回执，按失败事实使用 `plan_retry`。`plan_status` 仅只读诊断，不推进执行。启用后执行服务缺失必须明确阻塞，不静默降级；v1 不支持的执行模式必须显式拒绝。Goal 关闭或工具未注册时，保留原执行路径，并如实说明当前没有 Goal 流程保障。此入口不改变首次计划审阅、用户执行方式选择、成果 review 与新增测试的授权规则。
+
 计划一旦开始执行，必须持续推进计划，在所有子任务和验收任务完成之前不得停止，不需要每个子任务完成后都向用户确认。不得出现计划尚未完成、无任何活跃任务 subagent、本会话停止等待用户输入的情况，除非用户明确要求停止，或当前遇到阻塞点无法继续推进需要用户排除阻塞。
 
 DAG 用于描述各子任务之间的依赖关系，当某个子任务的前置依赖全部完成、或无前置依赖，则应立即执行。
@@ -77,7 +79,8 @@ subagent_start({ agent: "reviewer", task: "审阅当前 diff 并报告风险" })
 - 启动：`subagent_start`；准入名册由本会话初始化注入，不需要工具调用；
 - run 操作：`subagent_run_status`、`subagent_run_steer`、`subagent_run_interrupt`、`subagent_run_resume`、`subagent_run_stop`；
 - 受管 workspace：`managed_workspace_list`、`managed_workspace_status`、`managed_workspace_dispose`、`managed_workspace_release`；
-- 主管请求：`supervisor_request_pending`、`supervisor_request_status`、`supervisor_request_reply`。
+- 主管请求：`supervisor_request_pending`、`supervisor_request_status`、`supervisor_request_reply`；
+- Goal 启用时：`plan_execute`、`plan_status`、`plan_checkpoint`、`plan_retry`、`plan_verify`。
 
 旧名一次性映射（仅供识别历史文本与上游通知里的旧示例）：`subagent` 的 `{action:"list"}` 与后来的 `subagent_roster` 均为已退役的历史名册查询，当前使用本会话注入的准入名册；无 `action` 的派发→`subagent_start`，`{action:"status|steer|interrupt|resume|stop"}`→对应 `subagent_run_*`；`subagent_worktree` 的 `{action:"list|status|dispose|release"}`→对应 `managed_workspace_*`；`subagent_supervisor` 的 `{action:"pending|status|reply"}`→对应 `supervisor_request_*`。上游 completion/决策通知仍可能带旧调用示例：那是历史 raw 文本，不构成新工具的 schema，也不表示旧调用还能执行。本仓自有的 spawn/reminder 回执已改用新工具名。
 

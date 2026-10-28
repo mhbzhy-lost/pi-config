@@ -171,6 +171,10 @@ function mergeSettings(existing: JsonObject, declared: JsonObject): JsonObject {
   if (existing.hideThinkingBlock === undefined && declared.hideThinkingBlock !== undefined) {
     result.hideThinkingBlock = declared.hideThinkingBlock;
   }
+  // Goal 能力总开关：settings 未设置时才从模板补默认值，绝不覆盖用户已写入的值。
+  if (existing.goalEngine === undefined && isRecord(declared.goalEngine)) {
+    result.goalEngine = clone(declared.goalEngine);
+  }
   return result;
 }
 
@@ -202,6 +206,7 @@ function missingFields(actual: JsonObject, template: JsonObject): string[] {
     if (actual[field] !== undefined && typeof actual[field] !== "boolean") missing.push(field);
   }
   if (isRecord(template.subagents) && JSON.stringify(mergeObjects(actual.subagents ?? {}, template.subagents)) !== JSON.stringify(actual.subagents ?? {})) missing.push("subagents");
+  if (isRecord(template.goalEngine) && actual.goalEngine === undefined) missing.push("goalEngine");
   const declaredScheduler = Array.isArray(template.packages)
     && template.packages.some((entry) => sourceOf(entry) === TASK_SCHEDULER_SOURCE);
   if (declaredScheduler) {

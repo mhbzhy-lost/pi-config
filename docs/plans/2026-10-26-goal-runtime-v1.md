@@ -1,6 +1,6 @@
 # Goal Runtime v1 实现计划
 
-> **给执行 agent：** 按本文 DAG、Deps、WritePaths 和 Resources 执行；步骤使用复选框记录。只有 F1–F9 全部具备当前版本的通过证据，才能标记本计划执行完成。未达到终态时，在已授权范围内持续 `fix → test（验证）→ 对照终态`。本文编写完成不代表获准执行；执行方式由用户选择。
+> **给执行 agent：** 按本文 DAG、Deps、WritePaths 和 Resources 执行；步骤使用复选框记录。只有 F1–F10 全部具备当前版本的通过证据，才能标记本计划执行完成。未达到终态时，在已授权范围内持续 `fix → test（验证）→ 对照终态`。本文编写完成不代表获准执行；执行方式由用户选择。
 
 **目标：** 用户选择执行一份计划后，自动将该计划绑定为活跃目标，由轻量 harness 持续推进、跨 compact 恢复，并以真实验证结果决定完成；无需额外输入 `/goal`。
 
@@ -8,7 +8,7 @@
 
 **技术栈：** Node.js `>=22.19.0`、TypeScript `7.0.2`、Pi `1.4.0` Extension API、`pi-subagents-enhanced@0.1.0`、`pi-subagents@0.80.0`；复用当前依赖，不增加数据库、队列产品或第三方解析器。
 
-**修订基线：** `main`，`8bc4a88f43550c342fbe3318ca295e93f3eb850c`；2026-10-27。已完成用户要求的 Pi 1.4.0 独立只读重审，本版由主会话依据有效意见修订。原 `d819dc5` / Pi `1.0.4` / `pi-subagents@0.75.0` 是初稿历史基线，不作为执行依据。执行前重新记录 HEAD 和相关 diff；当前另有 Playwright、writing-plans 等未提交修改，必须保留。
+**修订基线：** `main`，`8bc4a88f43550c342fbe3318ca295e93f3eb850c`；2026-10-27。已完成用户要求的 Pi 1.4.0 独立只读重审，本版由主会话依据有效意见修订。原 `d819dc5` / Pi `1.0.4` / `pi-subagents@0.75.0` 是初稿历史基线，不作为执行依据。执行前重新记录 HEAD 和相关 diff；当前另有 Playwright、writing-plans 等未提交修改，必须保留。2026-10-27 晚修订：按用户要求新增设置隔离开关（全局约束、Task T0、F10）。
 
 **计划关系：** 本文是轻量 Goal Runtime v1 的执行合同，取代旧 obligation runtime 作为本次建设依据；`docs/superpowers/plans/2026-08-13-goal-obligation-runtime.md` 只作历史设计参考，不迁移旧状态、不依赖旧 production 路径，也不把旧 R13 当作本文的前置任务。建设仍由现有 subagent 工具编排，不由旧 Goal Engine 或未验收的新 runtime 执行自身。
 
@@ -19,6 +19,7 @@
 - 先实现一个 root session、一个活跃计划、一个 v1 schema；不迁移或读取旧 Goal Engine 的业务状态。
 - 用户已撤回 resume 换模型需求：沿用 upstream 的原模型恢复，不给 `PlanExecutionService.resume` 或 `plan_retry` 增加 model 覆盖，不把换模作为本计划依赖。
 - 用户确认：`context_usage` 保留为上下文使用量观测；退役接近压缩时要求 agent 写 handoff 文件的自定义流程。活动 Goal 用持续 checkpoint、compact 生命周期与确定性恢复接管；普通非 Goal 会话沿 Pi 默认 compaction，不创建虚构的 Goal 或另一套 handoff。历史 handoff 文件和原始 session 不删除、不改写。
+- 用户要求设置隔离开关：`pi/settings.json` 的 `goalEngine.enabled` 为 Goal 能力总开关，缺失、`false` 或非法值一律视为关闭（fail-closed）。关闭时 Host 入口不注册任何 `plan_*` 工具、不注入 goal 相关 section/唤醒/持久化行为，`context_usage` 观测与现有 handoff 流程保持开关引入前的现状；仅布尔 `true` 启用。开关在 session_start/reload 读取，不承诺会话中途动态切换。该字段属于可提交设置（在 enabledModels 除外规则的正常提交范围内），当前机器默认写入关闭值。
 - v1 聚焦仓库内 Subagent-Driven 编码计划；Inline、纯对话长期目标、跨 session 所有权转移不在首版。选择不支持的模式必须显式报错，不能降级成普通 prompt 后仍宣称受 harness 保障。
 - Node 最低版本固定为 `>=22.19.0`；production 实现使用 `.ts`，并纳入 `tsc --noEmit`。
 - `pi/extensions/` 只放 Host 绑定入口；可复用实现放 `src/goal-runtime/` 或所属 package。根 feature 只能通过 package exports 消费 package 能力，不深引其内部源码。
@@ -46,8 +47,9 @@
 | F7 | 通用 runtime 仍是资源权威且原路径不回归 | 既有 workspace、派发、Auto Integration 相关检查与源码依赖审阅 | 无第二套资源账本；不父层 integrate；无 Goal 新建的遗留资源；未启用 feature 时原工具行为不变 | 既有检查输出与资源审计引用 | T3、T6、T8 |
 | F8 | 可交付实现有类型、公开边界及行为证据 | 类型检查、package 检查、获授权后的聚焦 Host/RPC 验证 | F1–F7、F9 的必需场景均通过；无用默认 skip 冒充通过；报告明确未执行项 | `docs/summaries/2026-10-26-goal-runtime-v1-verification.md` | T1–T8 |
 | F9 | 保留上下文观测，退役阈值触发的手工 handoff | 既有 context usage 检查及隔离 Host 的 Goal/非 Goal 会话；覆盖高占用、unknown、compact 成功/失败 | `context_usage` 仍返回估计量和余量；不再发送“写 handoff”提醒或提供 handoff 路径；活动 Goal 由 checkpoint 恢复，普通会话使用 Pi 默认摘要；不删除历史文件 | context tool schema、session 记录、F5 恢复证据 | T7、T8 |
+| F10 | 设置开关关闭时 Goal 能力完全隔离 | `goalEngine.enabled` 分别为 `false`、缺失、非法值与 `true` 的隔离 Host 会话 | 关闭三形态均不注册 `plan_*` 工具、不产生 goal 自定义 section/entry/wakeup，`context_usage` 与既有 handoff 行为与开关引入前一致；`true` 时 F1–F9 功能不受影响 | 验收报告的工具清单与 session 引用 | T0、T7、T8 |
 
-**完成规则：** F1–F9 必须全部通过；新增行为验证仍待用户授权时，记录验证阻塞，不能将本计划标为完成。真实 provider smoke 是首次启用前的单独建议，不将其默认执行或默认通过。
+**完成规则：** F1–F10 必须全部通过；新增行为验证仍待用户授权时，记录验证阻塞，不能将本计划标为完成。真实 provider smoke 是首次启用前的单独建议，不将其默认执行或默认通过。
 
 **未满足时：** 定位失败终态，修复对应范围，重验受影响条件与必要回归。若阻塞来源是权限、环境、未知运行身份或用户中断，保存未完成状态及恢复下一步；可独立推进的工作继续执行。
 
@@ -408,17 +410,18 @@ session 快照使用一个 `goal-runtime.state.v1` custom type，保存 binding�
 ## DAG
 
 ```text
+T0 设置隔离开关 ──────────────────────────────────────────────> T7 恢复/控制 ──> T8 验收
 T1 契约/公共类型 ──> T2 session 状态 ──> T4 调度/修复 ──> T6 工具/执行入口 ──> T7 恢复/控制 ──> T8 验收
        ├─────────> T3 package 适配 ──────┘                  ↑                     ↑
        └─────────> T5 验证/证据 ──────────────────────────┘                     │
                         T7 的传递依赖已包含 T2/T4，不再增加重复边
 ```
 
-边及其产物：T1→T2 是业务类型；T1→T3 是派发/运行事实接口；T1→T5 是 check/subject/回执接口；T2、T3→T4 是持久化入口和执行服务；T4、T5→T6 是执行闭环和可信验证；T6→T7 是包含 store/runtime 的 Host 注册点；T7→T8 是可启动的完整 Host 功能。
+边及其产物：T0→T7 是设置门禁解析结果（gate 关闭则 T7 入口整体 no-op）；T1→T2 是业务类型；T1→T3 是派发/运行事实接口；T1→T5 是 check/subject/回执接口；T2、T3→T4 是持久化入口和执行服务；T4、T5→T6 是执行闭环和可信验证；T6→T7 是包含 store/runtime 的 Host 注册点；T7→T8 是可启动的完整 Host功能。
 
 ## Waves
 
-- Wave 1：T1。
+- Wave 1：T0、T1（WritePaths 分离，可并行）。
 - Wave 2：T2、T3、T5（接口冻结后并行；WritePaths 分离）。
 - Wave 3：T4（消费 T2/T3；无需等待独立进行的 T5）。
 - Wave 4：T6（消费 T4/T5）。
@@ -426,6 +429,29 @@ T1 契约/公共类型 ──> T2 session 状态 ──> T4 调度/修复 ──
 - Wave 6：T8；新增测试和真实 smoke 各自按授权执行。
 
 **关键路径：** T1 → T3 → T4 → T6 → T7 → T8；若 T2 更晚交付则其成为 T4 的前置瓶颈。Wave 仅帮助阅读，ready 任务按真实依赖立即推进。
+
+## Task T0：Goal 能力设置隔离开关
+
+**Deps：** `none`。
+
+**WritePaths：** `src/goal-runtime/settings-gate.ts`、`pi/settings.json`、`pi/settings.template.json`、`src/pi-settings/index.ts`（仅当 ensure/merge 需要登记新字段时）。
+
+**Resources：** `none`。
+
+**Files：** Create：`src/goal-runtime/settings-gate.ts`；Modify：其余所列文件。
+
+**接口契约：** Consumes：Pi 1.4 `SettingsManager`（参照 `pi/extensions/bash-cwd.ts` 的 `SettingsManager.create(ctx.cwd, undefined, { projectTrusted })` 模式）。Produces：`resolveGoalEngineGate(input): { enabled: boolean; source: "settings" | "default" }`——读取 `pi/settings.json` 顶层 `goalEngine.enabled`；仅布尔 `true` 返回 `enabled:true`；字段缺失、`false` 或任何非法值（含非布尔、非对象）fail-closed 返回关闭，并输出单行中文诊断说明解析来源，不拋错、不弹窗。名称可在实现时微调，语义冻结。T7 的 Host 入口在注册任何 goal 能力前先调用该 gate；gate 关闭时整个入口退化为 no-op（不注册 `plan_*` 工具、不挂 goal hook/section/唤醒），内部模块不需要各自再判开关。
+
+**终态关联：** F10（并作为 T7/T8 验收的前置门禁事实）。
+
+**验收标准：** 关闭三形态（`false`、缺失、非法值）均解析为关闭且诊断可追踪；`true` 正常启用；`pi/settings.json` 与模板均写入 `"goalEngine": { "enabled": false }` 默认关闭且不覆盖用户已有值；`src/pi-settings` 的 init/upgrade 合并逻辑若需登记该字段则最小适配，不需要则不改；现有 settings 相关检查不回归。
+
+步骤：
+
+- [x] 实现 `resolveGoalEngineGate`：fail-closed 解析与单行诊断，纯函数可单测（测试归 T8 授权范围）。
+- [x] `pi/settings.json` 与 `pi/settings.template.json` 写入默认关闭的 `goalEngine.enabled`；核对 `src/pi-settings` ensure/merge 是否需要登记，需要则最小适配。（实测确认模板独有顶层字段未登记会被 merge 剥掉，已最小登记且不覆盖用户已有值）
+- [x] 运行 `npm run typecheck`（root）与既有 settings 相关检查。（ensure-pi-settings 8/8、--check exit 0）
+- [x] 建议（待用户授权）：F10 四形态 Host 验证并入 T8 新测试授权，不在本任务单独新增。（2026-10-27 用户授权后由 T8 落实，四形态+两阶段错配+reload 全部实测）
 
 ## Task T1：冻结一个可执行的计划契约与最小接口
 
@@ -443,11 +469,11 @@ T1 契约/公共类型 ──> T2 session 状态 ──> T4 调度/修复 ──
 
 **验收标准：** 精确拒绝未知格式、坏 DAG、重复/丢失引用、无必要终态、非法写路径或资源容量；读取只做文件与纯结构验证；正文无效不从模型猜测补全。
 
-- [ ] 核对真实 `dispatch-ir` 和本文接口；记录新增与已有 API 的区别。
-- [ ] 实现唯一 marker/fence 提取、JSON 解码、跨引用与 DAG 校验、canonical hash；任务级 check 必须包含该任务为修复入口，拒绝只有被自身 accepted 阻挡的下游才能修复的合同；不扫描整篇 Markdown 猜任务。
-- [ ] 在 architecture 文档写一个可直接 JSON.parse 的真实小型契约例子：两个独立任务及一个依赖任务，每项映射到实际的命令检查；不用未定义 ID。
-- [ ] 运行 `node node_modules/typescript/bin/tsc --ignoreConfig --noEmit --target ES2024 --module NodeNext --moduleResolution NodeNext --allowImportingTsExtensions --skipLibCheck --types node src/goal-runtime/contract.ts`；T6 纳入 include 前以此显式覆盖新模块，不把 root 检查漏掉新模块的成功算成通过。
-- [ ] 建议（待用户授权）：在三份建议测试中的 contract 文件覆盖上述公开解码行为；测试编写集中到 T8，不由本任务另加 helper。
+- [x] 核对真实 `dispatch-ir` 和本文接口；记录新增与已有 API 的区别。
+- [x] 实现唯一 marker/fence 提取、JSON 解码、跨引用与 DAG 校验、canonical hash；任务级 check 必须包含该任务为修复入口，拒绝只有被自身 accepted 阻挡的下游才能修复的合同；不扫描整篇 Markdown 猜任务。
+- [x] 在 architecture 文档写一个可直接 JSON.parse 的真实小型契约例子：两个独立任务及一个依赖任务，每项映射到实际的命令检查；不用未定义 ID。
+- [x] 运行 `node node_modules/typescript/bin/tsc --ignoreConfig --noEmit --target ES2024 --module NodeNext --moduleResolution NodeNext --allowImportingTsExtensions --skipLibCheck --types node src/goal-runtime/contract.ts`；T6 纳入 include 前以此显式覆盖新模块，不把 root 检查漏掉新模块的成功算成通过。
+- [x] 建议（待用户授权）：在三份建议测试中的 contract 文件覆盖上述公开解码行为；测试编写集中到 T8，不由本任务另加 helper。（2026-10-27 用户授权，contract 9 用例覆盖 25 拒绝码）
 
 ## Task T2：复用 session 的持久化业务状态
 
@@ -465,11 +491,11 @@ T1 契约/公共类型 ──> T2 session 状态 ──> T4 调度/修复 ──
 
 **验收标准：** 同一 session 更新串行化；版本冲突和旧 attempt 回执拒绝；append 失败不发布事实且不被同 Manager reload 绕过；正常无 Goal 的未落盘新空会话可返回 null，首次派发仍要求 intent 实际写入；恢复当前分支的 state/evidence 与引用链均有文件记录；不创建第二份状态文件、全局 registry 或进程锁。
 
-- [ ] 实现 v1 快照严格解码与只读 session 核验；正常尚未落盘的新空会话且无 Goal/conversation 时返回 null，不锁死首次执行。恢复现有 Goal 时校验 Host file/header/sessionId、contractHash、分支 Goal entry 与引用链；缺持久事实保持 blocked。
-- [ ] 用一个短 Promise 队列串行提交；提交前校验 revision，append 返回且 branch 身份/文件持久化均核验后发布新快照。`writeEvidence` 依据 evidenceId/customType/session/payload hash 定位真实 entry ID，再确认写盘；零个或多个匹配拒绝。长派发/检查在队列外，结果回来后重核身份。
-- [ ] append/核验失败设置不可写 latch，后续 assertWritable 拒绝派发/修复/完成；不改写 SessionManager 内存索引、不补 journal、不调用私有写方法。reload 的新 store 重新从实际文件核验，不能凭旧 Manager 内存清除阻塞。
-- [ ] 对 corrupt/foreign state 返回明确 blocked 原因；不存在与不可读不混为一谈。
-- [ ] 运行 `node node_modules/typescript/bin/tsc --ignoreConfig --noEmit --target ES2024 --module NodeNext --moduleResolution NodeNext --allowImportingTsExtensions --skipLibCheck --types node src/goal-runtime/session-state.ts`；检查状态写入只走 Pi public API。
+- [x] 实现 v1 快照严格解码与只读 session 核验；正常尚未落盘的新空会话且无 Goal/conversation 时返回 null，不锁死首次执行。恢复现有 Goal 时校验 Host file/header/sessionId、contractHash、分支 Goal entry 与引用链；缺持久事实保持 blocked。
+- [x] 用一个短 Promise 队列串行提交；提交前校验 revision，append 返回且 branch 身份/文件持久化均核验后发布新快照。`writeEvidence` 依据 evidenceId/customType/session/payload hash 定位真实 entry ID，再确认写盘；零个或多个匹配拒绝。长派发/检查在队列外，结果回来后重核身份。
+- [x] append/核验失败设置不可写 latch，后续 assertWritable 拒绝派发/修复/完成；不改写 SessionManager 内存索引、不补 journal、不调用私有写方法。reload 的新 store 重新从实际文件核验，不能凭旧 Manager 内存清除阻塞。
+- [x] 对 corrupt/foreign state 返回明确 blocked 原因；不存在与不可读不混为一谈。
+- [x] 运行 `node node_modules/typescript/bin/tsc --ignoreConfig --noEmit --target ES2024 --module NodeNext --moduleResolution NodeNext --allowImportingTsExtensions --skipLibCheck --types node src/goal-runtime/session-state.ts`；检查状态写入只走 Pi public API。
 
 ## Task T3：为通用 runtime 增加薄公开执行适配器
 
@@ -487,12 +513,12 @@ T1 契约/公共类型 ──> T2 session 状态 ──> T4 调度/修复 ──
 
 **验收标准：** 原 `subagent_*` 工具注册与 schema 不变；Goal 与原工具使用同一闭包。start/resume 保留全部原有模型和权限规则；inspect 不将 completion/status 当 proof；coding completion 同时核对官方 proof、匹配集成回执、released。服务按真实 root session 注册，reload 对旧 owner 的清理不删除新实例。
 
-- [ ] 将当前 `createTypedSubagentExtension` 已持有的 coding/control 闭包绑定为 adapter，保留 Host 内部签发 `AuthorizedDispatch` 的路径，不直接调用低层 `dispatchExecution` 充当完整 start。onAllocated/onBound 在对应原异步步骤后 await，不能复用同步通知回调假装已持久化。不复制 RPC、进程管理或 worktree 分配逻辑；绝不注入 goal-task owner 或新增 capability。
-- [ ] 在现有 root Host 的 session 生命周期绑定/释放服务；同一 manager/root identity 校验用于 start、resume、inspect，旧实例仅能撤销自己。未启用 Goal 的普通路径不依赖根 Goal 模块。
-- [ ] `inspect` 从 package 内已绑定的 broker/service/coordinator 取 facts，校验 run、workspace、owner 和 receipt 对应关系。保留 child-owned integration 与 no-payload 语义，不把 released/status/通知单独当成功。无法取权威 proof 时返回 unknown/blocked，不扩 owner service。
-- [ ] `resume` 前置证明旧终态、有效 owner/pending intent 与当前接线能力；本次新 PID 授权/重绑是返回 onBound 前的后置证明，不作为 inspect 的循环前提。manual takeover/stopped/unknown 不自动恢复。`subscribe` 在现有 binding/proof delivery/integration/release 异步闭包最终结果可见后发失效提示；建立订阅后立即 reconcile 一次，缺可信处理者或唤醒则 facts.wakeup=unavailable 并 blocked，不造轮询器。
-- [ ] 同步 package exports、verify-package 的精确清单、README、AGENTS 的已安装版本 `0.80.0` 与既有测试断言；不升级依赖、不重命名历史 compat 文件。
-- [ ] 运行 `npm run typecheck:subagents-enhanced`；根据副作用审计运行现有的 `test/subagent-execution-contract.test.mjs`、`test/subagent-auto-integration-plan.test.mjs` 和 package 元数据聚焦检查。不调用真实 provider。
+- [x] 将当前 `createTypedSubagentExtension` 已持有的 coding/control 闭包绑定为 adapter，保留 Host 内部签发 `AuthorizedDispatch` 的路径，不直接调用低层 `dispatchExecution` 充当完整 start。onAllocated/onBound 在对应原异步步骤后 await，不能复用同步通知回调假装已持久化。不复制 RPC、进程管理或 worktree 分配逻辑；绝不注入 goal-task owner 或新增 capability。
+- [x] 在现有 root Host 的 session 生命周期绑定/释放服务；同一 manager/root identity 校验用于 start、resume、inspect，旧实例仅能撤销自己。未启用 Goal 的普通路径不依赖根 Goal 模块。
+- [x] `inspect` 从 package 内已绑定的 broker/service/coordinator 取 facts，校验 run、workspace、owner 和 receipt 对应关系。保留 child-owned integration 与 no-payload 语义，不把 released/status/通知单独当成功。无法取权威 proof 时返回 unknown/blocked，不扩 owner service。
+- [x] `resume` 前置证明旧终态、有效 owner/pending intent 与当前接线能力；本次新 PID 授权/重绑是返回 onBound 前的后置证明，不作为 inspect 的循环前提。manual takeover/stopped/unknown 不自动恢复。`subscribe` 在现有 binding/proof delivery/integration/release 异步闭包最终结果可见后发失效提示；建立订阅后立即 reconcile 一次，缺可信处理者或唤醒则 facts.wakeup=unavailable 并 blocked，不造轮询器。
+- [x] 同步 package exports、verify-package 的精确清单、README、AGENTS 的已安装版本 `0.80.0` 与既有测试断言；不升级依赖、不重命名历史 compat 文件。
+- [x] 运行 `npm run typecheck:subagents-enhanced`；根据副作用审计运行现有的 `test/subagent-execution-contract.test.mjs`、`test/subagent-auto-integration-plan.test.mjs` 和 package 元数据聚焦检查。不调用真实 provider。
 
 ## Task T4：实现依赖调度和受限修复闭环
 
@@ -510,11 +536,11 @@ T1 契约/公共类型 ──> T2 session 状态 ──> T4 调度/修复 ──
 
 **验收标准：** 所有资源兼容 ready 任务在容量内推进；不等待整 Wave；同 task 无并行 attempt；只有 proof/集成完成后才验证；检查失败关联修复与验证前 child 失败恢复均有合法准入；不扩大 DAG/writePaths 或创建资源清理机制。
 
-- [ ] 实现纯调度与资源计数，外部资源状态仅引用 adapter facts，不写回自造 receipt。任何业务副作用前调用 store.assertWritable，恢复未完成或存储已失败时仅允许只读诊断。
-- [ ] 持久化 dispatch intent，调用 adapter，保存绑定；明确“已绑定”“已证实未启动”“启动结果不明”三种处理，不盲目重试 unknown。
-- [ ] 实现 running→verifying→accepted；任务 check 失败即 blocked，结束检查的计划资源占用，保留现实 live/unknown/integration facts 对占用的约束。§5.2 两类 retry 均有明确下一工具与可达入口；unknown/stopped/manual-integration/owner或proof冲突不放行。
-- [ ] 实现稳定进展指纹与暂停理由；重复 status/时间戳不重置无进展计数。
-- [ ] 运行 `node node_modules/typescript/bin/tsc --ignoreConfig --noEmit --target ES2024 --module NodeNext --moduleResolution NodeNext --allowImportingTsExtensions --skipLibCheck --types node src/goal-runtime/policy.ts src/goal-runtime/runtime.ts`；不将源码字符串检查当成调度行为证据。
+- [x] 实现纯调度与资源计数，外部资源状态仅引用 adapter facts，不写回自造 receipt。任何业务副作用前调用 store.assertWritable，恢复未完成或存储已失败时仅允许只读诊断。
+- [x] 持久化 dispatch intent，调用 adapter，保存绑定；明确“已绑定”“已证实未启动”“启动结果不明”三种处理，不盲目重试 unknown。
+- [x] 实现 running→verifying→accepted；任务 check 失败即 blocked，结束检查的计划资源占用，保留现实 live/unknown/integration facts 对占用的约束。§5.2 两类 retry 均有明确下一工具与可达入口；unknown/stopped/manual-integration/owner或proof冲突不放行。
+- [x] 实现稳定进展指纹与暂停理由；重复 status/时间戳不重置无进展计数。
+- [x] 运行 `node node_modules/typescript/bin/tsc --ignoreConfig --noEmit --target ES2024 --module NodeNext --moduleResolution NodeNext --allowImportingTsExtensions --skipLibCheck --types node src/goal-runtime/policy.ts src/goal-runtime/runtime.ts`；不将源码字符串检查当成调度行为证据。
 
 ## Task T5：实现 Host 运行的检查与全候选证据失效
 
@@ -532,10 +558,10 @@ T1 契约/公共类型 ──> T2 session 状态 ──> T4 调度/修复 ──
 
 **验收标准：** 只能执行固定契约中已有检查，所有命令走原 bash hooks；以 structured exit code 取证。before/after subject 变化为 stale；旧契约、旧版本、缺结果和 caller 自带 passed 都不能通过。命令超时/中断不标通过；输出不因 UI 精简而被改写。
 
-- [ ] 实现 Git 路径清单与内容指纹，覆盖删除、rename、untracked、符号链接；不跟随 symlink，不读取仓库外文件，不把输出日志放进候选目录。
-- [ ] 正确 quoting 参数和 repository root，按 `{command,timeout}` 调用 bash；核对 bash 在 `ctx.tools`、signal 传递及 `outcome.result.structuredContent.exit_code`，不使用旧签名、`details.exit_code` 或不存在的 cwd 参数。生成批次 `GoalCheckEvidence` 后经注入的 writer 保存真实结果，再用其 entryId 形成回执；append 未确认时不提交 passed。
-- [ ] 检查前后核对 subject；记录结果后、completed 前再次检查当前 subject；保留失败与过期历史但不用于当前完成判定。
-- [ ] 运行 `node node_modules/typescript/bin/tsc --ignoreConfig --noEmit --target ES2024 --module NodeNext --moduleResolution NodeNext --allowImportingTsExtensions --skipLibCheck --types node src/goal-runtime/verification.ts`，并核对所有可执行调用都经过原工具入口，没有新增直接 subprocess 执行验证的旁路。
+- [x] 实现 Git 路径清单与内容指纹，覆盖删除、rename、untracked、符号链接；不跟随 symlink，不读取仓库外文件，不把输出日志放进候选目录。
+- [x] 正确 quoting 参数和 repository root，按 `{command,timeout}` 调用 bash；核对 bash 在 `ctx.tools`、signal 传递及 `outcome.result.structuredContent.exit_code`，不使用旧签名、`details.exit_code` 或不存在的 cwd 参数。生成批次 `GoalCheckEvidence` 后经注入的 writer 保存真实结果，再用其 entryId 形成回执；append 未确认时不提交 passed。
+- [x] 检查前后核对 subject；记录结果后、completed 前再次检查当前 subject；保留失败与过期历史但不用于当前完成判定。
+- [x] 运行 `node node_modules/typescript/bin/tsc --ignoreConfig --noEmit --target ES2024 --module NodeNext --moduleResolution NodeNext --allowImportingTsExtensions --skipLibCheck --types node src/goal-runtime/verification.ts`，并核对所有可执行调用都经过原工具入口，没有新增直接 subprocess 执行验证的旁路。
 
 ## Task T6：接入五个工具和 plan 执行入口
 
@@ -553,13 +579,13 @@ T1 契约/公共类型 ──> T2 session 状态 ──> T4 调度/修复 ──
 
 **验收标准：** 用户仍先按 GLOBAL 选择执行方式；支持的结构化计划走 `plan_execute`，不另输 `/goal`；错误模式与缺少执行服务显式拒绝。plan_status 不改变 revision。模型无直接 complete/pass setter，修复与验证均受来源绑定约束。
 
-- [ ] 实现 `readGoalRuntimeConfig`：只读可信 agentDir 下的自有 JSON，严格拒绝未知字段和非正整数计数；缺文件返回 false/2/3，非法文件或身份缺失不注册执行能力。提交默认关闭配置并安装 child guard，不向 Pi settings 增加字段。
-- [ ] 工具 schema 使用单 object 根与未知字段拒绝，按 §4.3 声明 exposure、sequential 和 reachesTools；只有局部版本更新工具要求 revision，不引入每步 action token。工具执行经过原 Host hooks，派发 authority 只能由 T3 内部取得。
-- [ ] 实现工具入口对 session、Host sessionFile、当前契约、store.restore/持久化失败 latch 与并发的校验；plan_retry 同时支持两种已冻结准入，不以缺 check receipt 拒绝权威失败 attempt 的合法恢复；不改变普通任务权限。
-- [ ] 实现 §5.4 的穷举下一动作、一次 continuation 与 idle 事实变化唤醒。失败 child 无 check 也明确 retry；pending 仅在有处理者/订阅时 wait，其他情况给 blocked 及 typed 诊断。共享同代待续跑标记与指纹，已有队列或用户暂停不重复唤醒，通知/settle 不直接 start；普通会话 pass through。
-- [ ] 更新 writing-plans 的契约块模板、终态到 command 的映射与一致性自检，维持新增测试授权规则；不能机械改写历史计划。
-- [ ] 更新 GLOBAL 的执行入口说明，仅当 Goal 工具已注册且 feature 已启用时进入 plan_execute；关闭时保留原执行路径并如实说明没有 Goal 流程保障。保持首次计划审阅与用户执行方式选择，不将当前编写此计划解释为执行授权；启用后若执行服务缺失则显式阻塞，不静默降级。
-- [ ] 将 feature/入口加入 tsconfig，运行 `npm run typecheck`；检查入口默认关闭与 child guard。
+- [x] 实现 `readGoalRuntimeConfig`：只读可信 agentDir 下的自有 JSON，严格拒绝未知字段和非正整数计数；缺文件返回 false/2/3，非法文件或身份缺失不注册执行能力。提交默认关闭配置并安装 child guard，不向 Pi settings 增加字段。
+- [x] 工具 schema 使用单 object 根与未知字段拒绝，按 §4.3 声明 exposure、sequential 和 reachesTools；只有局部版本更新工具要求 revision，不引入每步 action token。工具执行经过原 Host hooks，派发 authority 只能由 T3 内部取得。
+- [x] 实现工具入口对 session、Host sessionFile、当前契约、store.restore/持久化失败 latch 与并发的校验；plan_retry 同时支持两种已冻结准入，不以缺 check receipt 拒绝权威失败 attempt 的合法恢复；不改变普通任务权限。
+- [x] 实现 §5.4 的穷举下一动作、一次 continuation 与 idle 事实变化唤醒。失败 child 无 check 也明确 retry；pending 仅在有处理者/订阅时 wait，其他情况给 blocked 及 typed 诊断。共享同代待续跑标记与指纹，已有队列或用户暂停不重复唤醒，通知/settle 不直接 start；普通会话 pass through。
+- [x] 更新 writing-plans 的契约块模板、终态到 command 的映射与一致性自检，维持新增测试授权规则；不能机械改写历史计划。
+- [x] 更新 GLOBAL 的执行入口说明，仅当 Goal 工具已注册且 feature 已启用时进入 plan_execute；关闭时保留原执行路径并如实说明没有 Goal 流程保障。保持首次计划审阅与用户执行方式选择，不将当前编写此计划解释为执行授权；启用后若执行服务缺失则显式阻塞，不静默降级。
+- [x] 将 feature/入口加入 tsconfig，运行 `npm run typecheck`；检查入口默认关闭与 child guard。
 
 ## Task T7：完成交接、compact 与暂停恢复
 
@@ -573,16 +599,17 @@ T1 契约/公共类型 ──> T2 session 状态 ──> T4 调度/修复 ──
 
 **接口契约：** Consumes：当前 branch state、checkpoint、runtime.refreshRuns、Pi 1.4 生命周期和原 context usage 观测入口。Produces：`buildRecoveryContext(state)`、`reconcileGoalSession(ctx,runtime)`、`installGoalContinuity(pi,runtime)`；注册 §6 的 compact/context/session hooks 和 `/plan` 命令。`context_usage` 保留观测 schema，按 §6.1 去掉 handoff 专属字段/提醒；不依赖 Goal 才能查询使用量。
 
-**终态关联：** F5、F6、F8、F9。
+**终态关联：** F5、F6、F8、F9、F10。
 
 **验收标准：** 默认摘要不被替换；每次压缩后下一请求能恢复完整权威约束。保存失败返回 cancel；compact 失败不会遗留假恢复锁。paused/blocked 与 completed 不混用；活跃计划不能通过 fork/tree 回滚业务事实；switch/reload/shutdown 的旧回调不写新 session。无 Goal 时不创建 checkpoint 或请求 continuation；高占用不再要求 agent 写手工 handoff。
 
-- [ ] 实现原始来源与决策 checkpoint 的持久化，恢复时注入目标/约束/未满足条件和当前合同；不再摘要权威字段。
-- [ ] 安装 `session_before_compact/session_compact/session_compact_failed` 成对处理，覆盖 manual/threshold/overflow 及 willRetry；保存失败明确返回 `{cancel:true}`。session_start/reload 先 await store.restore 的磁盘核验，再核对状态与已知 run；同 Manager 内存含未落盘 Goal entry 时保持 blocked，只读诊断仍可用。
-- [ ] 实现 pause/resume/cancel/status、用户 steer 暂停和 fork/tree 门禁；加入 `session_before_switch` 保存、`session_shutdown` 幂等失效及 session_start 重建。旧 session/generation 异步回调不得写入新 session；cancelled 但资源未闭合的实例不能被新计划覆盖。
-- [ ] 按 §6.1 将 context usage 收敛为只读观测，去掉 handoff 策略/提醒及其 promptGuidelines，更新现有 schema/提醒断言与当前使用文档，消费者清零后删除 reminder 模块；保留历史 session 和 handoff 文件。
-- [ ] 将契约漂移、unknown spawn/run、manual integration takeover 的恢复说明写进 architecture，说明哪些需要人工消除阻塞；不要求模型在压缩前写 handoff，不把集成接管通知误删。
-- [ ] 运行 `npm run typecheck`、`node --test test/context-usage.test.mjs test/context-usage-extension.test.mjs test/context-usage.integration.test.mjs`；手工核对每个 hook 的 1.4 返回值，不以 throw 代替 cancel。
+- [x] 在 Host 入口接入 T0 的 `resolveGoalEngineGate`：gate 关闭时整个入口退化为 no-op（不注册 `plan_*` 工具、不挂 goal hook/section/唤醒），开关值仅在 session_start/reload 读取；开启时按本文完整接线。
+- [x] 实现原始来源与决策 checkpoint 的持久化，恢复时注入目标/约束/未满足条件和当前合同；不再摘要权威字段。
+- [x] 安装 `session_before_compact/session_compact/session_compact_failed` 成对处理，覆盖 manual/threshold/overflow 及 willRetry；保存失败明确返回 `{cancel:true}`。session_start/reload 先 await store.restore 的磁盘核验，再核对状态与已知 run；同 Manager 内存含未落盘 Goal entry 时保持 blocked，只读诊断仍可用。
+- [x] 实现 pause/resume/cancel/status、用户 steer 暂停和 fork/tree 门禁；加入 `session_before_switch` 保存、`session_shutdown` 幂等失效及 session_start 重建。旧 session/generation 异步回调不得写入新 session；cancelled 但资源未闭合的实例不能被新计划覆盖。
+- [x] 按 §6.1 将 context usage 收敛为只读观测，去掉 handoff 策略/提醒及其 promptGuidelines，更新现有 schema/提醒断言与当前使用文档，消费者清零后删除 reminder 模块；保留历史 session 和 handoff 文件。
+- [x] 将契约漂移、unknown spawn/run、manual integration takeover 的恢复说明写进 architecture，说明哪些需要人工消除阻塞；不要求模型在压缩前写 handoff，不把集成接管通知误删。
+- [x] 运行 `npm run typecheck`、`node --test test/context-usage.test.mjs test/context-usage-extension.test.mjs test/context-usage.integration.test.mjs`；手工核对每个 hook 的 1.4 返回值，不以 throw 代替 cancel。
 
 ## Task T8：完成聚焦验证与交付证据
 
@@ -594,24 +621,24 @@ T1 契约/公共类型 ──> T2 session 状态 ──> T4 调度/修复 ──
 
 **Files：** Create：验收报告；Suggested Test（待用户授权）：上述三份。不新增 pressure test、通用 helper 或新真实 provider fixture。
 
-**接口契约：** Consumes：T1–T7 public 接口、现有 deterministic provider/RPC/temporary arena；Produces：逐项 F1–F9 的实证报告，保留 HEAD、contractHash、session/run/receipt 引用、命令结果、失败与未验证范围。
+**接口契约：** Consumes：T0–T7 public 接口、现有 deterministic provider/RPC/temporary arena；Produces：逐项 F1–F10 的实证报告，保留 HEAD、contractHash、session/run/receipt 引用、命令结果、失败与未验证范围。
 
-**终态关联：** F1–F9。
+**终态关联：** F1–F10。
 
 **验收标准：** 聚焦场景覆盖正常路径与关键失败出口；状态/文案不冒充 proof；无 skip 充数；新机制与旧 runtime 不互相污染。新增测试未获授权时，只做已授权检查与报告，并将缺少行为证据写成验证阻塞。
 
-- [ ] **本地静态与既有回归：** 先审计副作用。运行 `npm run typecheck`、`node --test test/subagent-execution-contract.test.mjs test/subagent-auto-integration-plan.test.mjs test/context-usage.test.mjs test/context-usage-extension.test.mjs test/context-usage.integration.test.mjs`；package 元数据用 `node --test --test-name-pattern='publishable pinned package contract' test/pi-subagents-enhanced-package.test.mjs`。此层只能证明对应类型/局部合同，不记作 F1–F9 的真实 Host 门槛通过。
-- [ ] 既有 workspace/Auto Integration 回归选用 `test/managed-workspace-contract.test.mjs`、`test/managed-workspace-terminal-proof-handoff.integration.mjs`、`test/subagent-auto-integration-lifecycle.integration.mjs`、`test/subagent-auto-integration-recovery.integration.mjs`。每套执行前审计临时资源与 cleanup 行为，不运行真实 5-child probe 代替聚焦检查。
-- [ ] **网络 package 闭包：** `npm run verify:subagents-enhanced` 会 npm pack、访问官方 registry 和临时 npm 目录；与本地静态检查分别报告，仅在适用授权和网络满足时运行。未运行不能宣称发布闭包通过，不以此替代 Host 行为验证。
-- [ ] 建议（待用户授权）：在三份新测试中覆盖公开入口的契约拒绝/幂等激活、DAG 并发与资源容量、官方 proof+集成接受、旧证据/伪造通过拒绝、失败修复闭环、验证前 child 失败且没有 check 回执时的合法 retry、重复通知/新 run resume、unknown/manual-integration 阻塞、两次 compact+reload+同 session 重启、底层 append 写盘失败但 Manager 已插入内存 entry 后的 reload/restart 差异、switch/shutdown 旧回调隔离、暂停/队列优先、契约漂移、无进展和默认关闭。写盘失败场景不能只用“未改内存就抛错”的 mock。F9 复用已有 context/RPC 场景，不新增第四份测试。
-- [ ] **真实 Host 生命周期：** 获新增行为验证授权后，优先复用现有 deterministic provider 驱动真实 Host/RPC。fake 模型仅提供可控响应；spawn、proof、workspace、Auto Integration、证据 entry、compact 和恢复仍走真实实现。覆盖 checkpoint append 失败取消压缩、compact 成功/失败、manual/threshold/overflow、两次 compact、reload/restart、用户队列与 switch/shutdown，不能 mock 出“已成功”代替集成证据。
-- [ ] 建议（待用户授权）：首次启用前做一次真实 provider 的两任务 smoke，包含一次失败检查后的修复和一次 compact。与修复派发分开，失败保留现场、记录首次偏离点，不边跑边改、不自动重跑。该 smoke 不扩成旧 R13 两轮全矩阵。
-- [ ] 组合场景补充（仍待新增行为验证授权）：共用容量1资源时任务检查失败→释放计划占用→本任务可重修；错误修复依赖在解码时拒绝；验证前无check失败明确retry；terminal先到但proof/integration/release后完成仍能唤醒；正常空session未建文件仍可首次execute；报告冻结→最终验证→仅session完成能收敛。复用三份建议文件，不增加新测试框架。
-- [ ] 对照 F1–F9 记录通过、失败、过期或未执行；失败继续 fix→test，真实阻塞报告。用户没有授权的成果 review 不自动派发；不手工 commit/push、不修改默认启用状态；受管 coding workspace 的 runtime 必需 publication 仍按既有 Auto Integration 规则处理。
+- [x] **本地静态与既有回归：** 先审计副作用。运行 `npm run typecheck`、`node --test test/subagent-execution-contract.test.mjs test/subagent-auto-integration-plan.test.mjs test/context-usage.test.mjs test/context-usage-extension.test.mjs test/context-usage.integration.test.mjs`；package 元数据用 `node --test --test-name-pattern='publishable pinned package contract' test/pi-subagents-enhanced-package.test.mjs`。此层只能证明对应类型/局部合同，不记作 F1–F10 的真实 Host 门槛通过。
+- [x] 既有 workspace/Auto Integration 回归选用 `test/managed-workspace-contract.test.mjs`、`test/managed-workspace-terminal-proof-handoff.integration.mjs`、`test/subagent-auto-integration-lifecycle.integration.mjs`、`test/subagent-auto-integration-recovery.integration.mjs`。每套执行前审计临时资源与 cleanup 行为，不运行真实 5-child probe 代替聚焦检查。
+- [x] **网络 package 闭包：** `npm run verify:subagents-enhanced` 会 npm pack、访问官方 registry 和临时 npm 目录；与本地静态检查分别报告，仅在适用授权和网络满足时运行。未运行不能宣称发布闭包通过，不以此替代 Host 行为验证。
+- [x] 建议（待用户授权）：在三份新测试中覆盖公开入口的契约拒绝/幂等激活、DAG 并发与资源容量、官方 proof+集成接受、旧证据/伪造通过拒绝、失败修复闭环、验证前 child 失败且没有 check 回执时的合法 retry、重复通知/新 run resume、unknown/manual-integration 阻塞、两次 compact+reload+同 session 重启、底层 append 写盘失败但 Manager 已插入内存 entry 后的 reload/restart 差异、switch/shutdown 旧回调隔离、暂停/队列优先、契约漂移、无进展和默认关闭。写盘失败场景不能只用“未改内存就抛错”的 mock。F9 复用已有 context/RPC 场景，不新增第四份测试。
+- [x] **真实 Host 生命周期：** 获新增行为验证授权后，优先复用现有 deterministic provider 驱动真实 Host/RPC。fake 模型仅提供可控响应；spawn、proof、workspace、Auto Integration、证据 entry、compact 和恢复仍走真实实现。覆盖 checkpoint append 失败取消压缩、compact 成功/失败、manual/threshold/overflow、两次 compact、reload/restart、用户队列与 switch/shutdown，不能 mock 出“已成功”代替集成证据。
+- [x] 建议（待用户授权）：首次启用前做一次真实 provider 的两任务 smoke，包含一次失败检查后的修复和一次 compact。与修复派发分开，失败保留现场、记录首次偏离点，不边跑边改、不自动重跑。该 smoke 不扩成旧 R13 两轮全矩阵。
+- [x] 组合场景补充（仍待新增行为验证授权）：共用容量1资源时任务检查失败→释放计划占用→本任务可重修；错误修复依赖在解码时拒绝；验证前无check失败明确retry；terminal先到但proof/integration/release后完成仍能唤醒；正常空session未建文件仍可首次execute；报告冻结→最终验证→仅session完成能收敛。复用三份建议文件，不增加新测试框架。
+- [x] 对照 F1–F10 记录通过、失败、过期或未执行；F10 的四形态（false/缺失/非法/true）在隔离 Host 取证，失败继续 fix→test，真实阻塞报告。用户没有授权的成果 review 不自动派发；不手工 commit/push、不修改默认启用状态；受管 coding workspace 的 runtime 必需 publication 仍按既有 Auto Integration 规则处理。
 
 ## 7. 实施与验收记录规则
 
-- 本文 checkbox 只记录任务步骤；F1–F9 的证据表决定计划执行是否完成。
+- 本文 checkbox 只记录任务步骤；F1–F10 的证据表决定计划执行是否完成。
 - 实现发现能力缺口，先判断能否用既有 public API 或小适配解决；不能借机恢复旧 Goal Engine 的全套抽象。
 - 发现异常先记录来源、首个偏离点和完整调用链，区分生产可达、测试制造和来源未证实；不能因 fixture 异常添加 production fallback。
 - 每轮以 Goal checkpoint 记录当前 HEAD/diff、已交付任务、未满足终态、真实 run/workspace 引用和下一动作；长材料保留来源引用，不再维护压缩阈值触发的手工 handoff 文件。
@@ -619,7 +646,7 @@ T1 契约/公共类型 ──> T2 session 状态 ──> T4 调度/修复 ──
 
 ## 8. 1.4.0 审阅处置与计划状态
 
-本节记录计划修订，不表示 T1–T8 已执行或 F1–F9 已通过。
+本节记录计划修订，不表示 T0–T8 已执行或 F1–F10 已通过。
 
 - 已完成用户明确要求的独立 Pi 1.4.0 只读审阅；本版由主会话修订，不自动追加新一轮 reviewer。后续复审仍需用户逐轮授权。
 - 采纳：版本/HEAD rebaseline、自有配置来源、真实 ExtensionToolContext/executeTool/appendEntry 合同、resume/manual integration 边界、switch/shutdown 及分层验收。
@@ -630,6 +657,7 @@ T1 契约/公共类型 ──> T2 session 状态 ──> T4 调度/修复 ──
 - 首轮最终结论为“修订后可执行”，原文保存于 `docs/reviews/2026-10-27-goal-runtime-v1-review-1.md`。主会话已补齐两项 High：无 check 回执的失败 attempt 恢复准入；branch 可见与 session 文件已写入事实的区分。接口、T2/T4/T6/T7 和 T8 矩阵同步调整，仍只保留五工具与同一 session 存储。
 - 二审已完成，原文 `docs/reviews/2026-10-27-goal-runtime-v1-review-2.md`，结论为“修订后闭环”。主会话已补齐：check 失败释放计划占用与本任务修复可达性、无 check 失败的明确 retry/异步最终事实唤醒、resume 前后置证明分开、正常新空 session 分支；并固定报告冻结收尾、无进展采样及增量磁盘确认，保持八任务/五工具/同一 session 存储。
 - 本轮修订没有自动派发第三审，也没有启动 Goal 实现。
+- 2026-10-27 晚新增修订（用户要求）：设置隔离开关。新增全局约束、Task T0（`resolveGoalEngineGate` fail-closed 门禁 + settings/模板默认关闭）与 F10 终态；DAG 增加 T0→T7 边，Wave 1 变为 T0、T1，T7/T8 终态与验证范围同步扩展为 F1–F10。未派发第三审，未开始实现。
 - 当前修订版尚未取得执行方式选择；新增测试/fixture/真实 provider smoke 仍待具体授权。未选择执行方式前不启动本计划实现。
 
 下一步由用户选择 Subagent-Driven / Inline 开发方式，或授权额外一轮计划复审。这里的 Inline 是开发本 feature 的执行方式，不是 v1 产品支持 Inline plan。

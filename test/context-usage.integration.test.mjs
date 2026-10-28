@@ -25,5 +25,5 @@ test("context usage extension 使用无参数 schema 且不依赖宿主脚本", 
     properties: {},
     additionalProperties: false,
   });
-  assert.ok(listeners.some(({ name }) => name === "agent_end"));
+  assert.deepEqual(listeners, []);
 });

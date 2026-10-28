@@ -35,5 +35,8 @@
     "-builtin:llama.cpp",
     "-builtin:codemode",
     "-builtin:mcp"
-  ]
+  ],
+  "goalEngine": {
+    "enabled": false
+  }
 }

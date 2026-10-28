@@ -17,6 +17,8 @@
   "include": [
     "src/agents-shared/**/*.ts",
     "src/agents-global/**/*.ts",
+    "src/goal-runtime/**/*.ts",
+    "pi/extensions/goal-runtime.ts",
     "src/apply-patch/**/*.ts",
     "src/bash-cwd/**/*.ts",
     "src/bash-async/**/*.ts",

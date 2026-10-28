@@ -2,10 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import contextUsageExtension from "../pi/extensions/context-usage.ts";
 import { ContextUsageOutputSchema } from "../src/context-usage/snapshot.ts";
-import {
-  createHandoffReminderState,
-  getHandoffReminder,
-} from "../src/context-usage/reminder.ts";
 
 function fakePi() {
   const registered = [];
@@ -27,47 +23,27 @@ function fakePi() {
   };
 }
 
-test("达到 handoff 阈值时只生成一次提醒", () => {
-  let state = createHandoffReminderState();
-  const snapshot = {
-    status: "prepare-handoff",
-    tokens: 102400,
-    contextWindow: 128000,
-    percent: 80,
-    remainingTokens: 25600,
-    remainingRatio: 0.2,
-    tokensBeforeHandoff: 0,
-    tokensBeforeUrgentHandoff: 12800,
-    estimated: true,
-    shouldPrepareHandoff: true,
-    shouldUrgentlyPrepareHandoff: false,
-    handoffPath: ".pi/handoff/context-handoff.md",
-  };
-
-  const first = getHandoffReminder(snapshot, state);
-  state = first.state;
-  const second = getHandoffReminder(snapshot, state);
-
-  assert.ok(first.message);
-  assert.equal(second.message, null);
+test("达到高占用时重复查询仍不生成提醒", async () => {
+  const pi = fakePi();
+  contextUsageExtension(pi);
+  const ctx = { getContextUsage: () => ({ tokens: 102400, contextWindow: 128000, percent: 80 }) };
+  const first = await pi.registered[0].execute("call-1", {}, undefined, undefined, ctx);
+  const second = await pi.registered[0].execute("call-2", {}, undefined, undefined, ctx);
+  assert.equal(first.details.status, "known");
+  assert.deepEqual(first.details, second.details);
+  assert.deepEqual(pi.sent, []);
 });
 
-test("未知状态不会误发压缩提醒，恢复后可以再次提醒", () => {
-  let state = createHandoffReminderState();
-  const unknown = getHandoffReminder({ status: "unknown" }, state);
-  state = unknown.state;
-  assert.equal(unknown.message, null);
-
-  const urgent = getHandoffReminder({
-    status: "urgent-handoff",
-    tokens: 115200,
-    contextWindow: 128000,
-    percent: 90,
-    remainingTokens: 12800,
-    remainingRatio: 0.1,
-    handoffPath: ".pi/handoff/context-handoff.md",
-  }, state);
-  assert.match(urgent.message, /立即/);
+test("未知状态与后续高占用均不发送压缩提醒", async () => {
+  const pi = fakePi();
+  contextUsageExtension(pi);
+  const unknown = await pi.registered[0].execute("call-1", {}, undefined, undefined, {});
+  const urgent = await pi.registered[0].execute("call-2", {}, undefined, undefined, {
+    getContextUsage: () => ({ tokens: 115200, contextWindow: 128000, percent: 90 }),
+  });
+  assert.equal(unknown.details.status, "unknown");
+  assert.equal(urgent.details.status, "known");
+  assert.deepEqual(pi.sent, []);
 });
 
 test("extension 注册无参数 context_usage 工具并返回完整快照", async () => {
@@ -78,6 +54,7 @@ test("extension 注册无参数 context_usage 工具并返回完整快照", asyn
   assert.equal(pi.registered[0].label, "context_usage");
   assert.ok(pi.registered[0].promptSnippet.length > 0);
   assert.ok(pi.registered[0].promptGuidelines.length > 0);
+  assert.doesNotMatch([pi.registered[0].promptSnippet, ...pi.registered[0].promptGuidelines].join("\n"), /handoff/i);
   assert.equal(pi.registered[0].outputSchema, ContextUsageOutputSchema);
   assert.equal(pi.registered[0].exposure, undefined);
   assert.deepEqual(pi.registered[0].parameters.properties, {});
@@ -91,7 +68,7 @@ test("extension 注册无参数 context_usage 工具并返回完整快照", asyn
   const payload = JSON.parse(result.content[0].text);
   assert.equal(payload.tokens, 64000);
   assert.equal(payload.remainingTokens, 64000);
-  assert.equal(result.details.status, "normal");
+  assert.equal(result.details.status, "known");
   assert.deepEqual(result.structuredContent, payload);
   assert.equal("note" in result.details, false);
 });
@@ -110,38 +87,16 @@ test("extension 对未知上下文不发送误报提醒", async () => {
   assert.deepEqual(result.structuredContent, JSON.parse(result.content[0].text));
 });
 
-test("agent_end 达到阈值时发送一次非展示性 handoff 提醒", () => {
+test("agent_end 不再安装 handoff 提醒钩子", () => {
   const pi = fakePi();
   contextUsageExtension(pi);
-  const listener = pi.listeners.find(({ name }) => name === "agent_end").listener;
-  const ctx = {
-    getContextUsage() {
-      return { tokens: 115200, contextWindow: 128000, percent: 90 };
-    },
-  };
-
-  listener({}, ctx);
-  listener({}, ctx);
-
-  assert.equal(pi.sent.length, 1);
-  assert.equal(pi.sent[0].message.display, false);
-  assert.match(pi.sent[0].message.content, /立即/);
+  assert.equal((pi.listeners ?? []).some(({ name }) => name === "agent_end"), false);
+  assert.deepEqual(pi.sent, []);
 });
 
-test("session_compact 后相同阈值状态可以再次发送 handoff 提醒", () => {
+test("session_compact 不再安装提醒重置钩子", () => {
   const pi = fakePi();
   contextUsageExtension(pi);
-  const agentEnd = pi.listeners.find(({ name }) => name === "agent_end").listener;
-  const sessionCompact = pi.listeners.find(({ name }) => name === "session_compact").listener;
-  const ctx = {
-    getContextUsage() {
-      return { tokens: 115200, contextWindow: 128000, percent: 90 };
-    },
-  };
-
-  agentEnd({}, ctx);
-  sessionCompact({}, ctx);
-  agentEnd({}, ctx);
-
-  assert.equal(pi.sent.length, 2);
+  assert.equal((pi.listeners ?? []).some(({ name }) => name === "session_compact"), false);
+  assert.deepEqual(pi.sent, []);
 });
