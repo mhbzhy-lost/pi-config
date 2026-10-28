@@ -8,7 +8,7 @@
 
 所有 `pi-subagents/src/*` 深层 import 必须集中在 `src/compat/pi-subagents-0.75.ts`。其他文件只能从该兼容入口消费 upstream API，不得扩散新的深层 import。
 
-`pi-subagents` 版本固定为 `0.79.2`；升级版本前必须同步更新兼容入口、完整验收。
+`pi-subagents` 版本固定为 `0.80.0`；升级版本前必须同步更新兼容入口、完整验收。
 
 ## TypeScript 文件边界
 
@@ -19,6 +19,8 @@ package 内由 Node 直接执行的 `scripts/*.ts` 和所有 `src/**/*.ts` 均�
 所有 standalone subagent、Goal task 和 Goal validation workspace 共用 `src/workspace/` 中的一套 service、ledger 和 Git lifecycle。`src/workspace/` 外禁止直接执行 subagent/Goal 的 `git worktree` mutation，也不得建立第二套 workspace ledger、owner token 或 disposition 状态机。
 
 公开入口只允许 package exports `./workspace` 与 `./workspace/admin`。运行时 owner token 只能保存在统一私有 ledger 中；agent、Goal event 和管理输出只能消费公开 receipt 与其 `leaseId`。
+
+计划执行消费者使用 `./execution` 的 `getPlanExecutionService`；bind/unbind 仅由 package 主 Host 使用。服务复用 typed coding/control 闭包，只返回运行引用与事实，不向根 feature 暴露 broker、coordinator 或 owner authority。
 
 任何 agent-callable workspace 工具都必须调用唯一 workspace service，并在 service 内对 live root session identity 和 exact owner kind 执行验证；不得以工具参数、workspace ID、路径或调用前检查替代该门禁。
 

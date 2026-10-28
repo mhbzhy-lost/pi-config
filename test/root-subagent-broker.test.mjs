@@ -649,6 +649,7 @@ test("Root broker canonical settlement reader accepts the upstream writer shape 
 });
 
 test("Root broker lifecycle readers accept one upstream artifact through the same proof facts", async (t) => {
+  const { AuthorityStore } = await import("../packages/pi-subagents-enhanced/src/subagent-dispatch/authority-store.ts");
   const runId = "executor-lifecycle-core";
   const terminal = observedProof(runId);
   const snapshots = [];
@@ -660,6 +661,7 @@ test("Root broker lifecycle readers accept one upstream artifact through the sam
     const broker = new RootBrokerServer({
       rootSessionId,
       lifecycleSessionId: rootSessionId,
+      authorityStore: new AuthorityStore({ root: join(asyncDir, "authority"), rootSessionId }),
       captureProcessBirthIdentity: async () => `birth-${lifecycle}`,
       writeGrant: async () => join(asyncDir, "grant"),
       terminalTimeoutMs: 100,
@@ -680,6 +682,25 @@ test("Root broker lifecycle readers accept one upstream artifact through the sam
         : await broker.stopGoalOwnedRun(goalStopRequest(authority));
     assert.equal(result.state ?? result.authorization.state, lifecycle === "settlement" ? "verified" : "observed", lifecycle);
     snapshots.push(broker.inspectExecutionProof(runId));
+    // 新 broker 没有进程内 ownedRuns；只读恢复必须由持久化 owner/proof 双重绑定。
+    const fresh = new RootBrokerServer({ rootSessionId, lifecycleSessionId: rootSessionId,
+      authorityStore: new AuthorityStore({ root: join(asyncDir, "authority"), rootSessionId }),
+      upstream: { async ping() {}, async stop() { assert.fail("只读恢复不得 stop"); } },
+      writeGrant: async () => { assert.fail("只读恢复不得签发 grant"); } });
+    const persisted = { state: "observed", conflict: false, rootSessionId, runId, asyncDir,
+      processInstance: terminal.runnerProcessInstanceId, proofId: snapshots.at(-1).terminal.proofId };
+    const record = { owner: { kind: "standalone-subagent", rootSessionId }, run: { runId, asyncDir } };
+    assert.equal((await fresh.inspectPersistedTerminalProof(record, persisted)).outcome, "succeeded");
+    for (const patch of [{ proofId: "f".repeat(64) }, { runId: "foreign" }, { rootSessionId: "foreign" },
+      { processInstance: "foreign" }, { conflict: true }, { state: "pending" }]) {
+      await assert.rejects(() => fresh.inspectPersistedTerminalProof(record, { ...persisted, ...patch }));
+    }
+    chmodSync(join(asyncDir, "process-terminal.json"), 0o666);
+    await assert.rejects(() => fresh.inspectPersistedTerminalProof(record, persisted), /unsafe/);
+    chmodSync(join(asyncDir, "process-terminal.json"), 0o644);
+    assert.equal(fresh.ownedRuns.size, 0); assert.equal(fresh.principals.size, 0);
+    assert.equal(fresh.inspectExecutionProof(runId), null, "恢复事实不得转换为控制权限");
+    await fresh.closeRootSession();
   }
   assert.deepEqual(snapshots.map((snapshot) => snapshot.terminal.proofId), [snapshots[0].terminal.proofId, snapshots[0].terminal.proofId, snapshots[0].terminal.proofId]);
   assert.deepEqual(snapshots.map((snapshot) => snapshot.terminal.outcome), ["succeeded", "succeeded", "succeeded"]);

@@ -65,3 +65,7 @@
 安全恢复前提是：确认旧、新 run 的 terminal proof 与 canonical session 无活跃 writer；从公开权威接口核对 workspace/queue 当前 owner、绑定和允许动作；恢复入口能够为新进程完成授权与合法绑定，或明确返回 blocked。现场新 terminal 记录了 canonical session lease 已 released、freeAtObservation=true，但这是结束时事实，不代替未来恢复前的实时核验。当前继续保留原 workspace 与两个 run 现场，不自动 fresh 重派。
 
 **会影响 Goal 计划 T3 的 typed resume 假设。** [计划 §4.2/T3](/Users/leshi.zhy/pi-config/docs/plans/2026-10-26-goal-runtime-v1.md:303) 假定复用当前 typed control 后，可在授权与 workspace 绑定完成后返回新 PlanRunRef；本次证明当前普通 resume 不提供这组保证。T3 不能仅依据 upstream `resumeDisposition:"resumable"` 投影 `recovery:"typed-resume"`，更不能把 RPC 启动成功视为绑定完成。应将这类身份/绑定未闭合的恢复判为 unknown/blocked，并把通用 runtime 恢复合同闭合作为相关能力验收的前提；本轮未修改计划。
+
+## 补记（2026-10-27 晚，T3 交付时修复）
+
+Goal T3 交付时定位并修复了本缺陷家族的首派侧缺口：合法首次 coding 派发的 `bindRun` 仅记录 `{runId,asyncDir}`（`spawnWorkflowLeaf` 返回形状），而本报告修复后的 `managedCodingResume.prepare` 要求 `record.run.agentProfile` 非空，导致所有首派 run 的 typed-resume 永久 RESUME_BINDING_BLOCKED。修复未改 workspace schema（`service.ts` 的 `exactKeys(run,["runId","asyncDir"])` 硬门禁保持）：`extensions/subagent-runtime.ts` 的 prepare 改从官方 `broker.inspectExecutionProof(sourceRunId).binding.agentProfile` 取首派 profile，并在取用前交叉核对 snapshot.binding 的 root/run/asyncDir/sessionId 与 record.run/owner/current broker 全部对应；`record.run.agentProfile` 已存在时要求一致，任一不匹配或 proof 缺字段保持 fail-closed。adapter inspect 与 prepare 使用同一 canonical 来源。验证：typecheck、package 元数据、派发/证明回归 101 项、恢复重绑 9 项、Broker 通知 42 项全部通过；未新增测试。

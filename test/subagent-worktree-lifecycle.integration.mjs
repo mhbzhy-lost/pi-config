@@ -166,7 +166,7 @@ test("real child integration client maps lifecycle and trusted completion inspec
   const first = await setup("publish");
   const initiallyAbsent = await first.tool.execute("inspect-before-enqueue", { action: "inspect_integration_state" });
   assert.equal(initiallyAbsent.isError, false, initiallyAbsent.content[0].text);
-  assert.deepEqual(initiallyAbsent.details, { queueState: "absent", workspaceState: "active", integrationReceipt: false, proofState: "absent", revision: 0 });
+  assert.deepEqual(initiallyAbsent.details, { queueState: "absent", workspaceState: "active", integrationReceipt: false, proofState: "absent", terminalProof: null, revision: 0 });
   const queued = await first.tool.execute("enqueue-publish", { action: "enqueue", authorized_workspace_head: first.head, target_ref: "refs/heads/main" });
   assert.equal(queued.isError, false, queued.content[0].text);
   const admitted = await first.tool.execute("admit-publish", { action: "await_admission", queue_item_id: queued.details.queueItemId });

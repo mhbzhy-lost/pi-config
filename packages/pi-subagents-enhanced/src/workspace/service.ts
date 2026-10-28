@@ -2,6 +2,8 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import path from "node:path";
 
+export { resolveRepositoryIdentity } from "./repository-identity.ts";
+
 import { createManagedWorkspaceRequestV2 } from "./contract.ts";
 import { DISPOSITION_PREPARE_VERSION, isPreparedWorkspaceDisposition, dispositionBindingMatches, type PreparedWorkspaceDispositionV1 } from "./disposition-contract.ts";
 import {
@@ -368,6 +370,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
     return {
       workspaceState: lease.record.state,
       integrationReceipt: structuredClone(lease.record.integrationReceipt ?? null),
+      terminalProof: structuredClone(lease.record.terminalProof ?? null),
       proofState: lease.record.state === "released" ? "accepted" : lease.record.state === "preserved" || lease.record.cleanupDebt ? "debt" : "absent",
     };
   }

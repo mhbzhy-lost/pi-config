@@ -6,11 +6,12 @@
 
 工具与消息的显示层统一由 `src/tui/tool-renderers.ts` 的纯 renderer 工厂提供，主入口与 child preview 共同消费；原生工具只从公开 `create*ToolDefinition` 消费渲染字段，未知工具返回 `undefined` 回退原生显示。所有精简、折叠、摘要只发生在 TUI renderer 层，不改写 agent 实际收到的消息、tool result、session 内容或结构化 `details`；结构化数据契约（如 `apply_patch` 与 `context_usage` 的 `structuredContent`/`outputSchema`）是显式程序数据通道，不是展示改写；model-only 的 subagent/supervisor 工具未因此新增 `outputSchema`。
 
-普通 subagent、Goal task 和 Goal validation 都通过同一 workspace service 分配、绑定、检查与处置 worktree。package 的公开出口由 `package.json` 的 `exports` 精确声明，且由 `scripts/verify-package.ts` 的 `expectedExports` 逐字校验，共五项：
+普通 subagent、Goal task 和 Goal validation 都通过同一 workspace service 分配、绑定、检查与处置 worktree。package 的公开出口由 `package.json` 的 `exports` 精确声明，且由 `scripts/verify-package.ts` 的 `expectedExports` 逐字校验，共六项：
 
 | 子路径 | 目标 | 内容 |
 | --- | --- | --- |
 | `./dispatch-ir` | `src/contracts/dispatch-ir.ts` | typed dispatch 合同 |
+| `./execution` | `src/execution/index.ts` | 当前 root session 的计划执行服务与只读运行事实 |
 | `./host-runtime` | `src/host-runtime/index.ts` | physical Host 绑定与 peer 安装 |
 | `./tui/background-activity` | `src/tui/index.ts` | 统一后台活动显示协议与 registry、subagent activity source 工厂 |
 | `./workspace` | `src/workspace/service.ts` | managed workspace service |
@@ -19,6 +20,10 @@
 外部消费者只使用 bare specifier `pi-subagents-enhanced/tui/background-activity`（解析到 `src/tui/index.ts`），不深引 `src/tui/*.ts`。`pi.extensions` 仍只声明 `extensions/subagent-runtime.ts` 与 `extensions/custom-footer.ts` 两项 Host 入口。Git mutation、owner token 与 durable ledger 的实现均只归 `src/workspace/` 所有。
 
 ## Subagent 独立操作工具
+
+`getPlanExecutionService(pi, rootSessionId)` 在主 Host ready 后提供 `start/resume/inspect/subscribe`。计划沿用普通 `standalone-subagent` owner；分配与授权绑定后的异步回调必须完成持久化后才返回。调用失败不能推断 child 未启动；同代相同 dispatchKey 复用原结果，跨 reload 的 intent/run 由调用方 session 状态恢复。订阅仅提示事实失效，建立后应立即 inspect 已知引用；未覆盖最终变化的 pending 工作明确报告 wakeup unavailable。
+
+inspect 只接受官方终态与匹配的 workspace/集成事实。当前 no-payload 结算和人工 discard 的公开投影无法区分，released 且无匹配集成回执时返回 blocked（`no-payload settlement identity unavailable`），不据释放结果宣称交付。已投递人工集成交接的运行保持 manual-integration；恢复准入与本次新 PID 授权/重绑分别核对。
 
 fresh Host 的 main 模型工具按对象与操作拆分：`subagent_start`/`subagent_run_*`、`managed_workspace_*` 与 `supervisor_request_*`。`subagent_roster` 已退役，旧 union 名称与 roster 只用于历史记录显示，不在 fresh runtime 注册，也没有隐藏、codemode 或别名替代入口；所有操作工具仍复用原 typed dispatcher、workspace service、supervisor adapter、owner/CAS 与 terminal proof。workspace 处置以实时 status/action_token 为权威，coding child-owned integration 不会因工具拆分改变。
 

@@ -242,7 +242,11 @@ function parseChangedPaths(output) {
     if (!status) continue;
     if (/^[RC]/.test(status)) {
       if (index + 1 >= tokens.length) throw failure("MANAGED_WORKSPACE_GIT", "invalid rename/copy diff output");
-      files.push(tokens[index++], tokens[index++]);
+      // 复制源仍存在且未被此状态修改；重命名则同时删除源路径。
+      const source = tokens[index++];
+      const destination = tokens[index++];
+      if (status.startsWith("R")) files.push(source);
+      files.push(destination);
     } else {
       if (index >= tokens.length) throw failure("MANAGED_WORKSPACE_GIT", "invalid name-status diff output");
       files.push(tokens[index++]);

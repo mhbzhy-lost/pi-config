@@ -15,6 +15,7 @@ const expectedExtensions = ["./extensions/subagent-runtime.ts", "./extensions/cu
 const expectedFiles = ["AGENTS.md", "README.md", "extensions", "child-extensions", "scripts", "src"];
 const expectedExports = {
   "./dispatch-ir": "./src/contracts/dispatch-ir.ts",
+  "./execution": "./src/execution/index.ts",
   "./host-runtime": "./src/host-runtime/index.ts",
   "./tui/background-activity": "./src/tui/index.ts",
   "./workspace": "./src/workspace/service.ts",
@@ -24,7 +25,7 @@ const implementationRoots = ["extensions", "src", "child-extensions", "scripts"]
 const requiredTarballPaths = [
   "extensions/subagent-runtime.ts", "extensions/custom-footer.ts", "child-extensions/root-session-owner.ts",
   "child-extensions/acceptance-evidence.ts", "scripts/setup-runtime-deps.ts", "scripts/verify-package.ts",
-  "src/compat/pi-subagents-0.75.ts", "src/subagent-dispatch/extension.ts", "src/subagent-dispatch/root-broker-server.ts",
+  "src/compat/pi-subagents-0.75.ts", "src/execution/index.ts", "src/subagent-dispatch/extension.ts", "src/subagent-dispatch/root-broker-server.ts",
   "src/tui/native-conversation.ts", "src/tui/session-browser.ts",
   "src/tui/index.ts", "src/tui/background-activity.ts",
   "src/tui/subagent-activity.ts", "src/tui/footer-runtime.ts",
@@ -171,7 +172,7 @@ export async function verifyEnhancedPackage({ packageRoot = defaultPackageRoot, 
   if (manifest.name !== "pi-subagents-enhanced" || manifest.version !== "0.1.0") throw new Error("Enhanced package identity must be pi-subagents-enhanced@0.1.0.");
   if (manifest.dependencies?.["pi-subagents"] !== UPSTREAM_VERSION || manifest.dependencies?.typescript !== "5.9.3" || JSON.stringify(manifest.bundleDependencies) !== JSON.stringify(["pi-subagents"]) || Object.hasOwn(manifest, "bundledDependencies")) throw new Error("Enhanced package must declare pi-subagents@0.80.0 and canonical bundleDependencies.");
   if (JSON.stringify(manifest.pi?.extensions) !== JSON.stringify(expectedExtensions)) throw new Error("Enhanced package must declare exactly the runtime and footer extensions.");
-  if (JSON.stringify(manifest.exports) !== JSON.stringify(expectedExports)) throw new Error("Enhanced package exports must expose only canonical prompt, dispatch, TUI, and workspace APIs.");
+  if (JSON.stringify(manifest.exports) !== JSON.stringify(expectedExports)) throw new Error("Enhanced package exports must expose only canonical dispatch, execution, Host, TUI, and workspace APIs.");
   if (JSON.stringify(manifest.files) !== JSON.stringify(expectedFiles)) throw new Error("Enhanced package files allowlist is incomplete or unexpected.");
   for (const [index, entry] of manifest.pi.extensions.entries()) assertPackagePath(packageRoot, entry, `pi.extensions[${index}]`);
   for (const [index, entry] of manifest.files.entries()) assertPackagePath(packageRoot, entry, `files[${index}]`);

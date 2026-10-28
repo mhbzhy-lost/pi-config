@@ -1,6 +1,9 @@
+import { execFileSync, spawn } from "node:child_process";
+import { realpathSync } from "node:fs";
+import { once } from "node:events";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -13,6 +16,9 @@ const runtimeJiti = createJiti(import.meta.url, { moduleCache: false, alias: piH
 const {
   createSubagentToolRenderers,
   projectManagedWorkspaceTerminalProof,
+  installSubagentRuntime,
+  admitHostRepositoryOrigin,
+  connectRuntimeCoordinator,
 } = await runtimeJiti.import("../packages/pi-subagents-enhanced/extensions/subagent-runtime.ts");
 
 import { createHeadlessSubagentApi } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/runtime-membrane.ts";
@@ -3077,4 +3083,550 @@ test("unbound supervisor target deactivates the three supervisor_request_* opera
   assert.deepEqual(errors, ["SUPERVISOR_TARGET_UNAVAILABLE"]);
   assert.deepEqual(active, ["subagent_start", "read"], "三个 supervisor_request_* 必须从未 bind 的 active 集合中停用");
   assert.deepEqual(active.filter((name) => name.startsWith("supervisor_request_")), []);
+});
+
+// T1/T2：provider/child 受控；真实连接可包裹故障窗口，业务装配仍由生产 Host 执行。
+async function productionHostFixture(t, singleRepository, options = {}) {
+  const { getPlanExecutionService } = await import("../packages/pi-subagents-enhanced/src/execution/index.ts");
+  const { findRootBroker } = await import("../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts");
+  const { findManagedWorkspaceService } = await import("../packages/pi-subagents-enhanced/src/workspace/registry.ts");
+  const { createSubagentIntegrationTool } = await import("../packages/pi-subagents-enhanced/child-extensions/integration-queue.ts");
+  // 使用上游正式 finalizer 从真实进程 close 生成 sidecar，不拼 terminal proof。
+  const terminal = await import(pathToFileURL(join(enhancedPackageRoot, "node_modules/pi-subagents/src/runs/background/process-terminal.js")).href);
+  const root = realpathSync(await mkdtemp(join(tmpdir(), "host-t1-")));
+  const repository = join(root, "repository");
+  const stateRoot = join(root, "state");
+  const traceFile = join(root, "trace.jsonl");
+  await writeFile(traceFile, "", { mode: 0o600 });
+  const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  const makeRepository = async (name) => {
+    const directory = join(root, name);
+    await mkdir(directory);
+    git(directory, "init", "-b", "main");
+    git(directory, "config", "user.email", "test@example.com");
+    git(directory, "config", "user.name", "Test");
+    await writeFile(join(directory, "base.txt"), "base\n");
+    git(directory, "add", ".");
+    git(directory, "commit", "-m", "base");
+    return directory;
+  };
+  await makeRepository("repository");
+  const hostCwd = singleRepository ? repository : root;
+  const sessionManager = SessionManager.inMemory(hostCwd);
+  const rootSessionId = sessionManager.getSessionId();
+  const context = { cwd: hostCwd, sessionManager };
+  const envKeys = ["PI_SUBAGENT_CHILD", "PI_SUBAGENT_FANOUT_CHILD", "PI_CODING_AGENT_DIR", "PI_CODING_WORKSPACE_DIR", "PI_SUBAGENT_DISPATCH_TRACE_FILE", "PI_SUBAGENT_ORCHESTRATOR_SESSION_ID", "PI_SUBAGENT_RUN_ID"];
+  const savedEnv = Object.fromEntries(envKeys.map(key => [key, process.env[key]]));
+  delete process.env.PI_SUBAGENT_CHILD;
+  delete process.env.PI_SUBAGENT_FANOUT_CHILD;
+  process.env.PI_CODING_AGENT_DIR = join(repoRoot, "pi");
+  process.env.PI_CODING_WORKSPACE_DIR = stateRoot;
+  process.env.PI_SUBAGENT_DISPATCH_TRACE_FILE = traceFile;
+  let host;
+  let broker;
+  let execution;
+  let serial = 0;
+  const handoffResolvers = new Set();
+  let disposing = false;
+  const releaseHandoffs = () => { for (const release of handoffResolvers) release(); handoffResolvers.clear(); };
+  let handoffStarted;
+  const handoff = new Promise(resolve => { handoffStarted = resolve; });
+  const runners = new Map();
+  const connections = [];
+  const launch = async () => {
+    const runId = `t1-child-${++serial}`;
+    const asyncDir = join(root, runId);
+    await mkdir(asyncDir);
+    const child = spawn(process.execPath, ["-e", "process.stdin.resume()"], { stdio: ["pipe", "ignore", "pipe"] });
+    await once(child, "spawn");
+    const runnerProcessInstanceId = randomUUID();
+    terminal.initializeProcessTerminal(asyncDir, runId, runnerProcessInstanceId);
+    terminal.writeProcessTerminalCandidate(asyncDir, { version: 1, runId, runnerProcessInstanceId, writers: {}, expectedWriters: { "0": 0 } });
+    runners.set(runId, { child, asyncDir, runnerProcessInstanceId, pid: child.pid });
+    return { runId, asyncDir, pid: child.pid, sessionId: rootSessionId, agent: "executor" };
+  };
+  const finish = async (runId) => {
+    const runner = runners.get(runId);
+    if (runner.proof) return;
+    const closed = once(runner.child, "close");
+    runner.child.stdin.end();
+    const [exitCode, signal] = await closed;
+    runner.proof = terminal.finalizeProcessTerminal(runner.asyncDir, runId, {
+      processInstanceId: runner.runnerProcessInstanceId, closeObservedAt: Date.now(), exitCode, signal,
+    });
+    assert.equal(runner.proof.state, "observed");
+    host.events.emit("subagent:process-terminal", { ...runner.proof, sessionId: rootSessionId, asyncDir: runner.asyncDir, pid: runner.pid, agent: "executor" });
+  };
+  const boot = async () => {
+    disposing = false;
+    host = createPi();
+    const originalSend = host.sendMessage;
+    host.sendMessage = (message) => {
+      originalSend(message);
+      if (message.customType === "subagent-integration-handoff") {
+        handoffStarted();
+        if (disposing) return;
+        return new Promise(resolve => { handoffResolvers.add(resolve); });
+      }
+    };
+    const rpc = createRpc({
+      renew() {},
+      async ping() { return { version: 1, methods: ["spawn", "resume", "status", "stop"], session: { sessionId: rootSessionId, cwd: hostCwd }, capabilities: { asyncSpawn: true, processTerminalProof: true, launchResolvedExtensions: true, runtimeAcknowledgedExtensions: true } }; },
+      async spawn(params) {
+        assert.equal(params.cwd, hostCwd, "workflow 使用 Host cwd");
+        const run = await launch();
+        const workflowKey = JSON.parse(params.script.match(/runs\.run\(("[^"]+")/)[1]);
+        const leaf = JSON.parse(params.script.match(/runs\.run\([^,]+, (.*)\);$/s)[1]);
+        assert.notEqual(leaf.cwd, hostCwd, "child 使用受管工作区 cwd");
+        host.events.emit("subagent:async-started", { ...run, id: run.runId, workflowKey, parentWorkflowRunId: `workflow-${run.runId}` });
+        return { details: { runId: `workflow-${run.runId}`, asyncDir: join(root, `workflow-${run.runId}`) } };
+      },
+      async resume() {
+        releaseHandoffs();
+        const run = await launch();
+        host.events.emit("subagent:async-started", { ...run, id: run.runId });
+        return { details: { runId: run.runId, asyncDir: run.asyncDir } };
+      },
+      async status({ id }) { return { details: { state: runners.get(id)?.proof ? "completed" : "running" } }; },
+      async stop({ runId, id }) { await finish(runId ?? id); return {}; },
+    });
+    installSubagentRuntime(host, {
+      async connectCoordinator(input) {
+        const connection = await (options.connect ?? connectRuntimeCoordinator)(input);
+        if (connection) connections.push(connection);
+        return options.connected ? await options.connected(connection, input) : connection;
+      },
+      rpc, bootstrap(api) { api.registerTool({ name: "subagent_supervisor", execute: async () => ({ content: [] }) }); },
+      discoverAgents: () => ({ admission: "repository-configured", agents: [{ name: "executor", description: "受控 child" }] }),
+    });
+    for (const handler of host.handlers.get("session_start") ?? []) await handler({}, context);
+    broker = findRootBroker(host, rootSessionId);
+    execution = getPlanExecutionService(host, rootSessionId);
+    assert.ok(broker && execution);
+  };
+  const close = async () => {
+    disposing = true;
+    releaseHandoffs();
+    for (const handler of host.handlers.get("session_shutdown") ?? []) await handler({ reason: "shutdown" }, context);
+    assert.equal(findRootBroker(host, rootSessionId), undefined);
+    assert.equal(getPlanExecutionService(host, rootSessionId), undefined);
+  };
+  t.after(async () => {
+    try {
+      options.cleanup?.();
+      for (const runId of runners.keys()) await finish(runId);
+      await close();
+    } finally {
+      for (const key of envKeys) if (savedEnv[key] === undefined) delete process.env[key]; else process.env[key] = savedEnv[key];
+      if (t.passed) await rm(root, { recursive: true, force: true });
+      else t.diagnostic(`保留 T1 现场 ${root}`);
+    }
+  });
+  await boot();
+  const receipt = (ref) => findManagedWorkspaceService(host, rootSessionId).listOwned({ ownerScope: { kind: "standalone-subagent", rootSessionId }, runId: ref.runId })[0];
+  const start = async (cwd = repository, key = `dispatch-${serial + 1}`) => {
+    return execution.start({ dispatchKey: key, request: { agent: "executor", task: "实现受控修改", worktree: true, cwd, writePaths: ["result.txt"], acceptance: { criteria: ["集成成功"] } }, ctx: context, async onAllocated() {}, async onBound() {} });
+  };
+  const childCall = async (ref, input) => {
+    process.env.PI_SUBAGENT_ORCHESTRATOR_SESSION_ID = rootSessionId;
+    process.env.PI_SUBAGENT_RUN_ID = ref.runId;
+    const result = await createSubagentIntegrationTool().execute("integration", input);
+    assert.equal(result.isError, false, JSON.stringify(result));
+    return result.details;
+  };
+  return { root, repository, stateRoot, traceFile, rootSessionId, context, git, boot, close, start, finish, receipt, childCall, handoff, makeRepository, connections, runners,
+    get workspaceService() { return findManagedWorkspaceService(host, rootSessionId); },
+    get broker() { return broker; }, get execution() { return execution; }, get host() { return host; },
+    releaseHandoff: releaseHandoffs,
+  };
+}
+
+for (const singleRepository of [false, true]) test(`T1 production Host ${singleRepository ? "单仓库" : "超级根单子仓库"} 分配、集成、proof、inspect、重建与关闭`, { timeout: 90_000 }, async (t) => {
+  const f = await productionHostFixture(t, singleRepository);
+  const ref = await f.start();
+  const workspace = f.receipt(ref);
+  assert.equal(workspace.originRoot, f.repository);
+  assert.equal(workspace.owner.rootSessionId, f.rootSessionId);
+  await writeFile(join(workspace.path, "result.txt"), "integrated\n");
+  f.git(workspace.path, "add", "result.txt");
+  f.git(workspace.path, "commit", "-m", "child result");
+  const queued = await f.childCall(ref, { action: "enqueue", authorized_workspace_head: f.git(workspace.path, "rev-parse", "HEAD"), target_ref: "refs/heads/main" });
+  const admitted = await f.childCall(ref, { action: "await_admission", queue_item_id: queued.queueItemId });
+  await f.childCall(ref, { action: "publish", queue_item_id: queued.queueItemId, queue_lease_id: admitted.queueLeaseId, candidate_head: f.git(workspace.path, "rev-parse", "HEAD") });
+  await f.finish(ref.runId);
+  await f.broker.awaitTerminalProofDeliveries();
+  const facts = await f.execution.inspect(ref);
+  assert.equal(facts.terminal, "succeeded", JSON.stringify(facts));
+  assert.equal(facts.integration, "completed", JSON.stringify(facts));
+  assert.equal(facts.workspaceState, "released");
+  assert.ok(facts.terminalProofRef && facts.integrationReceiptRef);
+  assert.equal(await readFile(join(f.repository, "result.txt"), "utf8"), "integrated\n");
+  await f.close();
+  await f.boot();
+  assert.deepEqual(await f.execution.inspect(ref), facts, "同 owner 持久 receipt 恢复到同一仓库；不重授旧 run");
+  if (!singleRepository) {
+    const { createManagedWorkspaceService, resolveRepositoryIdentity } = await import("../packages/pi-subagents-enhanced/src/workspace/service.ts");
+    const { createManagedWorkspaceRequestV2 } = await import("../packages/pi-subagents-enhanced/src/workspace/contract.ts");
+    const { connectRepositoryCoordinator } = await import("../packages/pi-subagents-enhanced/src/workspace/coordinator-client.ts");
+    const { createCoordinatorRegistry } = await import("../packages/pi-subagents-enhanced/src/workspace/coordinator-registry.ts");
+    const { rootBrokerRegistryEntry } = await import("../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts");
+    const other = join(f.root, "other");
+    await mkdir(other);
+    f.git(other, "init", "-b", "main");
+    f.git(other, "config", "user.email", "test@example.com");
+    f.git(other, "config", "user.name", "Test");
+    await writeFile(join(other, "base.txt"), "base\n");
+    f.git(other, "add", ".");
+    f.git(other, "commit", "-m", "base");
+    // T2 取消 T1 的第二仓库限制；仍必须从请求 origin 进入新的独立分区。
+    const second = await f.start(other, "second-repository");
+    assert.equal(f.receipt(second).originRoot, other);
+    assert.notEqual(f.receipt(second).path.split("/worktrees/")[0], workspace.path.split("/worktrees/")[0]);
+    await f.finish(second.runId);
+    await f.broker.awaitTerminalProofDeliveries();
+    const otherIdentity = await resolveRepositoryIdentity(other);
+    const otherService = createManagedWorkspaceService({ stateRoot: f.stateRoot, storageRepositoryId: otherIdentity.storageRepositoryId });
+    const allocateOther = (workspaceId, ownerRoot, runId) => {
+      const entry = otherService.ensureAllocated(createManagedWorkspaceRequestV2({ workspaceId,
+        owner: { kind: "standalone-subagent", rootSessionId: ownerRoot, toolCallId: workspaceId },
+        originRoot: other, requestedCwd: other, originRef: "refs/heads/main", baseCommit: f.git(other, "rev-parse", "HEAD"),
+        contractHash: "a".repeat(64), policy: { publication: "allowed", application: "allowed", writePaths: ["result.txt"] },
+      }));
+      return otherService.bindRun({ workspaceId: entry.workspaceId, run: { runId, asyncDir: join(f.root, runId) } });
+    };
+    // 通过真实 workspace 入口生成负向身份现场，不拼 receipt 或写 ledger。
+    const foreignOwner = allocateOther("other-owner-workspace", "another-owner", "foreign-owner-run");
+    const foreignFacts = await f.execution.inspect({ runId: foreignOwner.run.runId, workspaceId: foreignOwner.workspaceId, rootSessionId: f.rootSessionId });
+    assert.equal(foreignFacts.terminal, "unknown");
+    const otherReceipt = allocateOther("other-repository-workspace", f.rootSessionId, "other-repository-run");
+    const identity = await resolveRepositoryIdentity(f.repository);
+    const metadata = await createCoordinatorRegistry({ commonDir: identity.commonDir, stateRoot: f.stateRoot }).read();
+    const client = await connectRepositoryCoordinator(identity, await rootBrokerRegistryEntry(f.host, f.rootSessionId), { metadata });
+    try {
+      assert.equal((await client.listOwned({ runId: otherReceipt.run.runId }))[0].originRoot, other,
+        "A 的 listOwned 确实可看见 B，不能据它选择仓库");
+      const wrongRepository = await f.execution.inspect({ runId: otherReceipt.run.runId, workspaceId: otherReceipt.workspaceId, rootSessionId: f.rootSessionId });
+      assert.equal(wrongRepository.terminal, "unknown");
+      allocateOther("ambiguous-workspace", f.rootSessionId, ref.runId);
+      assert.equal((await client.listOwned({ runId: ref.runId })).length, 2);
+      assert.equal((await f.execution.inspect(ref)).terminal, "unknown", "同 owner 两份持久回执必须拒绝");
+    } finally { await client.close(); }
+  }
+  await f.close();
+  const trace = (await readFile(f.traceFile, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+  const bound = trace.find(entry => entry.phase === "workspace-bound" && entry.runId === ref.runId);
+  const proof = trace.find(entry => entry.phase === "proof-delivered" && entry.runId === ref.runId);
+  const integrated = trace.find(entry => entry.phase === "integration-observed" && entry.receiptId === facts.integrationReceiptRef);
+  assert.equal(bound.workspaceId, ref.workspaceId);
+  assert.equal(bound.leaseId, workspace.leaseId);
+  assert.equal(proof.proofId, facts.terminalProofRef);
+  assert.equal(proof.repositoryId, integrated.repositoryId);
+  assert.equal(proof.storageRepositoryId, integrated.storageRepositoryId);
+  assert.ok(trace.findIndex(entry => entry.phase === "repository-closed") > trace.findIndex(entry => entry.phase === "proof-delivered"));
+});
+
+test("T1 production Host 从持久回执选择 typed resume 的同一子仓库", { timeout: 90_000 }, async (t) => {
+  const f = await productionHostFixture(t, false);
+  const source = await f.start();
+  const workspace = f.receipt(source);
+  await writeFile(join(workspace.path, "result.txt"), "resume result\n");
+  f.git(workspace.path, "add", "result.txt");
+  f.git(workspace.path, "commit", "-m", "child before resume");
+  const queued = await f.childCall(source, { action: "enqueue", authorized_workspace_head: f.git(workspace.path, "rev-parse", "HEAD"), target_ref: "refs/heads/main" });
+  await f.childCall(source, { action: "await_admission", queue_item_id: queued.queueItemId });
+  // child 已申请 admission 后真实退出；正常 proof 投递创建 resume intent。
+  // 受控消息投递保持在途，模拟下一轮主会话消费前的 pending delivery。
+  await f.finish(source.runId);
+  await f.handoff;
+  const facts = await f.execution.inspect(source);
+  assert.equal(facts.recovery, "typed-resume", JSON.stringify(facts));
+  const resumed = await f.execution.resume({ previous: source, dispatchKey: "resume-child", message: "继续完成集成", ctx: f.context, async onBound() {} });
+  assert.notEqual(resumed.runId, source.runId);
+  assert.equal(resumed.workspaceId, source.workspaceId);
+  assert.equal(f.receipt(resumed).originRoot, f.repository);
+  f.releaseHandoff();
+  const admitted = await f.childCall(resumed, { action: "await_admission", queue_item_id: queued.queueItemId });
+  await f.childCall(resumed, { action: "publish", queue_item_id: queued.queueItemId, queue_lease_id: admitted.queueLeaseId, candidate_head: f.git(workspace.path, "rev-parse", "HEAD") });
+  const drainingBroker = f.broker;
+  await f.finish(resumed.runId);
+  await f.close();
+  assert.equal(drainingBroker.recordTerminalProof, undefined, "broker 排空证明后才关闭 coordinator 回调");
+  await f.boot();
+  const complete = await f.execution.inspect(resumed);
+  assert.equal(complete.integration, "completed", JSON.stringify(complete));
+  assert.equal(complete.workspaceState, "released");
+  assert.equal(complete.terminal, "succeeded");
+  await f.close();
+});
+
+test("T2 同 Host 双生产连接并行分配、交错集成与 proof、部分关闭失败重试及新 Host 重建", { timeout: 120_000 }, async (t) => {
+  let holdProof;
+  let enteredProof;
+  const proofEntered = new Promise(resolve => { enteredProof = resolve; });
+  const proofGate = new Promise(resolve => { holdProof = resolve; });
+  const f = await productionHostFixture(t, false, {
+    cleanup() { holdProof(); },
+    connected(connection) {
+      return { ...connection, async recordTerminalProof(run, proof) {
+        if (connection.identity.originRoot.endsWith("/repository")) { enteredProof(); await proofGate; }
+        return connection.recordTerminalProof(run, proof);
+      } };
+    },
+  });
+  t.after(() => holdProof());
+  assert.equal(f.connections.length, 0, "非 Git Host 不扫描或预建连接");
+  const other = await f.makeRepository("other");
+  const broker = f.broker;
+  const callbacks = { request: broker.coordinatorRequest, proof: broker.recordTerminalProof };
+  const refs = await Promise.all([f.start(f.repository, "parallel-A"), f.start(other, "parallel-B")]);
+  assert.equal(f.connections.length, 2);
+  assert.equal(f.broker, broker);
+  assert.equal(broker.coordinatorRequest, callbacks.request);
+  assert.equal(broker.recordTerminalProof, callbacks.proof);
+  const workspaces = refs.map(f.receipt);
+  assert.deepEqual(workspaces.map(entry => entry.originRoot), [f.repository, other]);
+  assert.equal(new Set(workspaces.map(entry => entry.path.split("/worktrees/")[0])).size, 2);
+  assert.ok(refs.every(ref => f.runners.get(ref.runId).child.exitCode === null), "两个真实受控进程同时存活");
+  const inputs = workspaces.map(workspace => ({ workspaceId: workspace.workspaceId, ownerScope: { kind: "standalone-subagent", rootSessionId: f.rootSessionId } }));
+  const dispositions = await Promise.all(inputs.map(input => f.workspaceService.issueOwnedDisposition(input)));
+  assert.ok(dispositions.every(issued => issued.allowedDispositions.includes("preserve")), "同一个注册 facade 把 A/B 分别交给对应 client");
+  await assert.rejects(() => f.workspaceService.releaseOwned(inputs[1]), /terminal|proof|release|active|state/i);
+  const queues = [];
+  for (const [index, workspace] of workspaces.entries()) {
+    await writeFile(join(workspace.path, "result.txt"), `repository-${index}\n`);
+    f.git(workspace.path, "add", "result.txt");
+    f.git(workspace.path, "commit", "-m", `result-${index}`);
+    queues.push(await f.childCall(refs[index], { action: "enqueue", authorized_workspace_head: f.git(workspace.path, "rev-parse", "HEAD"), target_ref: "refs/heads/main" }));
+  }
+  const [a, b] = refs;
+  const contextA = f.connections.find(entry => realpathSync(entry.identity.originRoot) === f.repository);
+  const contextB = f.connections.find(entry => realpathSync(entry.identity.originRoot) === other);
+  assert.equal((await contextA.client.listOwned({ runId: b.runId }))[0].originRoot, other, "远端 listOwned 可跨分区，不能作为发现路由");
+  const foreignView = await contextA.client.inspectIntegrationState({ workspaceId: b.workspaceId, leaseId: workspaces[1].leaseId, runId: b.runId,
+    ownerScope: { kind: "standalone-subagent", rootSessionId: f.rootSessionId } });
+  assert.equal(foreignView.queueState, "absent", "错误 client 能读到 B workspace 却查 A queue；Host 必须在查询前统一选路");
+  assert.notEqual((await f.childCall(b, { action: "inspect_integration_state" })).queueState, "absent");
+  assert.equal((await f.execution.inspect({ ...a, workspaceId: b.workspaceId })).terminal, "unknown");
+  await assert.rejects(() => callbacks.request("missing-run", "inspect_integration_state", {}), /repository binding/);
+  await assert.rejects(() => f.execution.inspect({ ...a, rootSessionId: "foreign-root" }), /SESSION_MISMATCH/);
+  // 交错顺序 B→A admission，A→B publish；不能依赖“最近选中的仓库”。
+  const admissions = [];
+  for (const index of [1, 0]) admissions[index] = await f.childCall(refs[index], { action: "await_admission", queue_item_id: queues[index].queueItemId });
+  await assert.rejects(() => callbacks.request(a.runId, "publish", { queueItemId: queues[1].queueItemId, queueLeaseId: admissions[1].queueLeaseId,
+    candidateHead: f.git(workspaces[1].path, "rev-parse", "HEAD") }), /queue|binding|item|lease/i);
+  for (const index of [0, 1]) await f.childCall(refs[index], { action: "publish", queue_item_id: queues[index].queueItemId,
+    queue_lease_id: admissions[index].queueLeaseId, candidate_head: f.git(workspaces[index].path, "rev-parse", "HEAD") });
+  await f.finish(a.runId);
+  await proofEntered;
+  await f.finish(b.runId);
+  assert.equal((await f.execution.inspect(b)).integration, "completed", "A 的 proof 在途时 B 仍可独立结算");
+  let closesA = 0;
+  const closeA = contextA.server.close;
+  contextA.server.close = async () => {
+    if (++closesA === 1) throw new Error("T2 injected A close failure");
+    return closeA();
+  };
+  let closed = false;
+  const closing = f.close().finally(() => { closed = true; });
+  const closeFailed = assert.rejects(closing, /cleanup failed/);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(closed, false, "broker drain 等待 A 的在途 terminal proof");
+  assert.equal(closesA, 0, "proof 排空前不得关闭任何仓库连接");
+  assert.ok(await contextB.client.ping());
+  holdProof();
+  await closeFailed;
+  await assert.rejects(() => stat(contextB.registry.endpoint), /ENOENT/, "B 的成功关闭不因 A 失败回滚");
+  assert.ok(await contextA.registry.read(), "A 保留 registry，允许既有 shutdown-debt 重试");
+  assert.equal(broker.coordinatorRequest, callbacks.request, "单连接失败不卸载全局回调");
+  await assert.rejects(() => callbacks.request(a.runId, "inspect_integration_state", {}), /repository binding/);
+  await assert.rejects(() => callbacks.proof({ runId: b.runId }, {}), /repository binding/);
+  await f.close();
+  assert.equal(closesA, 2);
+  assert.equal(broker.coordinatorRequest, undefined);
+  assert.equal(broker.recordTerminalProof, undefined);
+  for (const [index, repository] of [f.repository, other].entries()) assert.equal(await readFile(join(repository, "result.txt"), "utf8"), `repository-${index}\n`);
+  await f.boot();
+  const restored = await Promise.all(refs.map(ref => f.execution.inspect(ref)));
+  for (const facts of restored) {
+    assert.equal(facts.terminal, "succeeded", JSON.stringify(facts));
+    assert.equal(facts.integration, "completed", JSON.stringify(facts));
+    assert.equal(facts.workspaceState, "released");
+    assert.ok(facts.terminalProofRef && facts.integrationReceiptRef);
+  }
+  assert.notEqual(restored[0].terminalProofRef, restored[1].terminalProofRef);
+  await f.close();
+  const trace = (await readFile(f.traceFile, "utf8")).trim().split("\n").map(JSON.parse);
+  for (const [index, ref] of refs.entries()) {
+    const proof = trace.find(entry => entry.phase === "proof-delivered" && entry.runId === ref.runId);
+    const integrated = trace.find(entry => entry.phase === "integration-observed" && entry.receiptId === restored[index].integrationReceiptRef);
+    assert.equal(proof.storageRepositoryId, integrated.storageRepositoryId);
+    assert.equal(proof.proofId, restored[index].terminalProofRef);
+  }
+});
+
+test("T2 双仓库中 typed resume 保持同 workspace、profile 与 proof 身份", { timeout: 120_000 }, async (t) => {
+  const f = await productionHostFixture(t, false);
+  const other = await f.makeRepository("other");
+  const [source, sibling] = await Promise.all([f.start(other, "resume-B"), f.start(f.repository, "active-A")]);
+  const workspace = f.receipt(source);
+  await writeFile(join(workspace.path, "result.txt"), "resumed-B\n");
+  f.git(workspace.path, "add", "result.txt");
+  f.git(workspace.path, "commit", "-m", "resume B");
+  const queued = await f.childCall(source, { action: "enqueue", authorized_workspace_head: f.git(workspace.path, "rev-parse", "HEAD"), target_ref: "refs/heads/main" });
+  await f.childCall(source, { action: "await_admission", queue_item_id: queued.queueItemId });
+  await f.finish(source.runId);
+  await f.handoff;
+  const before = await f.execution.inspect(source);
+  assert.equal(before.recovery, "typed-resume", JSON.stringify(before));
+  assert.equal((await f.execution.inspect(sibling)).terminal, "pending");
+  const resumed = await f.execution.resume({ previous: source, dispatchKey: "resume-B-child", message: "继续完成 B 集成", ctx: f.context, async onBound() {} });
+  assert.equal(resumed.workspaceId, source.workspaceId);
+  assert.equal(f.receipt(resumed).originRoot, other);
+  assert.equal(f.receipt(resumed).leaseId, workspace.leaseId);
+  assert.equal(f.broker.inspectExecutionProof(resumed.runId).binding.agentProfile, "executor");
+  f.releaseHandoff();
+  const admitted = await f.childCall(resumed, { action: "await_admission", queue_item_id: queued.queueItemId });
+  await f.childCall(resumed, { action: "publish", queue_item_id: queued.queueItemId, queue_lease_id: admitted.queueLeaseId, candidate_head: f.git(workspace.path, "rev-parse", "HEAD") });
+  await Promise.all([f.finish(resumed.runId), f.finish(sibling.runId)]);
+  await f.broker.awaitTerminalProofDeliveries();
+  const after = await f.execution.inspect(resumed);
+  assert.equal(after.integration, "completed", JSON.stringify(after));
+  assert.equal(after.workspaceState, "released");
+  assert.equal(after.terminal, "succeeded");
+  assert.notEqual(after.terminalProofRef, before.terminalProofRef);
+  assert.equal(f.receipt(sibling).originRoot, f.repository);
+  await f.close();
+  await f.boot();
+  assert.deepEqual(await f.execution.inspect(resumed), after);
+  await f.close();
+});
+
+test("T2 B 连接建立失败只清理 B，重试同 identity flight 复用且不覆盖 A 回调", { timeout: 120_000 }, async (t) => {
+  let failB = true;
+  const attempts = [];
+  const f = await productionHostFixture(t, false, {
+    async connect(input) {
+      attempts.push(input.cwd);
+      if (input.cwd.endsWith("/other") && failB) {
+        failB = false;
+        // 已真实 listen 后，在 broker registry 验证边界注入失败；不写 receipt/proof。
+        return connectRuntimeCoordinator({ ...input, pi: { events: null } });
+      }
+      return connectRuntimeCoordinator(input);
+    },
+  });
+  const other = await f.makeRepository("other");
+  const callbacks = [f.broker.coordinatorRequest, f.broker.recordTerminalProof];
+  const [first, failed] = await Promise.allSettled([f.start(f.repository, "healthy-A"), f.start(other, "failed-B")]);
+  assert.equal(first.status, "fulfilled");
+  assert.equal(failed.status, "rejected");
+  assert.match(failed.reason.message, /events identity is invalid/);
+  const { resolveRepositoryIdentity } = await import("../packages/pi-subagents-enhanced/src/workspace/repository-identity.ts");
+  const { createCoordinatorRegistry } = await import("../packages/pi-subagents-enhanced/src/workspace/coordinator-registry.ts");
+  const identity = await resolveRepositoryIdentity(other);
+  const registry = createCoordinatorRegistry({ commonDir: identity.commonDir, stateRoot: f.stateRoot });
+  await assert.rejects(() => stat(registry.endpoint), /ENOENT/, "失败的 B 连接关闭 socket");
+  await assert.rejects(() => stat(`${registry.metadataPath}.lock`), /ENOENT/, "失败的 B 连接释放 claim lock，metadata 仍供审计");
+  assert.equal(f.connections.length, 1);
+  assert.equal((await f.childCall(first.value, { action: "inspect_integration_state" })).workspaceState, "active");
+  const [retry, concurrent] = await Promise.all([f.start(other, "retry-B"), f.start(other, "concurrent-B")]);
+  assert.equal(attempts.filter(root => root === other).length, 2, "首次失败一次，两个并发重试共用一个 flight");
+  assert.equal(f.connections.length, 2);
+  assert.deepEqual([f.broker.coordinatorRequest, f.broker.recordTerminalProof], callbacks);
+  assert.equal(f.receipt(retry).originRoot, other);
+  assert.equal(f.receipt(concurrent).originRoot, other);
+  await Promise.all([first.value, retry, concurrent].map(ref => f.finish(ref.runId)));
+  await f.broker.awaitTerminalProofDeliveries();
+  await f.close();
+  await assert.rejects(() => stat(registry.endpoint), /ENOENT/);
+});
+
+for (const singleRepository of [true, false]) test(`T2 ${singleRepository ? "单仓库保留" : "超级根拒绝"}旧 Goal owner 的分配与绑定边界`, { timeout: 90_000 }, async (t) => {
+  const f = await productionHostFixture(t, singleRepository);
+  const { createManagedWorkspaceRequestV2 } = await import("../packages/pi-subagents-enhanced/src/workspace/contract.ts");
+  const owners = [
+    { kind: "goal-task", rootSessionId: f.rootSessionId, goalId: "legacy-goal", taskId: "legacy-task", attempt: 1, executionRevision: 1 },
+    { kind: "goal-validation", rootSessionId: f.rootSessionId, goalId: "legacy-goal", validationId: "legacy-validation", executionRevision: 1 },
+  ];
+  for (const owner of owners) {
+    const request = createManagedWorkspaceRequestV2({ workspaceId: `workspace-${owner.kind}`, owner,
+      originRoot: f.repository, requestedCwd: f.repository, originRef: "refs/heads/main", baseCommit: f.git(f.repository, "rev-parse", "HEAD"),
+      contractHash: "a".repeat(64), policy: { publication: "forbidden", application: "forbidden", writePaths: [] },
+    });
+    if (!singleRepository) {
+      await assert.rejects(() => f.workspaceService.reserve(request), error => error.code === "HOST_REPOSITORY_BINDING_BLOCKED");
+      await assert.rejects(() => f.workspaceService.ensureAllocated(request), error => error.code === "HOST_REPOSITORY_BINDING_BLOCKED");
+      continue;
+    }
+    const reserved = f.workspaceService.reserve(request);
+    assert.equal(reserved.state, "reserved", "旧同步 service 入口保持同步");
+    const allocated = f.workspaceService.ensureAllocated(request);
+    assert.equal(allocated.state, "active");
+    const run = { runId: `run-${owner.kind}`, asyncDir: join(f.root, `async-${owner.kind}`) };
+    await mkdir(run.asyncDir);
+    const bound = f.workspaceService.bindRun({ workspaceId: request.workspaceId, run });
+    assert.deepEqual(bound.owner, owner);
+    assert.deepEqual(bound.run, run);
+    assert.equal(bound.originRoot, f.repository);
+  }
+  assert.equal(f.connections.length, singleRepository ? 1 : 0);
+  await f.close();
+});
+
+test("T2 shutdown 等待连接 flight，晚到分配拒绝且不泄漏仓库连接", { timeout: 90_000 }, async (t) => {
+  let release;
+  let entered;
+  const connected = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const f = await productionHostFixture(t, false, {
+    cleanup() { release(); },
+    async connected(connection) { entered(); await gate; return connection; },
+  });
+  const broker = f.broker;
+  const starting = f.start(f.repository, "closing-flight");
+  const rejected = assert.rejects(starting, /repository binding/);
+  await connected;
+  let closed = false;
+  const closing = f.close().then(() => { closed = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(closed, false);
+  assert.equal(f.connections.length, 1);
+  release();
+  await Promise.all([rejected, closing]);
+  assert.equal(broker.coordinatorRequest, undefined);
+  assert.equal(broker.recordTerminalProof, undefined);
+  assert.equal(f.runners.size, 0);
+  await assert.rejects(() => stat(f.connections[0].registry.endpoint), /ENOENT/);
+});
+
+test("T1 Host 拓扑准入拒绝别名、嵌套、外部根与 linked worktree", async (t) => {
+  const root = realpathSync(await mkdtemp(join(tmpdir(), "host-t1-topology-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const superRoot = join(root, "super");
+  const repository = join(superRoot, "repository");
+  await mkdir(repository, { recursive: true });
+  const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  git(repository, "init", "-b", "main");
+  git(repository, "config", "user.email", "test@example.com");
+  git(repository, "config", "user.name", "Test");
+  await writeFile(join(repository, "base"), "base\n");
+  git(repository, "add", ".");
+  git(repository, "commit", "-m", "base");
+  assert.match((await admitHostRepositoryOrigin(superRoot, repository)).repositoryId, /^[a-f0-9]{64}$/);
+  const alias = join(superRoot, "alias");
+  await symlink(repository, alias);
+  await assert.rejects(() => admitHostRepositoryOrigin(superRoot, alias));
+  const nested = join(repository, "nested");
+  await mkdir(nested);
+  await assert.rejects(() => admitHostRepositoryOrigin(superRoot, nested));
+  await assert.rejects(() => admitHostRepositoryOrigin(join(root, "super", "repository"), repository));
+  const { createManagedWorkspaceService } = await import("../packages/pi-subagents-enhanced/src/workspace/service.ts");
+  const { createManagedWorkspaceRequestV2 } = await import("../packages/pi-subagents-enhanced/src/workspace/contract.ts");
+  const service = createManagedWorkspaceService({ stateRoot: join(root, "state") });
+  const linked = service.ensureAllocated(createManagedWorkspaceRequestV2({ workspaceId: "topology-linked",
+    owner: { kind: "standalone-subagent", rootSessionId: "topology-owner", toolCallId: "topology" },
+    originRoot: repository, requestedCwd: repository, originRef: "refs/heads/main", baseCommit: git(repository, "rev-parse", "HEAD"), contractHash: "a".repeat(64),
+    policy: { publication: "forbidden", application: "forbidden", writePaths: [] },
+  }));
+  await assert.rejects(() => admitHostRepositoryOrigin(resolve(linked.path, ".."), linked.path));
 });

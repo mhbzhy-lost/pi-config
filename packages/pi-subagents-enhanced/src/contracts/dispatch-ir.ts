@@ -7,6 +7,12 @@ const MAX_STRING_BYTES = 4 * 1024;
 // pi/AGENTS.md 要求派发时必须携带完整信息。超限仍 fail-closed 拒绝。
 // 见 docs/bugs/2026-09-30-dispatch-task-4k-limit.md。
 export const MAX_TASK_BYTES = 32 * 1024;
+// title 是展示字段，title-registry 只接受单行、非空、≤256 字节（合同以该模块为准）。
+// 缺省回退若直接切片 task，多行任务会带换行，导致整次派发被 INVALID_TITLE 拒绝。
+// 见 docs/bugs/2026-10-27-goal-dispatch-multiline-title.md。
+const MAX_TITLE_BYTES = 256;
+const FALLBACK_TITLE_CODEPOINTS = 50;
+const DEFAULT_TITLE = "subagent dispatch";
 // task 经 JSON.stringify 渲染进 prompt 会因转义膨胀，需为最大合法 task 留余量，
 // 避免出现「task 通过校验却被 PROMPT_TOO_LARGE 拒绝」的不一致失败。
 const MAX_PROMPT_BYTES = 128 * 1024;
@@ -44,6 +50,25 @@ function string(value, key, maxBytes = MAX_STRING_BYTES) {
   const result = value.trim(); if (!result) fail("INVALID_CONTRACT", `${key} must not be empty`, key);
   if (Buffer.byteLength(result) > maxBytes) fail("INVALID_CONTRACT", `${key} exceeds ${maxBytes} bytes`, key);
   return result;
+}
+/** 折叠控制符与换行为空格并压缩空白；title 必须是单行文本。 */
+function singleLine(value) { return value.replace(/[\s\u0000-\u001f\u007f-\u009f]+/g, " ").trim(); }
+/** 按 UTF-8 字节截断且不切断码点，避免超出 title-registry 的字节上界。 */
+function truncateBytes(value, maxBytes) {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+  let bytes = 0, kept = "";
+  for (const char of value) {
+    const size = Buffer.byteLength(char, "utf8");
+    if (bytes + size > maxBytes) break;
+    bytes += size; kept += char;
+  }
+  return kept.trim();
+}
+/** 缺省回退：单行化 task 首段；极端全空白/全控制符输入退到 agent，再退到固定文案以保证非空。 */
+function fallbackTitle(agent, task) {
+  return truncateBytes(singleLine(task).slice(0, FALLBACK_TITLE_CODEPOINTS), MAX_TITLE_BYTES)
+    || truncateBytes(singleLine(agent).slice(0, FALLBACK_TITLE_CODEPOINTS), MAX_TITLE_BYTES)
+    || DEFAULT_TITLE;
 }
 function strings(value, key, min = 0, item = string) {
   if (!Array.isArray(value)) fail("INVALID_CONTRACT", `${key} must be an array`, key);
@@ -83,7 +108,7 @@ export function compileDispatchIR(input, options: { cwd?: string; timeoutMs?: nu
   const coding = isCodingDispatch(source);
   if (!coding && Object.hasOwn(source, "acceptance")) fail("CODING_FIELD_WITHOUT_WRITE_PATHS", "acceptance requires writePaths to make this a coding dispatch", "acceptance");
   if (Object.hasOwn(source, "timeoutMs")) fail("INVALID_CONTRACT", "timeoutMs is host-injected and must not be provided", "timeoutMs");
-  const agent = string(source.agent, "agent"), task = string(source.task, "task", MAX_TASK_BYTES), title = source.title === undefined ? task.slice(0, 50) : string(source.title, "title");
+  const agent = string(source.agent, "agent"), task = string(source.task, "task", MAX_TASK_BYTES), title = source.title === undefined ? fallbackTitle(agent, task) : string(source.title, "title");
   const model = source.model === undefined ? undefined : string(source.model, "model", 512);
   const base = { agent, task, title, ...(model === undefined ? {} : { model }) };
   let value: any = { kind: coding ? "coding" : "generic", ...base };

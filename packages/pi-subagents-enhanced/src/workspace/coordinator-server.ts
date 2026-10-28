@@ -246,6 +246,7 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
       workspaceState: completion.workspaceState,
       integrationReceipt: Boolean(receipt && item?.workspaceDispositionReceiptId === receipt.receiptId),
       proofState: completion.proofState,
+      terminalProof: completion.terminalProof,
       revision: item?.revision ?? 0,
     });
   }
@@ -301,7 +302,7 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
   }
   async function deliverTerminalProof(proof: any) {
     const { workspaceId, ownerScope: proofOwnerScope, ...terminalProof } = proof;
-    const item = integrationQueue?.listQueue().filter((entry: any) => entry.workspaceId === workspaceId
+    let item = integrationQueue?.listQueue().filter((entry: any) => entry.workspaceId === workspaceId
       && entry.childRunId === terminalProof.runId && entry.ownerScope?.kind === proofOwnerScope?.kind
       && entry.ownerScope?.rootSessionId === proofOwnerScope?.rootSessionId).at(-1);
     if (item?.dispositionSettlementId && ["cancelled", "preserved"].includes(item.state)) {
@@ -324,6 +325,21 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
         const receipt = settleOwnedDisposition({ workspaceId, ownerScope: proofOwnerScope, terminalProof, actionToken: issued.actionToken }, "discard");
         return { accepted: true, proofId: terminalProof.proofId, receipt };
       }
+      // 官方终局证明已落盘，child 不再执行；仅接续自动集成的机械阶段。
+      // admission/rebase 的原门禁照常执行，冲突或拒绝仍由 durable intent 交接人工。
+      if (item.autoManaged === true && ["queued", "prepared"].includes(item.state)) {
+        try {
+          if (item.state === "queued") {
+            refreshAuthorizedWorkspaceHead(item, trustedWorkspace(binding));
+            advanceAutoIntegration({}, binding);
+          } else {
+            publishRebasedCandidate({ queueItemId: item.queueItemId, queueLeaseId: item.queueLeaseId, candidateHead: item.candidateHead }, binding);
+          }
+        } catch (error) {
+          diagnose({ version: 1, phase: "coordinator-terminal-integration-blocked", error, queueItemId: item.queueItemId });
+        }
+        item = integrationQueue!.getItem(item.queueItemId);
+      }
       // child 在 integration 完成前退出：proof 保持 pending，同时创建/更新
       // durable resume intent；队首 intent 升级后只发送主 Agent 接管提示，
       // 不再调用 upstream resume 拉起已结束的 child。
@@ -331,7 +347,7 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
         integrationQueue!.requestChildResume({ queueItemId: item.queueItemId, sourceRunId: terminalProof.runId, sourceAsyncDir: terminalProof.asyncDir, sourceProofId: terminalProof.proofId });
         await pumpResumeIntents().catch((error) => { diagnose({ version: 1, phase: "coordinator-resume-pump-failed", error, cause: error?.cause }); });
       }
-      throw new Error("terminal proof delivery remains pending until the child integration completes");
+      if (item.state !== "completed") throw new Error("terminal proof delivery remains pending until the child integration completes");
     }
     if (!item) throw new Error("terminal proof requires a completed child integration");
     if (item.childRunId !== terminalProof.runId || item.ownerScope?.rootSessionId !== proofOwnerScope?.rootSessionId) {
@@ -567,8 +583,11 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
   function beginActivity() { retained++; if (timer) { clearTimeout(timer); timer = undefined; } let released = false; return () => { if (released) return; released = true; retained--; schedule(); }; }
   async function finishStartupRecovery() {
     startupReady = false;
-    dispositionSettlement?.replay();
+    // Terminal proof is the authority required by destructive workspace settlement.
+    // Replay it before any prepared disposition can release the worktree; a proof
+    // that remains pending stays in the durable outbox for the next Host.
     await replayTerminalProofs();
+    dispositionSettlement?.replay();
     await pumpResumeIntents();
     startupReady = true;
   }

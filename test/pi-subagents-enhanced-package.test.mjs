@@ -133,6 +133,7 @@ test("pi-subagents-enhanced exposes a publishable pinned package contract", asyn
   assert.deepEqual(manifest.pi.extensions, ["./extensions/subagent-runtime.ts", "./extensions/custom-footer.ts"]);
   assert.deepEqual(manifest.exports, {
     "./dispatch-ir": "./src/contracts/dispatch-ir.ts",
+    "./execution": "./src/execution/index.ts",
     "./host-runtime": "./src/host-runtime/index.ts",
     // F1 新增的合法公开出口：统一后台活动协议/registry 与 package provider，
     // 根与独立消费者均经该 bare specifier 消费，不深引 package src。

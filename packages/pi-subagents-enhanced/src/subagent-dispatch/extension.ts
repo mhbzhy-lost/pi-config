@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { bindPlanExecutionService, getPlanExecutionService, type PlanExecutionService, type PlanRunRef, type PlanRunFacts } from "../execution/index.ts";
 import { execFileSync } from "node:child_process";
 import { closeSync, constants, fstatSync, lstatSync, openSync, realpathSync, writeSync } from "node:fs";
 import path from "node:path";
@@ -139,8 +140,20 @@ const ASYNC_SPAWN_GUIDANCE = "Completion notifications arrive automatically; do 
 const TRACE_PHASES = new Set([
   "tool-entered", "agent-discovery-started", "agent-discovery-finished", "rpc-ping-sent", "rpc-ping-replied",
   "rpc-spawn-sent", "rpc-spawn-replied", "leaf-wait-started", "leaf-wait-finished", "grant-created", "grant-failed",
-  "tool-returned", "tool-failed",
+  "tool-returned", "tool-failed", "workspace-allocated", "workspace-bound",
+  "repository-selected", "integration-observed", "proof-delivered", "proof-pending", "repository-closed",
 ]);
+/** 普通工具、计划服务与 Host 接线共用阶段 trace，不承载正文或凭据。 */
+export function createSubagentDispatchTrace(toolCallId: string, diagnosticSink?: (entry: unknown) => void) {
+  const trace: any = (phase: string, fields = {}) => {
+    try { diagnosticSink?.({ version: 1, toolCallId, phase, monotonicMs: monotonicNowMs(),
+      ...(typeof trace.parentSessionId === "string" ? { parentSessionId: trace.parentSessionId } : {}), ...fields }); }
+    catch { /* 诊断输出不得改变派发结果。 */ }
+  };
+  trace.toolCallId = toolCallId;
+  return trace;
+}
+
 const WORKING_STATE_EVENTS = new Set([
   "host-idle", "completion-received", "ownership-match", "ownership-mismatch", "send-message",
   "delivery-result", "agent-start", "agent-end", "agent-settled", "ui-prompt-start", "ui-prompt-end",
@@ -421,6 +434,7 @@ export function createSubagentDispatchTraceFileSink(file = process.env.PI_SUBAGE
         ...(typeof entry.errorCode === "string" ? { errorCode: entry.errorCode } : {}),
         ...(typeof entry.stage === "string" ? { stage: entry.stage } : {}),
         ...(typeof entry.timestamp === "string" ? { timestamp: entry.timestamp } : {}),
+        ...Object.fromEntries(["requestOrigin", "repositoryId", "storageRepositoryId", "workspaceId", "leaseId", "runId", "queueState", "proofId", "receiptId"].filter(key => typeof entry[key] === "string").map(key => [key, entry[key]])),
         ...(negotiation === undefined ? {} : { negotiation }),
       }
       : typeof entry.hostSessionId === "string" && typeof entry.completionOwnerId === "string" && WORKING_STATE_EVENTS.has(entry.event)
@@ -967,7 +981,7 @@ async function standaloneWorkspaceRequest({ input, ctx, toolCallId, kind, contra
   const requestedCwd = path.resolve(ctx.cwd, rawCwd);
   let canonicalRequestedCwd = requestedCwd;
   try { canonicalRequestedCwd = realpathSync(requestedCwd); } catch { /* injected/fake origins may not exist until the service allocates them */ }
-  const originRoot = await resolveCanonicalOrigin({ requestedCwd: canonicalRequestedCwd, ctx });
+  const originRoot = await resolveCanonicalOrigin({ requestedCwd, ctx });
   const source = await inspectWorkspaceSource({ originRoot, requestedCwd, ctx });
   return createManagedWorkspaceRequestV2({
     workspaceId: createId(),
@@ -1024,7 +1038,7 @@ export function preparePublicCodingDispatch(input, { cwd, timeoutMs }) {
 
 }
 
-async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, configuredGoalCoordinator, workflowChildStartTimeoutMs, configuredWorkspaceService, resolveCanonicalOrigin, resolveRootSessionId, registerAuthorizedRun, inspectWorkspaceSource, discover, trace, providerBlacklist) {
+async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleRegistry, prepareCodingSpawn, resolveCodingSpawnIdentity, configuredGoalCoordinator, workflowChildStartTimeoutMs, configuredWorkspaceService, resolveCanonicalOrigin, resolveRootSessionId, registerAuthorizedRun, inspectWorkspaceSource, discover, trace, providerBlacklist, lifecycle?: Pick<Parameters<PlanExecutionService["start"]>[0], "onAllocated" | "onBound">) {
   const spawnedRunIds: string[] = [];
   // thinkingLevel 是执行参数而非任务合同：不进入 IR/contractHash，
   // 只透传到 spawn 的 child.thinking（与 model 选择器同一消费层）。
@@ -1059,6 +1073,7 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
 
     ticket = await goalCoordinator?.prepareSpawn(bindingRequest);
   }
+  if (lifecycle && ticket) throw new Error("PLAN_STANDALONE_OWNER_REQUIRED");
   const selection = await resolveSpawnModel(ir, ctx, discover, trace, providerBlacklist);
   const selectedIr = selection.model === undefined ? ir : { ...ir, model: selection.model };
   let workspaceRequest;
@@ -1081,11 +1096,14 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
   const workspaceService = workspaceRequest ? requireWorkspaceService(pi, configuredWorkspaceService, rootSessionId) : undefined;
   trace.stage = "preallocate";
   let workspace = workspaceRequest ? await workspaceService.ensureAllocated(workspaceRequest) : undefined;
+  if (workspace) trace("workspace-allocated", { requestOrigin: workspace.originRoot, workspaceId: workspace.workspaceId, leaseId: workspace.leaseId });
+  if (lifecycle && workspace) await lifecycle.onAllocated(workspace.workspaceId);
   if (ticket) {
     await goalCoordinator.workspaceAllocated(ticket, workspace);
     await goalCoordinator.confirmSpawn(ticket, workspace);
   }
-  const orchestratorCwd = workspace?.originRoot ?? ctx.cwd;
+  // RPC 属于当前 Host；工作区 origin 只决定 child 的仓库身份。
+  const orchestratorCwd = ctx.cwd;
   const runtimeIr = workspace ? { ...selectedIr, cwd: workspace.dispatchCwd, worktree: true, orchestratorCwd } : selectedIr;
   const runtimePrompt = renderDispatchPrompt(runtimeIr);
   trace.stage = "rpc-ping";
@@ -1221,6 +1239,8 @@ async function executeCoding(pi, toolCallId, input, ctx, rpc, createId, titleReg
     }
     await goalCoordinator.bindSpawn(ticket, authoritativeBinding);
   }
+  if (workspace) trace("workspace-bound", { requestOrigin: workspace.originRoot, workspaceId: workspace.workspaceId, leaseId: workspace.leaseId, runId: binding.runId });
+  if (lifecycle && workspace) await lifecycle.onBound({ runId: binding.runId, workspaceId: workspace.workspaceId, rootSessionId });
   titleRegistry.remember(binding.runId, ir.title);
   const handle = {
     version: "coding-dispatch-handle.v1",
@@ -2010,7 +2030,12 @@ type TypedSubagentExtensionOptions = {
     activate: (input: { plan: any; resumedRun: { runId: string; asyncDir: string; sessionId: string; pid: number; agentProfile: string } }) => Promise<unknown> | unknown;
   };
   inspectExecutionProof?: (runId: string) => unknown;
-  resolveCanonicalOrigin?: typeof defaultCanonicalOrigin;
+  planExecution?: {
+    inspect(ref: PlanRunRef): Promise<PlanRunFacts>;
+    subscribe(listener: (runId: string) => void): () => void;
+    notify(runId: string): void;
+  };
+  resolveCanonicalOrigin?: (input: { requestedCwd: string; ctx: any }) => string | Promise<string>;
   inspectWorkspaceSource?: typeof defaultWorkspaceSource;
   discoverAgents?: typeof defaultDiscoverAgents;
   providerBlacklist?: readonly string[];
@@ -2050,6 +2075,7 @@ export function createTypedSubagentExtension(
     resolveRootSessionId,
     registerAuthorizedRun,
     managedCodingResume,
+    planExecution,
     resolveCanonicalOrigin = defaultCanonicalOrigin,
     inspectWorkspaceSource = defaultWorkspaceSource,
     discoverAgents: discover = defaultDiscoverAgents,
@@ -2107,8 +2133,13 @@ export function createTypedSubagentExtension(
     && runtimeIdentity?.manager === ctx.sessionManager
     && runtimeIdentity.sessionId === ctx.sessionManager.getSessionId()
     && runtimeIdentity.cwd === ctx.cwd;
+  let unbindExecution: (() => void) | undefined;
+  const executionSubscriptions = new Set<() => void>();
   const closeCatalog = () => {
     closing = true;
+    unbindExecution?.();
+    for (const unsubscribe of executionSubscriptions) unsubscribe();
+    executionSubscriptions.clear();
     catalog.invalidate();
   };
   const resources = [
@@ -2143,6 +2174,128 @@ export function createTypedSubagentExtension(
     }
   };
 
+  // 仅由真实 Host 提供事实面；原工具与计划服务共用上述派发/控制闭包。
+  const bindExecution = (context: ExtensionContext) => {
+    if (!planExecution || !resolveRootSessionId) return;
+    const rootSessionId = resolveRootSessionId(context.sessionManager);
+    const assertCurrent = (ctx: ExtensionContext = context) => {
+      if (!matchesRuntime(ctx) || resolveRootSessionId(ctx.sessionManager) !== rootSessionId
+          || getPlanExecutionService(pi, rootSessionId) !== service) {
+        throw new Error("PLAN_EXECUTION_SESSION_UNAVAILABLE");
+      }
+    };
+    // 只去重本代在途调用；失败保留原 Promise，绝不据异常推断未 spawn。
+    // 跨 reload 的 intent/run 由调用方 session 状态保存，不新建资源账本。
+    const knownRuns = new Map<string, PlanRunRef>();
+    const dispatches = new Map<string, { digest: string; result: Promise<PlanRunRef> }>();
+    const once = (key: string, payload: unknown, execute: () => Promise<PlanRunRef>) => {
+      if (!nonempty(key)) throw new Error("PLAN_DISPATCH_KEY_REQUIRED");
+      const digest = createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+      const previous = dispatches.get(key);
+      if (previous) {
+        if (previous.digest !== digest) throw new Error("PLAN_DISPATCH_KEY_CONFLICT");
+        return previous.result;
+      }
+      const result = Promise.resolve().then(execute);
+      dispatches.set(key, { digest, result });
+      return result;
+    };
+    const service: PlanExecutionService = Object.freeze({
+      start(input: Parameters<PlanExecutionService["start"]>[0]) {
+        assertCurrent(input.ctx);
+        if (input.request.worktree !== true) throw new Error("PLAN_MANAGED_WORKSPACE_REQUIRED");
+        return once(input.dispatchKey, { kind: "start", request: input.request }, async () => {
+          const trace = createSubagentDispatchTrace(input.dispatchKey, diagnosticSink);
+          trace("tool-entered");
+          let bound: PlanRunRef | undefined;
+          try {
+            await executeCoding(pi, input.dispatchKey, input.request, input.ctx, rpc, createId, titleRegistry,
+              prepareCodingSpawn, resolveCodingSpawnIdentity, goalExecutorCoordinator, workflowChildStartTimeoutMs,
+              workspaceService, resolveCanonicalOrigin, resolveRootSessionId, registerAuthorizedRun,
+              inspectWorkspaceSource, discover, trace, providerBlacklist, {
+                async onAllocated(workspaceId) {
+                  assertCurrent(input.ctx);
+                  await input.onAllocated(workspaceId);
+                  assertCurrent(input.ctx);
+                  // allocation 尚无 runId；最终 binding 后再通知该 run。
+                },
+                async onBound(ref) {
+                  assertCurrent(input.ctx);
+                  bound = ref;
+                  knownRuns.set(ref.runId, ref);
+                  try { await input.onBound(ref); } finally { planExecution.notify(ref.runId); }
+                },
+              });
+            trace("tool-returned");
+          } catch (error) {
+            trace("tool-failed", { stage: trace.stage, errorCode: error?.code ?? "PLAN_DISPATCH_FAILED" });
+            throw error;
+          }
+          if (!bound) throw new Error("PLAN_RUN_BINDING_UNKNOWN");
+          return bound;
+        });
+      },
+      resume(input: Parameters<PlanExecutionService["resume"]>[0]) {
+        assertCurrent(input.ctx);
+        if (!nonempty(input.message) || input.previous.rootSessionId !== rootSessionId) throw new Error("PLAN_RESUME_INVALID");
+        return once(input.dispatchKey, { kind: "resume", previous: input.previous, message: input.message }, async () => {
+          const facts = await service.inspect(input.previous);
+          if (facts.recovery !== "typed-resume" || !managedCodingResume) throw new Error(facts.blocker ?? "PLAN_RESUME_BLOCKED");
+          const guardedResume = {
+            ...managedCodingResume,
+            async prepare(request) {
+              const current = await service.inspect(input.previous);
+              if (current.recovery !== "typed-resume" || current.terminalProofRef !== facts.terminalProofRef) {
+                throw new Error(current.blocker ?? "PLAN_RESUME_BLOCKED");
+              }
+              const plan = await managedCodingResume.prepare(request);
+              assertCurrent(input.ctx);
+              if (!plan || plan.intent.workspaceId !== input.previous.workspaceId
+                  || plan.intent.sourceProofId !== facts.terminalProofRef) throw new Error("PLAN_RESUME_BINDING_UNKNOWN");
+              return plan;
+            },
+          };
+          const reply = await executeControl({ action: "resume", id: input.previous.runId, index: 0, message: input.message },
+            rpc, supervisorControlPlane, input.dispatchKey, discover, input.ctx, resolveRootSessionId,
+            diagnosticSink, titleRegistry, guardedResume);
+          if (reply?.isError) throw new Error(reply.details?.code ?? "PLAN_RESUME_BINDING_UNKNOWN");
+          const runId = reply?.details?.runId ?? reply?.details?.asyncId;
+          if (!nonempty(runId) || runId === input.previous.runId) throw new Error("PLAN_RESUME_BINDING_UNKNOWN");
+          const ref = { ...input.previous, runId };
+          knownRuns.set(runId, ref);
+          assertCurrent(input.ctx);
+          // executeControl 已等待新 PID register 与 coordinator activate 的全部后置门禁。
+          try { await input.onBound(ref); } finally { planExecution.notify(runId); }
+          return ref;
+        });
+      },
+      async inspect(ref: PlanRunRef) {
+        assertCurrent();
+        if (ref.rootSessionId !== rootSessionId) throw new Error("PLAN_EXECUTION_SESSION_MISMATCH");
+        knownRuns.set(ref.runId, { ...ref });
+        const facts = await planExecution.inspect(ref);
+        assertCurrent();
+        return facts;
+      },
+      subscribe(listener: (runId: string) => void) {
+        assertCurrent();
+        let active = true;
+        const notify = (runId: string) => {
+          if (active && matchesRuntime(context) && getPlanExecutionService(pi, rootSessionId) === service) listener(runId);
+        };
+        const unsubscribe = planExecution.subscribe(notify);
+        const disposeSubscription = () => { active = false; unsubscribe(); executionSubscriptions.delete(disposeSubscription); };
+        executionSubscriptions.add(disposeSubscription);
+        // 先订阅再复查本代已知引用；重启后调用方还需 inspect session 恢复的引用。
+        for (const ref of knownRuns.values()) {
+          void service.inspect(ref).then(() => notify(ref.runId), () => notify(ref.runId));
+        }
+        return disposeSubscription;
+      },
+    });
+    unbindExecution = bindPlanExecutionService(pi, rootSessionId, service);
+  };
+
   const tool = {
     name: "subagent",
     exposure: "model-only" as const,
@@ -2159,19 +2312,7 @@ export function createTypedSubagentExtension(
     ...(typeof renderSubagentCall === "function" ? { renderCall: renderSubagentCall } : {}),
     ...(typeof renderSubagentResult === "function" ? { renderResult: renderSubagentResult } : {}),
     async execute(toolCallId, input, _signal, _onUpdate, ctx) {
-      const trace: any = (phase, fields = {}) => {
-        if (typeof diagnosticSink !== "function") return;
-        const entry = {
-          version: 1,
-          toolCallId,
-          phase,
-          monotonicMs: Math.floor(Number(process.hrtime.bigint() / 1_000_000n)),
-          ...(typeof trace.parentSessionId === "string" ? { parentSessionId: trace.parentSessionId } : {}),
-          ...fields,
-        };
-        try { diagnosticSink(entry); } catch { /* 诊断输出不得改变派发结果。 */ }
-      };
-      trace.toolCallId = toolCallId;
+      const trace = createSubagentDispatchTrace(toolCallId, diagnosticSink);
       trace("tool-entered");
       try {
         if (!isRecord(input)) {
@@ -2463,6 +2604,7 @@ export function createTypedSubagentExtension(
         await catalog.initialize(ctx);
         if (!matchesRuntime(ctx)) return;
         started = true;
+        bindExecution(ctx);
       })();
       try {
         return await startFlight;

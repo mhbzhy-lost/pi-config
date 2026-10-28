@@ -299,10 +299,47 @@ test("resume intent 按重启持久化并保持 owner scope 过滤", async (t) =
     } catch {}
   });
   await coordinator2.listen();
+  // 恢复后立即建立真实 client，避免隔离测试的同步 Git 操作耗尽空闲关闭窗口。
+  const nextClient = await connectRealClient({ ...f, coordinator: coordinator2 }, "root-a");
+  t.after(() => nextClient.close());
   const restored = coordinator2.internal.integrationQueue.listResumeIntents();
   assert.equal(restored.length, 1);
   assert.equal(restored[0].resumeIntentId, intents[0].resumeIntentId);
   assert.equal(restored[0].state, "pending");
   assert.equal(restored[0].delivery.state, "delivered");
   assert.equal(restartSink.length, 0, "已 delivered 的 intent 不重复投递");
+  // 同 Host 的前计划队首先完成，随后自动项的官方 proof 消费应接续机械集成。
+  // 保留上面的手动队列语义；先以原准入/发布入口闭合该手动项。
+  coordinator2.internal.advanceAutoIntegration({}, follower.binding);
+  const nextFixture = { ...f, coordinator: coordinator2, baseCommit: git(f.originRoot, "rev-parse", "HEAD") };
+  const nextHead = await allocateCandidate(nextFixture, "next-head", "root-a", "next-head.txt");
+  const nextChild = await allocateCandidate(nextFixture, "next-child", "root-a", "next-child.txt");
+  const nextHeadItem = enqueue(nextFixture, nextHead);
+  const prepared = await nextClient.prepareAutoIntegration(nextChild.binding);
+  const proof = terminalProof(nextFixture, nextChild, 8);
+  await assert.rejects(() => nextClient.recordTerminalProof({ workspaceId: nextChild.binding.workspaceId, ownerScope: nextChild.binding.ownerScope, proof }), /pending/);
+  const pending = coordinator2.internal.integrationQueue.listResumeIntents().find(entry => entry.queueItemId === prepared.queueItem.queueItemId);
+  assert.equal(pending.state, "waiting-head");
+  const admission = coordinator2.internal.awaitIntegrationAdmission(nextHeadItem.queueItemId, nextHead.binding);
+  git(nextHead.receipt.path, "rebase", admission.targetHead);
+  coordinator2.internal.publishRebasedCandidate({ queueItemId: nextHeadItem.queueItemId, queueLeaseId: admission.queueLeaseId,
+    candidateHead: git(nextHead.receipt.path, "rev-parse", "HEAD") }, nextHead.binding);
+  // 等待既有队首完成的 replay；不靠再次提交 proof 推进。
+  for (let attempt = 0; attempt < 100 && (await coordinator2.proofOutbox.status(proof.proofId)).state !== "delivered"; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal((await coordinator2.proofOutbox.status(proof.proofId)).state, "delivered");
+  assert.equal(coordinator2.internal.integrationQueue.getItem(prepared.queueItem.queueItemId).state, "completed");
+  assert.equal(coordinator2.internal.integrationQueue.listResumeIntents().find(entry => entry.resumeIntentId === pending.resumeIntentId).state, "completed");
+  assert.equal(coordinator2.internal.inspectIntegrationState(nextChild.binding).workspaceState, "released");
+  // 自动项仍受 dirty 门禁约束：终局 proof 不得把未提交内容冒充交付。
+  const dirty = await allocateCandidate({ ...nextFixture, baseCommit: git(f.originRoot, "rev-parse", "HEAD") }, "dirty-child", "root-a", "dirty-child.txt");
+  const dirtyItem = await nextClient.prepareAutoIntegration(dirty.binding);
+  await writeFile(join(dirty.receipt.path, "src", "dirty-child.txt"), "未提交的变更\n");
+  await assert.rejects(() => nextClient.recordTerminalProof({ workspaceId: dirty.binding.workspaceId, ownerScope: dirty.binding.ownerScope,
+    proof: terminalProof(nextFixture, dirty, 7) }), /pending/);
+  assert.equal(coordinator2.internal.integrationQueue.getItem(dirtyItem.queueItem.queueItemId).state, "queued");
+  const handoff = coordinator2.internal.integrationQueue.listResumeIntents().find(entry => entry.queueItemId === dirtyItem.queueItem.queueItemId);
+  assert.equal(handoff.state, "pending"); assert.equal(handoff.delivery.state, "delivered");
+  assert.equal(coordinator2.internal.inspectIntegrationState(dirty.binding).workspaceState, "active");
 });

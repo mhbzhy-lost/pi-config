@@ -198,6 +198,32 @@ export class RootBrokerServer {
   goalAuthorities = new Map<string, Readonly<GoalBindingSidecar>>();
   facadeRuns = new Map<string, FacadeRun>();
   terminalProofs = new Map<string, any>();
+  private executionFactListeners = new Set<(runId: string) => void>();
+  private executionFactNotifications = new Set<string>();
+  private executionFactDeliveries = new Set<string>();
+
+  subscribeExecutionFacts(listener: (runId: string) => void): () => void {
+    this.executionFactListeners.add(listener);
+    return () => { this.executionFactListeners.delete(listener); };
+  }
+
+  notifyExecutionFacts(runId: string): void {
+    if (this.executionFactNotifications.has(runId)) return;
+    this.executionFactNotifications.add(runId);
+    queueMicrotask(() => {
+      this.executionFactNotifications.delete(runId);
+      for (const listener of this.executionFactListeners) {
+        try { listener(runId); } catch { /* 失效提示不改变权威处理结果。 */ }
+      }
+    });
+  }
+
+  hasExecutionFactWakeup(runId: string): boolean {
+    const run = this.ownedRuns.get(runId);
+    return !this.closed && this.executionFactListeners.size > 0 && run?.identityState === "verified"
+      && (!this.terminalProofs.has(runId) || this.executionFactDeliveries.has(runId));
+  }
+
   terminalConflicts = new Set<string>();
   forcePendingRuns = new Set<string>();
   terminalWaiters = new Map<string, Set<(proof: any) => void>>();
@@ -585,10 +611,9 @@ export class RootBrokerServer {
     this.goalAuthorities.set(value.runId, existing ?? registered);
   }
 
-  // The sole file-backed terminal authority: secure sidecar read, protocol
-  // parse/accept, then lifecycle wrappers project the in-memory snapshot.
-  readAndAcceptOfficialTerminalArtifact(run: OwnedRun) {
-    const file = path.join(run.asyncDir, "process-terminal.json");
+  // live 与恢复读取复用同一安全文件边界；读取本身不授予 run 权限。
+  private readOfficialTerminalArtifact(asyncDir: string) {
+    const file = path.join(asyncDir, "process-terminal.json");
     const safeStat = (stat: ReturnType<typeof lstatSync>) => {
       const mode = Number(stat.mode) & 0o777;
       if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (mode !== 0o600 && mode !== 0o644)
@@ -600,7 +625,33 @@ export class RootBrokerServer {
     try { opened = fstatSync(fd); safeStat(opened); bytes = readFileSync(fd); } finally { closeSync(fd); }
     const after = this.lstat(file); safeStat(after);
     if (before.dev !== opened.dev || before.ino !== opened.ino || after.dev !== opened.dev || after.ino !== opened.ino || opened.size !== bytes.length) throw new Error("official terminal artifact changed while reading");
-    const value = JSON.parse(bytes.toString("utf8"));
+    return JSON.parse(bytes.toString("utf8"));
+  }
+
+  /** 仅重建终局事实；调用方提供经 coordinator 验证的持久化 workspace/proof 绑定。 */
+  async inspectPersistedTerminalProof(record: any, persisted: any) {
+    const run = record?.run;
+    if (this.closed || record?.owner?.kind !== "standalone-subagent" || record.owner.rootSessionId !== this.rootSessionId
+        || !run?.runId || typeof run.asyncDir !== "string" || !path.isAbsolute(run.asyncDir)
+        || persisted?.state !== "observed" || persisted.conflict !== false
+        || persisted.rootSessionId !== this.rootSessionId || persisted.runId !== run.runId || persisted.asyncDir !== run.asyncDir) {
+      throw new Error("PLAN_PERSISTED_PROOF_BINDING_INVALID");
+    }
+    const owner = await this.readOwnerReceipt(run.runId);
+    if (owner.rootSessionId !== this.rootSessionId || owner.runId !== run.runId) throw new Error("PLAN_PERSISTED_OWNER_INVALID");
+    const value = this.readOfficialTerminalArtifact(run.asyncDir);
+    const { runId, ...terminal } = value;
+    parseProcessTerminal(terminal);
+    if (this.closed || runId !== run.runId || terminal.state !== "observed"
+        || terminal.runnerProcessInstanceId !== persisted.processInstance || proofId(value) !== persisted.proofId) {
+      throw new Error("PLAN_PERSISTED_PROOF_MISMATCH");
+    }
+    return frozen({ proofId: persisted.proofId,
+      outcome: terminal.instances.every((instance: any) => instance.exitCode === 0 && instance.signal === null) ? "succeeded" as const : "failed" as const });
+  }
+
+  readAndAcceptOfficialTerminalArtifact(run: OwnedRun) {
+    const value = this.readOfficialTerminalArtifact(run.asyncDir);
     if (value?.state === 'pending') {
       const { runId, ...terminal } = value;
       if (runId !== run.runId) throw new Error('official terminal runId mismatch');
@@ -702,7 +753,10 @@ export class RootBrokerServer {
     const accepted = frozen(structuredClone({ runId: run.runId, ...terminal }));
     const existing = this.terminalProofs.get(run.runId);
     if (existing) {
-      if (proofId(existing) !== proofId(accepted)) this.terminalConflicts.add(run.runId);
+      if (proofId(existing) !== proofId(accepted)) {
+        this.terminalConflicts.add(run.runId);
+        this.notifyExecutionFacts(run.runId);
+      }
       return existing;
     }
     this.terminalProofs.set(run.runId, accepted);
@@ -721,11 +775,13 @@ export class RootBrokerServer {
     // must reach the coordinator proof sink, and a failure must stay
     // observable as pending or as proof debt instead of being swallowed.
     if (this.recordTerminalProof) this.trackTerminalProofDelivery(run, accepted);
+    this.notifyExecutionFacts(run.runId);
     return accepted;
   }
 
   trackTerminalProofDelivery(run: OwnedRun | FacadeRun, proof: any) {
     this.terminalProofDelivery.set(run.runId, frozen({ state: "pending", reason: "coordinator proof sink delivery is in flight" }));
+    this.executionFactDeliveries.add(run.runId);
     const attempt = (async () => {
       // A conflicting official terminal cannot be delivered as an outcome.
       if (this.terminalConflicts.has(run.runId)) {
@@ -739,7 +795,10 @@ export class RootBrokerServer {
         this.terminalProofDelivery.set(run.runId, frozen({ state: "debt", reason }));
       }
     })();
-    this.terminalProofDeliveries.set(run.runId, attempt.catch(() => undefined));
+    this.terminalProofDeliveries.set(run.runId, attempt.catch(() => undefined).finally(() => {
+      this.executionFactDeliveries.delete(run.runId);
+      this.notifyExecutionFacts(run.runId);
+    }));
   }
 
   trackTerminalLeaseRelease(run: OwnedRun) {
@@ -750,6 +809,8 @@ export class RootBrokerServer {
         await this.authorityStore!.releaseLease({ runId: run.runId, leaseId: lease.leaseId, ownerGeneration: lease.ownerGeneration, processBirth: run.birthIdentity ?? lease.processBirth, expectedRevision: lease.revision });
       } catch (error) {
         this.leaseReleaseDebt.set(run.runId, error instanceof Error ? error.message : String(error));
+      } finally {
+        this.notifyExecutionFacts(run.runId);
       }
     })();
     this.leaseReleasePromises.set(run.runId, release);
@@ -1224,6 +1285,7 @@ export class RootBrokerServer {
       generation: event?.generation, handoff: event?.handoff, delivery: { state: "delivered" } });
     this.recoveryNotifications.push(safe);
     const callerRunId = typeof event?.runId === "string" ? event.runId : undefined;
+    if (callerRunId) this.notifyExecutionFacts(callerRunId);
     const sockets = callerRunId ? this.subscriptions.get(callerRunId) : undefined;
     if (!sockets || sockets.size === 0) {
       this.recoveryNotificationDebt.push({ ...safe, delivery: { state: "debt", reason: "root-not-subscribed" } });
@@ -1320,7 +1382,11 @@ export class RootBrokerServer {
           return failure(request, "coordinator_unavailable", "Repository coordinator is unavailable");
         }
         if (!COORDINATOR_OPERATIONS.includes(request.params.operation)) return failure(request, "unsupported_coordinator_operation", "Coordinator operation is unsupported");
-        return createBrokerSuccessResponse({ ...request, data: await this.coordinatorRequest(request.callerRunId, request.params.operation, request.params.input) });
+        try {
+          return createBrokerSuccessResponse({ ...request, data: await this.coordinatorRequest(request.callerRunId, request.params.operation, request.params.input) });
+        } finally {
+          this.notifyExecutionFacts(request.callerRunId);
+        }
       }
       return failure(request, "unsupported", `Broker method ${request.method} is unsupported`);
     } catch (error) {

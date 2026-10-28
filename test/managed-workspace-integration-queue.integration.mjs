@@ -190,7 +190,7 @@ test("trusted completion projection reports absent queue and durably preserves e
   const f = await fixture(t);
   const candidate = await allocateCandidate(f, "guard", "root-guard", "guard.txt");
   const absent = f.coordinator.internal.inspectIntegrationState(candidate.binding);
-  assert.deepEqual(absent, { queueState: "absent", workspaceState: "active", integrationReceipt: false, proofState: "absent", revision: 0 });
+  assert.deepEqual(absent, { queueState: "absent", workspaceState: "active", integrationReceipt: false, proofState: "absent", terminalProof: null, revision: 0 });
   const preserved = f.coordinator.internal.preserveIntegrationDebt(candidate.binding);
   assert.equal(preserved.queueState, "absent");
   assert.equal(preserved.workspaceState, "preserved");

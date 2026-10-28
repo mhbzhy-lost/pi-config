@@ -20,6 +20,8 @@ import { createManagedWorkspaceRequestV2 } from "../packages/pi-subagents-enhanc
 import { createCoordinatorServer } from "../packages/pi-subagents-enhanced/src/workspace/coordinator-server.ts";
 import { connectRepositoryCoordinator } from "../packages/pi-subagents-enhanced/src/workspace/coordinator-client.ts";
 import { createManagedWorkspaceLedger } from "../packages/pi-subagents-enhanced/src/workspace/ledger.ts";
+import { createCoordinatorDispositionFacade } from "../packages/pi-subagents-enhanced/src/workspace/disposition-facade.ts";
+import { createManagedWorkspaceService } from "../packages/pi-subagents-enhanced/src/workspace/service.ts";
 
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 const sha64 = (value) => value.repeat(64);
@@ -33,7 +35,7 @@ function repositoryIdOf(originRoot) {
 async function fixture(t, options = {}) {
   const root = await mkdtemp(join(tmpdir(), "disp-settle-"));
   const originRoot = join(root, "origin");
-  const stateRoot = join(root, "state");
+  const stateRoot = options.stateRoot ?? join(root, "state");
   await mkdir(join(originRoot, "src"), { recursive: true });
   git(originRoot, "init", "-b", "main");
   git(originRoot, "config", "user.email", "test@example.com");
@@ -86,7 +88,7 @@ async function fixture(t, options = {}) {
       });
     },
     record: (workspaceId) => createManagedWorkspaceLedger({ stateRoot }).load(workspaceId).record,
-    /** 新建 coordinator 并 listen()：listen 内部执行 settlement replay → proof replay → resume pump → ready。 */
+    /** 新建 coordinator 并 listen()：listen 内部执行 proof replay → settlement replay → resume pump → ready。 */
     async restart(name) { const next = create(name); await next.listen(); return next; },
     createOnly(name) { return create(name); },
     async connect(coordinatorInstance, rootSessionId) {
@@ -116,20 +118,25 @@ async function allocate(f, workspaceId, rootSessionId, { commit = true, queue = 
     originRef: "refs/heads/main",
     baseCommit: f.baseCommit,
     contractHash: sha64("a"),
-    policy: { publication: "allowed", application: "allowed", writePaths: ["src/**"] },
+    policy: { publication: "allowed", application: "allowed", writePaths: [`src/${workspaceId}.txt`] },
   }));
   const asyncDir = join(f.root, `async-${workspaceId}`);
   await mkdir(asyncDir, { recursive: true });
   const run = { runId: `run-${workspaceId}`, asyncDir };
   service.bindRun({ workspaceId, run });
   if (commit) {
-    await writeFile(join(receipt.path, "src", `${workspaceId}.txt`), `${workspaceId}\n`);
+    // 与已有 base.txt 内容相同：真实 Git 产生 C100，未修改的复制源不属于写范围。
+    await writeFile(join(receipt.path, "src", `${workspaceId}.txt`), "base\n");
     git(receipt.path, "add", ".");
     git(receipt.path, "commit", "-m", workspaceId);
   }
   const head = git(receipt.path, "rev-parse", "HEAD");
   const ownerScope = { kind: "standalone-subagent", rootSessionId };
   const binding = { workspaceId, leaseId: receipt.leaseId, runId: run.runId, ownerScope };
+  if (commit) {
+    assert.match(git(receipt.path, "diff", "--name-status", "--find-renames", "--find-copies-harder", `${f.baseCommit}..${head}`), /^C100\s+src\/base\.txt\s+/);
+    assert.equal(service.integrationAdmissionFacts({ workspaceId, leaseId: receipt.leaseId, targetRef: "refs/heads/main", authorizedWorkspaceHead: head }, binding).targetHead, f.baseCommit);
+  }
   const terminalProof = { state: "observed", conflict: false, runId: run.runId, rootSessionId, asyncDir, processInstance: `runner-${workspaceId}`, proofId: sha64("e") };
   let item = null;
   if (queue) {
@@ -167,6 +174,48 @@ const WINDOWS = [
   { phase: "before-settlement-receipt", operation: "discard", queue: true },
   { phase: "after-settlement-receipt", operation: "preserve", queue: false },
 ];
+
+test("T2 disposition facade 依同 owner 回执选择 client，双分区独立处置且拒绝错 client", async (t) => {
+  const a = await fixture(t);
+  const b = await fixture(t, { stateRoot: a.stateRoot });
+  await Promise.all([a.coordinator.listen(), b.coordinator.listen()]);
+  const rootSessionId = "facade-dual-owner";
+  const [clientA, clientB] = await Promise.all([a.connect(a.coordinator, rootSessionId), b.connect(b.coordinator, rootSessionId)]);
+  const [workspaceA, workspaceB] = await Promise.all([
+    allocate(a, "facade-A", rootSessionId, { commit: false }),
+    allocate(b, "facade-B", rootSessionId, { commit: false }),
+  ]);
+  const localService = createManagedWorkspaceService({ stateRoot: a.stateRoot });
+  const originA = workspaceA.receipt.originRoot;
+  const originB = workspaceB.receipt.originRoot;
+  const selected = [];
+  const facade = createCoordinatorDispositionFacade({ localService, async resolveCoordinatorClient(entry) {
+    selected.push(entry.originRoot);
+    if (entry.originRoot === originA) return clientA;
+    if (entry.originRoot === originB) return clientB;
+    throw new Error("unknown origin");
+  } });
+  assert.equal((await clientA.listOwned({ runId: workspaceB.run.runId }))[0].originRoot, originB,
+    "A 查询会返回 B 回执；路由必须先于远端查询");
+  const inputA = { workspaceId: workspaceA.receipt.workspaceId, ownerScope: workspaceA.ownerScope };
+  const inputB = { workspaceId: workspaceB.receipt.workspaceId, ownerScope: workspaceB.ownerScope };
+  const [issuedA, issuedB] = await Promise.all([facade.issueOwnedDisposition(inputA), facade.issueOwnedDisposition(inputB)]);
+  const wrong = createCoordinatorDispositionFacade({ localService, coordinatorClient: clientA });
+  await assert.rejects(() => wrong.disposeOwned({ ...inputB, actionToken: issuedB.actionToken, disposition: "preserve", reason: "保留 B" }), /ENOENT|binding|workspace|partition/i);
+  await assert.rejects(() => facade.issueOwnedDisposition({ ...inputB, ownerScope: { kind: "standalone-subagent", rootSessionId: "foreign-owner" } }), /owner/);
+  await Promise.all([
+    facade.disposeOwned({ ...inputB, actionToken: issuedB.actionToken, disposition: "preserve", reason: "保留 B" }),
+    facade.disposeOwned({ ...inputA, actionToken: issuedA.actionToken, disposition: "preserve", reason: "保留 A" }),
+  ]);
+  assert.equal(a.record(inputA.workspaceId).state, "preserved");
+  assert.equal(b.record(inputB.workspaceId).state, "preserved");
+  assert.equal(a.record(inputA.workspaceId).pendingAction.phase, "settled");
+  assert.equal(b.record(inputB.workspaceId).pendingAction.phase, "settled");
+  assert.deepEqual(selected, [originA, originB, originB, originA]);
+  await clientA.close();
+  await a.coordinator.close();
+  assert.ok(await clientB.ping(), "关闭 A 不影响 B");
+});
 
 /**
  * 崩溃后、恢复前的 durable 中间态。
