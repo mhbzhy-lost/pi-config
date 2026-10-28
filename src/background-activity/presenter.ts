@@ -11,9 +11,12 @@
 //   getContextUsage()/thinkingLevel 投影；source availability 经 registry.sourceSnapshot
 //   出独立状态行），detail mode footer 按终端列换行，实际行数由 shell renderer 计算；
 //   正文 reserve 与 overlay margin 使用同一事实，不改写任何 raw 行对象。
-//   detail mode 首行承载选中项身份（`n/N glyph label` + 非「运行中」状态 + 可选模型/
-//   thinking 投影；详情面首行已不再渲染身份行，信息搬到 footer）；只有该身份行按终端列
-//   完整换行，位置行与键位提示行恒为单行，不以省略号截断身份信息。
+//   detail mode footer 首行左侧为选中项身份（`n/N glyph label`），右侧按可见列宽右对齐
+//   位置事实 `行 start-end/total`（不再单独占行）；非「运行中」状态仍单独一行（保留失败/
+//   完成等状态语义）；运行态下一行整段显示组合 metaLabel（`provider/model · thinking ·
+//   contextUsage` 不按分隔符拆分，窄终端按终端列完整换行、不省略模型信息）；`x` 展开/
+//   收起与导航关闭说明合并为末行，跟随底部/手动滚动文案不再展示（内部 autoFollow 语义
+//   不变），stale 观察事实并入该提示行；overlay 内不再有顶部滚动信息行。
 // - openDetails：terminalRows<=4 不挂 overlay、不改 editor/draft（shell 标记 too-small，
 //   恢复尺寸后可重开）；否则保存 editor/draft（错误隔离，任一获取/替换失败保持关闭并
 //   固定文案 notify 一次），经 `ctx.ui.custom` 挂载详情壳；每 render 按动态 footer reserve

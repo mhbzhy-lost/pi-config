@@ -8,10 +8,11 @@
 // - 详情请求严格 fence：scope token + selection key + source 对象 + request sequence，
 //   晚回旧组件只 dispose 一次并丢弃；x 展开重取、registry invalidate/主题变化重取均
 //   保留可保持的 scroll anchor（manual 只把 startIndex 钳制到新内容上界，autoFollow 语义不变）。
-// - 高度模型：overlay 下方详情 footer 的 reserve 由 footer 实际行数动态推导（身份/模型行
-//   换行行数 + 位置行/键位提示行固定 2 行 + separator），正文不再使用固定 terminalRows-4
-//   预算；overlay 内公共标题仅按其实际行数扣减；根自有 viewport 支持 bodyRows 0
-//   （terminalRows<=4 时正文为空、位置行读作 `0-0/total`、关闭输入仍可用、不产生负高度），
+// - 高度模型：overlay 下方详情 footer 的 reserve 由 footer 实际行数动态推导（状态行 +
+//   metaLabel 组合行的换行行数 + 首行/提示行固定 2 行 chrome + separator），正文不再使用
+//   固定 terminalRows-4 预算；overlay 内公共标题行整块删除（位置事实改由 footer 首行右侧
+//   的 `行 start-end/total` 承载），正文预算不再扣标题行；根自有 viewport 支持 bodyRows 0
+//   （terminalRows<=4 时正文为空、位置读作 `0-0/total`、关闭输入仍可用、不产生负高度），
 //   不改 package 既有 session-viewport 的至少 1 行合同。
 // - 输入全部消费在壳内：Alt+O/Esc 只关闭且不向恢复后的 editor 传播；left/right 选项导航；
 //   up/down/j/k/page/home/end/wheel 正文滚动；release 忽略、repeat 仅重复导航、未知键吞掉。
@@ -162,8 +163,69 @@ export function renderActivityDetailTextLine(
   return theme ? theme.fg("dim", truncated) : truncated;
 }
 
-/** 详情 footer 固定 chrome 行数：位置行 + 键位提示行（均恒为单行，不参与换行展开）。 */
+/**
+ * 详情 footer 固定 chrome 行数：首行（条目身份 + 右对齐位置事实）与提示行（x 展开/收起 +
+ * 导航关闭说明）。两行均恒为单行、不参与换行展开，因此 footer 行数只由状态行与 metaLabel
+ * 组合行的换行行数决定，位置事实不会反向影响行数（无需迭代求解）。
+ */
 const DETAIL_FOOTER_CHROME_ROWS = 2;
+
+/**
+ * 运行态显示判定：中文「运行中」与 bash_async 行自报的 raw `running` 都算运行态。
+ * 只用于显示投影（footer 状态行隐藏 + 正文状态行过滤），不改 raw 行对象/快照。
+ */
+function isRunningStateLabel(stateLabel: unknown): boolean {
+  if (typeof stateLabel !== "string") return false;
+  const normalized = stateLabel.trim().toLowerCase();
+  return normalized === "运行中" || normalized === "running";
+}
+
+/**
+ * 正文运行态状态行的显示层判定：`[kind · ]运行中`（可带 `状态：` 前缀与括号注释）或
+ * `running` 开头的行，含运行态说明行（provider 只提供原文，清理后才做匹配）。
+ * 仅当选中行本身是运行态时应用（见 visibleBodyLines）；其它状态行保留。
+ */
+const RUNNING_STATUS_LINE_PATTERN = /^(?:[^\s·]{1,32}\s*·\s*)?(?:状态\s*[:：]\s*)?(?:运行中|running)/i;
+
+/**
+ * 详情 footer 组合元数据的段模式：只承认已证实的 `formatChildModelLabel` 输出形态
+ * （`模型 (provider) model` 与 `thinking: value`），以及已经处于 `provider/model` 的
+ * 模型段。不做广泛猜测，未命中的段原样显示。
+ */
+const DETAIL_META_SEPARATOR = " · ";
+const DETAIL_META_MODEL_PAREN_PATTERN = /^模型\s+\(([^()\s]+)\)\s+(\S.*)$/;
+const DETAIL_META_MODEL_SLASH_PATTERN = /^模型\s+(\S*\/\S*)$/;
+const DETAIL_META_THINKING_PATTERN = /^thinking\s*[:：]\s*(\S.*)$/i;
+
+/**
+ * 详情层显示投影：`模型 (codex-pool) gpt-6-astra · thinking: xhigh` →
+ * `codex-pool/gpt-6-astra · xhigh`。仅转换首个模型段与 `thinking:` 段的标签，其余段
+ * （如 context usage）原样保留，分隔符与换行行为不变；不改 `ActivityRow.metaLabel`、
+ * 不改 raw/session 数据，也不影响主 footer。
+ */
+export function projectActivityDetailMetaText(metaLabel: string): string {
+  if (typeof metaLabel !== "string" || metaLabel === "") return metaLabel;
+  let modelProjected = false;
+  return metaLabel
+    .split(DETAIL_META_SEPARATOR)
+    .map((segment) => {
+      if (!modelProjected) {
+        const paren = DETAIL_META_MODEL_PAREN_PATTERN.exec(segment);
+        if (paren) {
+          modelProjected = true;
+          return `${paren[1]}/${paren[2]}`;
+        }
+        const slashed = DETAIL_META_MODEL_SLASH_PATTERN.exec(segment);
+        if (slashed) {
+          modelProjected = true;
+          return slashed[1];
+        }
+      }
+      const thinking = DETAIL_META_THINKING_PATTERN.exec(segment);
+      return thinking ? thinking[1] : segment;
+    })
+    .join(DETAIL_META_SEPARATOR);
+}
 
 const DETAIL_GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
@@ -246,7 +308,10 @@ class ActivityDetailShellController implements ActivityDetailShell {
   private viewportStart = 0;
   private autoFollowState = true;
   private lastFooterWidth = 0;
-  /** 上次实际渲染的 footer 行数（身份/模型行换行行数 + 固定 chrome 2 行）；首帧前按「身份 1 行 + chrome」保守预留。 */
+  /**
+   * 上次实际渲染的 footer 行数（固定 chrome 2 行 + 状态行/metaLabel 组合行的换行行数）；
+   * 首帧前按「chrome 2 行 + 1 行动态内容」保守预留。
+   */
   private lastFooterRows = DETAIL_FOOTER_CHROME_ROWS + 1;
 
   constructor(deps: ActivityDetailShellDeps) {
@@ -374,22 +439,34 @@ class ActivityDetailShellController implements ActivityDetailShell {
     }
     const entries = this.shellEntries;
     const index = entries.findIndex((entry) => entry.key === this.selected);
-    // 只有身份/模型逻辑行参与终端列换行：provider/model/thinking 全文可见、不省略；
-    // 位置行与键位提示行恒为单行（超宽按列截断），因此 footer 行数只由身份行决定，
-    // 位置行内容（含 start-end/total）不会反向影响行数，无需迭代求解。
-    const identityLines = renderActivityDetailTextLines(this.footerIdentityText(entries, index), safeWidth, theme, this.tui);
-    this.lastFooterRows = identityLines.length + DETAIL_FOOTER_CHROME_ROWS;
+    const entry = index === -1 ? undefined : entries[index];
+    const stateLabel = typeof entry?.stateLabel === "string" ? entry.stateLabel.trim() : "";
+    // 运行中在详情任何位置都不再重复；其它状态（失败、完成等）保留独立一行。
+    const stateLines =
+      stateLabel !== "" && !isRunningStateLabel(stateLabel)
+        ? renderActivityDetailTextLines(stateLabel, safeWidth, theme, this.tui)
+        : [];
+    // 详情层只做显示转换（`模型 (provider) model · thinking: level` → `provider/model · level`），
+    // ActivityRow.metaLabel 与主 footer 保持原样。
+    const metaText = typeof entry?.metaLabel === "string" ? projectActivityDetailMetaText(entry.metaLabel.trim()) : "";
+    // 组合元数据整段换行（`provider/model · level · contextUsage` 不按分隔符拆行）：
+    // 窄终端按终端列完整换行，不省略模型信息。
+    const metaLines = metaText !== ""
+      ? renderActivityDetailTextLines(metaText, safeWidth, theme, this.tui)
+      : [];
+    // 动态部分只有状态行与 metaLabel 组合行，二者行数只由文本自身换行决定；首行与提示行
+    // 恒为单行，所以 footer 总行数不依赖位置事实，无需迭代求解。
+    this.lastFooterRows = DETAIL_FOOTER_CHROME_ROWS + stateLines.length + metaLines.length;
     const position = this.positionForFooterRows(safeWidth, this.lastFooterRows);
+    // 顶部滚动信息行删除后，stale 事实仍须在 overlay 内可见：并入合并提示行（前移，窄宽
+    // 截断时仍优先可见）。
+    const stale = entry !== undefined && this.staleKeys.has(entry.key) ? " · 过期观察" : "";
     return [
-      ...identityLines,
+      this.renderFooterIdentityLine(entries, index, safeWidth, theme, position),
+      ...stateLines,
+      ...metaLines,
       renderActivityDetailTextLine(
-        `行 ${position.start}-${position.end}/${position.total} · ${position.autoFollow ? "跟随底部" : "手动滚动"} · x ${this.expanded() ? "收起" : "展开"}`,
-        safeWidth,
-        theme,
-        this.tui,
-      ),
-      renderActivityDetailTextLine(
-        "‹ › 切换任务 · ↑↓ jk 滚动 · PgUp/PgDn/Home/End 翻页 · Esc/Alt+O 关闭",
+        `x ${this.expanded() ? "收起" : "展开"}${stale} · ‹ › 切换任务 · ↑↓ jk 滚动 · PgUp/PgDn/Home/End 翻页 · Esc/Alt+O 关闭`,
         safeWidth,
         theme,
         this.tui,
@@ -397,22 +474,46 @@ class ActivityDetailShellController implements ActivityDetailShell {
     ];
   }
 
-  /** footer 首行原文：`n/N glyph label` + 非「运行中」状态 + 可选 metaLabel（模型/thinking）。 */
-  private footerIdentityText(entries: readonly ActivityRow[], index: number): string {
-    if (index === -1) return "当前无后台活动";
-    const entry = entries[index];
-    const metaLabel = typeof entry.metaLabel === "string" && entry.metaLabel !== ""
-      ? ` · ${entry.metaLabel}`
-      : "";
-    // 运行中不在 footer 重复：状态已有主视图行，详情首行只承载身份与模型信息。
-    const stateLabel = entry.stateLabel === "运行中" ? "" : ` · ${entry.stateLabel}`;
-    return `${index + 1}/${entries.length} ${ACTIVITY_KIND_GLYPHS[entry.kind] ?? "◇"} ${entry.label}${stateLabel}${metaLabel}`;
+  /**
+   * footer 首行：左侧条目身份（`n/N glyph label`，空态为固定文案），右侧以可见列宽计算
+   * 的右对齐位置事实 `行 start-end/total`（贴住终端右边界）。该行恒为 1 行：空间不足时
+   * 只截断身份文本（位置事实优先保留），不换行，因此不改变 footer 行数。
+   */
+  private renderFooterIdentityLine(
+    entries: readonly ActivityRow[],
+    index: number,
+    width: number,
+    theme: ActivityTheme | undefined,
+    position: { start: number; end: number; total: number },
+  ): string {
+    const positionText = toActivityDisplayText(
+      `行 ${position.start}-${position.end}/${position.total}`,
+      this.tui,
+    );
+    const positionWidth = this.tui.visibleWidth(positionText);
+    // 极窄终端退化分支：位置事实独占该行（仍不另起一行），身份文本不占列。
+    if (positionWidth + 1 >= width) {
+      return renderActivityDetailTextLine(positionText, width, theme, this.tui);
+    }
+    const identity =
+      index === -1
+        ? "当前无后台活动"
+        : `${index + 1}/${entries.length} ${ACTIVITY_KIND_GLYPHS[entries[index].kind] ?? "◇"} ${entries[index].label}`;
+    const cleanedIdentity = toActivityDisplayText(identity, this.tui);
+    const available = width - positionWidth - 1;
+    const fitted =
+      this.tui.visibleWidth(cleanedIdentity) <= available
+        ? cleanedIdentity
+        : this.tui.truncateToWidth(cleanedIdentity, available, "…");
+    const gap = Math.max(1, width - this.tui.visibleWidth(fitted) - positionWidth);
+    const line = `${fitted}${" ".repeat(gap)}${positionText}`;
+    return theme ? theme.fg("dim", line) : line;
   }
 
   private positionForFooterRows(width: number, footerRows: number): { start: number; end: number; total: number; autoFollow: boolean } {
     const bodyBudget = Math.max(0, this.readTerminalRows() - Math.max(1, footerRows + 1));
-    const headerRows = bodyBudget >= 1 && this.shellEntries.length > 0 ? 1 : 0;
-    const height = Math.max(0, bodyBudget - headerRows);
+    // 顶部滚动信息行已删除：正文预算不再扣标题行（空态/过小终端行为不变）。
+    const height = bodyBudget;
     const lineCount = Math.max(0, this.bodyContent(width).length);
     if (height <= 0) {
       // 正文 0 行时不报越界样式（`5-4/4`）：位置恒读作 `0-0/total`。
@@ -440,10 +541,8 @@ class ActivityDetailShellController implements ActivityDetailShell {
       // 打开中终端过小：正文 0 行（不产生负高度），关闭输入仍由 handleInput 处理。
       return [];
     }
-    const headerLines = this.renderHeaderLines(safeWidth, bodyBudget, theme);
-    const bodyHeight = Math.max(0, bodyBudget - headerLines.length);
-    const bodyLines = this.renderBodyLines(safeWidth, bodyHeight);
-    return [...headerLines, ...bodyLines];
+    // 顶部滚动信息行已删除：正文独占整个 bodyBudget，位置事实由 footer 首行右侧承载。
+    return this.renderBodyLines(safeWidth, bodyBudget);
   }
 
   handleInput(data: string): { consume: boolean } | undefined {
@@ -746,9 +845,8 @@ class ActivityDetailShellController implements ActivityDetailShell {
     const rows = this.readTerminalRows();
     if (this.lastRenderWidth > 0) this.renderFooter(this.lastRenderWidth, this.surface?.theme);
     const bodyBudget = Math.max(0, rows - this.footerReservedBottomRows());
-    // 标题只剩滚动信息 1 行，且无条目时不留行（与 renderHeaderLines 的实际行数一致）。
-    const headerRows = bodyBudget >= 1 && this.shellEntries.length > 0 ? 1 : 0;
-    const height = Math.max(0, bodyBudget - headerRows);
+    // 顶部滚动信息行已删除：正文高度 = bodyBudget（与 render/positionForFooterRows 同源）。
+    const height = bodyBudget;
     const lineCount = Math.max(0, this.bodyContent(this.lastRenderWidth).length);
     return { height, lineCount };
   }
@@ -818,32 +916,15 @@ class ActivityDetailShellController implements ActivityDetailShell {
   // —— 内部：渲染 ——
 
   /**
-   * overlay 内公共标题：只有滚动信息 1 行。
-   * 身份行（`glyph label · state · metaLabel`）整条删除（展示层精简）：同一事实搬到
-   * footer——glyph/label 由活动 footer 的 entry 块（layout.ts，已去选择箭头列）与详情 footer
-   * 首行（shell.renderFooter → presenter.renderDetailFooterLines）承载，非「运行中」状态与
-   * 模型/thinking 也由该首行追加 ` · metaLabel` 承载（行字段只作只读展示投影，不进 raw/session）。
-   * 空态（无条目）不给标题留行，把整块预算让给正文的「当前无后台活动」（footer 另有一行
-   * 空态提示），因此小终端下正文预算不被标题侵占。
-   * `过期观察` 仍保留在本行：footer 的 stale/unavailable 独立状态行只在主视图 footer 出现，
-   * 详情 overlay 打开时 footer 切换为详情模式，故该事实必须在 overlay 内可见。
+   * 正文显示投影：选中行处于运行态时过滤掉运行态状态行/说明行（`运行中`/`running`），
+   * 其它状态（失败、完成等）与所有内容行原样保留；raw 行对象、provider 行数组、快照不变。
    */
-  private renderHeaderLines(width: number, bodyBudget: number, theme: ActivityTheme | undefined): string[] {
-    if (bodyBudget < 1 || this.shellEntries.length === 0) return [];
-    const position = this.position();
-    const follow = position.autoFollow ? "跟随底部" : "手动滚动";
+  private visibleBodyLines(lines: readonly string[]): string[] {
     const entry = this.currentEntry();
-    const stale = entry !== undefined && this.staleKeys.has(entry.key) ? " · 过期观察" : "";
-    return [
-      renderActivityDetailTextLine(
-        `行 ${position.start}-${position.end}/${position.total} · ${follow} · x ${
-          this.expandedState ? "收起" : "展开"
-        }${stale}`,
-        width,
-        theme,
-        this.tui,
-      ),
-    ];
+    if (entry === undefined || !isRunningStateLabel(entry.stateLabel)) return [...lines];
+    return lines.filter(
+      (line) => !RUNNING_STATUS_LINE_PATTERN.test(toActivityDisplayText(line, this.tui).trim()),
+    );
   }
 
   private renderBodyLines(width: number, height: number): string[] {
@@ -872,14 +953,14 @@ class ActivityDetailShellController implements ActivityDetailShell {
         if (Array.isArray(lines)) {
           if (lines.length > 0) {
             this.lastBodyLines = lines;
-            return lines;
+            return this.visibleBodyLines(lines);
           }
           return ["该任务暂无详情"];
         }
       } catch {
         // provider render 瞬态失败：保留上次确认行，不改 raw。
       }
-      return this.lastBodyLines;
+      return this.visibleBodyLines(this.lastBodyLines);
     }
     if (this.requestInFlight) return ["加载中…"];
     if (this.requestFailed) return ["详情读取失败"];

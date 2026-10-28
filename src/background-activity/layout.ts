@@ -76,7 +76,11 @@ export const MAIN_VIEW_RESERVED_BOTTOM_ROWS = 6;
 /** 详情模式静态 viewport reserve（overlay margin.bottom=4），恒为 4，不依赖每帧函数。 */
 export const DETAIL_RESERVED_BOTTOM_ROWS = 4;
 
-/** 详情模式 footer 导航行上限（详情壳 footer 固定最多 3 行）。 */
+/**
+ * 详情模式 geometry 报告的 footer 行上限（3）：仅为 computeActivityGeometry 的静态合同值；
+ * 详情壳实际 footer 行数由「首行（身份 + 右对齐位置）/状态行/组合 metaLabel 行/提示行」的
+ * 实际换行行数动态推导，不受该常量钳制。
+ */
 export const DETAIL_FOOTER_MAX_ROWS = 3;
 
 /** terminalRows <= 该值时详情 overlay 不挂载（F5b 负责保留 footer 入口与 draft）。 */
