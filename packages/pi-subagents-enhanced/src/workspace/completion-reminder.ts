@@ -15,7 +15,8 @@ type CompletionReminderOptions = {
   sendMessage(message: unknown, options: { deliverAs: "followUp"; triggerTurn: false }): unknown;
   getContext(): ReminderContext | undefined;
   onDiagnostic?: (diagnostic: { code: "SUBAGENT_WORKSPACE_REMINDER_AMBIGUOUS"; rootSessionId: string; runId: string; count: number }
-    | { code: "SUBAGENT_WORKSPACE_REMINDER_DELIVERY_DEBT"; rootSessionId: string; runId: string; workspaceId: string; message: string }) => void;
+    | { code: "SUBAGENT_WORKSPACE_REMINDER_DELIVERY_DEBT"; rootSessionId: string; runId: string; workspaceId: string; message: string }
+    | { code: "SUBAGENT_WORKSPACE_REMINDER_LOOKUP_DEBT"; rootSessionId: string; runId: string; message: string }) => void;
 };
 
 function text(value: unknown): value is string {
@@ -37,7 +38,22 @@ export function createWorkspaceCompletionReminder({ events, sendMessage, getCont
     if (!text(context?.rootSessionId) || !text(context?.lifecycleSessionId) || !context.service
         || !text(completion.sessionId) || completion.sessionId !== context.lifecycleSessionId) return;
     const ownerScope = Object.freeze({ kind: "standalone-subagent" as const, rootSessionId: context.rootSessionId });
-    const matches = context.service.listOwned({ ownerScope, runId: completion.runId })
+    let owned: WorkspaceReceipt[];
+    try {
+      owned = context.service.listOwned({ ownerScope, runId: completion.runId });
+    } catch (error) {
+      // lookup 失败记结构化债务，不让 event handler 拖出未处理异常；但失败绝不
+      // 等同于「确认没有 workspace」：本次保持阻断（不发送 reminder），当前
+      // owner/unknown invalid 的 fail-closed 借诊断通道可见，不被吞掉。
+      onDiagnostic?.({
+        code: "SUBAGENT_WORKSPACE_REMINDER_LOOKUP_DEBT",
+        rootSessionId: context.rootSessionId,
+        runId: completion.runId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    const matches = owned
       .filter((receipt) => receipt?.run?.runId === completion.runId)
       .map(terminalWorkspace)
       .filter((receipt): receipt is WorkspaceReceipt & { workspaceId: string; state: "active" | "preserved"; run: { runId: string } } => Boolean(receipt));

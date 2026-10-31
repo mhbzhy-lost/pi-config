@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { lstatSync, realpathSync, readdirSync, readFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { chmodSync, existsSync, lstatSync, mkdirSync, realpathSync, readdirSync, readFileSync, renameSync } from "node:fs";
 import path from "node:path";
 
 import { inspectManagedGitWorkspace, listManagedGitRegistrations } from "./git-worktree.ts";
@@ -13,6 +13,32 @@ type CleanupPlan =
   | { schemaVersion: "managed-workspace-cleanup-plan.v1"; stateRoot: string; actions: CleanupAuthorization[]; planHash: string }
   | { schemaVersion: "managed-workspace-reconcile-plan.v2"; stateRoot: string; actions: CleanupAuthorization[]; planHash: string; requiresExplicitAuthorization: boolean };
 type ApplyCleanupInput = { stateRoot?: string; plan?: CleanupPlan; authorizations?: CleanupAuthorization[] };
+
+const LEGACY_LEDGER_SCHEMA_V1 = "managed-workspace-ledger.v1";
+const LEGACY_QUARANTINE_PLAN_SCHEMA = "managed-workspace-legacy-quarantine-plan.v1";
+const LEGACY_QUARANTINE_RECEIPT_SCHEMA = "managed-workspace-legacy-quarantine-receipt.v1";
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
+const SHA256_HEX = /^[a-f0-9]{64}$/;
+
+type LegacyQuarantineAction = {
+  action: "archive-record";
+  repositoryPartition: string;
+  workspaceId: string;
+  schemaVersion: "managed-workspace-ledger.v1";
+  recordSha256: string;
+  recordBytes: number;
+  originRootPresent: boolean | null;
+};
+type LegacyQuarantinePlan = {
+  schemaVersion: "managed-workspace-legacy-quarantine-plan.v1";
+  stateRoot: string;
+  archiveId: string;
+  actions: LegacyQuarantineAction[];
+  requiresExplicitAuthorization: true;
+  planHash: string;
+};
+type LegacyQuarantineAuthorization = { workspaceId: string; recordSha256: string };
+type LegacyQuarantineInput = { stateRoot?: string; plan?: LegacyQuarantinePlan; authorizations?: LegacyQuarantineAuthorization[] };
 
 function readJsonFile(file: string) {
   try { return JSON.parse(readFileSync(file, "utf8")); } catch { return undefined; }
@@ -98,6 +124,21 @@ export function auditManagedWorkspaces({ stateRoot = process.env.PI_CODING_WORKS
     if (entry.receipt.state === "active" && entry.receipt.terminalProof?.state !== "observed") debts.push({ kind: "proof", workspaceId: entry.receipt.workspaceId, status: "unresolved" });
     if (entry.receipt.publishedArtifact && !entry.receipt.application) debts.push({ kind: "delivery", workspaceId: entry.receipt.workspaceId, status: "unresolved" });
   }
+  // 全 state root 的 invalid record 债务：不因 originRoot 投影而丢失 originRoot
+  // 已删除的历史遗留记录；投影只含 partition/workspaceId/schema/error code 等
+  // 安全字段，不携带 token 或私有原始路径。
+  for (const diagnostic of inventory.invalidRecords) {
+    debts.push({
+      kind: diagnostic.kind === "ledger-record" ? "invalid-record" : "ledger-storage",
+      repositoryPartition: diagnostic.repositoryPartition ?? undefined,
+      workspaceId: diagnostic.workspaceId ?? undefined,
+      schemaVersion: diagnostic.schemaVersion ?? undefined,
+      errorCode: diagnostic.errorCode,
+      status: diagnostic.legacyV1 ? "legacy-v1" : "invalid",
+      ownerScope: diagnostic.ownerScope ?? undefined,
+      originRootPresent: diagnostic.originRootPresent ?? undefined,
+    });
+  }
   // 公共审计投影必须确定性：queue items 按 sequence 排序（readdir 顺序任意，
   // settlement 的 FIFO 递增检查不得依赖目录顺序）。
   queue.sort((left, right) => (Number.isSafeInteger(left?.sequence) && Number.isSafeInteger(right?.sequence) ? left.sequence - right.sequence : 0));
@@ -136,7 +177,10 @@ function planHash(value) {
 
 export function inventoryManagedWorkspaces({ stateRoot = process.env.PI_CODING_WORKSPACE_DIR, originRoot }: AdministrationOptions = {}) {
   const ledger = createManagedWorkspaceLedger({ stateRoot });
-  const records = ledger.list({ originRoot });
+  // 全 state root 只读扫描：即使 inventory 按 originRoot 投影，invalid record 债
+  // （含 originRoot 已删除的 v1 legacy record）仍然完整可见。
+  const invalidRecords = ledger.scanInvalidRecords();
+  const records = ledger.list({ originRoot, onInvalid: () => undefined });
   const workspaces = records.map((record) => {
     let identity = null;
     const issues = [];
@@ -192,7 +236,7 @@ export function inventoryManagedWorkspaces({ stateRoot = process.env.PI_CODING_W
       if (pathExists(candidate)) legacy.push({ path: candidate, status: "untrusted-legacy" });
     }
   }
-  return Object.freeze({ schemaVersion: "managed-workspace-inventory.v2", stateRoot: ledger.stateRoot, workspaces, orphanRegistrations, legacy });
+  return Object.freeze({ schemaVersion: "managed-workspace-inventory.v2", stateRoot: ledger.stateRoot, workspaces, orphanRegistrations, legacy, invalidRecords });
 }
 
 export function planManagedWorkspaceCleanup({ stateRoot = process.env.PI_CODING_WORKSPACE_DIR, originRoot }: AdministrationOptions = {}) {
@@ -244,4 +288,142 @@ export function applyManagedWorkspaceCleanup({ stateRoot = process.env.PI_CODING
     const authorization = service.issueRelease({ workspaceId: action.workspaceId, terminalProof: proof });
     return service.release({ workspaceId: action.workspaceId, terminalProof: authorization.terminalProof, actionToken: authorization.actionToken });
   });
+}
+
+// 读取待归档 record 的原始字节：只接受 regular file 且拒绝 symlink，任何读取
+// 失败都以 MANAGED_WORKSPACE_RECORD 编码暴露，不静默。
+function readLegacyRecordBytes(recordPath: string): Buffer {
+  let info;
+  try { info = lstatSync(recordPath); }
+  catch (cause) { throw Object.assign(new Error("legacy workspace record is unavailable"), { code: "MANAGED_WORKSPACE_RECORD", cause }); }
+  if (!info.isFile() || info.isSymbolicLink()) {
+    throw Object.assign(new Error("legacy workspace record is not a regular file"), { code: "MANAGED_WORKSPACE_RECORD" });
+  }
+  try { return readFileSync(recordPath); }
+  catch (cause) { throw Object.assign(new Error("legacy workspace record is unreadable"), { code: "MANAGED_WORKSPACE_RECORD", cause }); }
+}
+
+function parseLegacyRecordJson(bytes: Buffer) {
+  try { return JSON.parse(bytes.toString("utf8")); } catch { return undefined; }
+}
+
+function legacyRecordPath(stateRoot: string, action: { repositoryPartition: string; workspaceId: string }) {
+  if (!SHA256_HEX.test(action.repositoryPartition) || typeof action.workspaceId !== "string" || !SAFE_ID.test(action.workspaceId) || action.workspaceId.includes("..")) {
+    throw new Error("managed workspace legacy quarantine plan is invalid or stale");
+  }
+  return path.join(stateRoot, "repositories", action.repositoryPartition, "records", `${action.workspaceId}.json`);
+}
+
+/** 只读 dry-run：从全 state root invalid 扫描中挑出原始 schemaVersion 明确为
+ * v1 legacy 的 record，绑定原始字节 hash 生成归档计划。不修改任何文件。 */
+export function planManagedWorkspaceLegacyQuarantine({ stateRoot = process.env.PI_CODING_WORKSPACE_DIR }: { stateRoot?: string } = {}) {
+  const ledger = createManagedWorkspaceLedger({ stateRoot });
+  const actions = ledger.scanInvalidRecords()
+    .filter((diagnostic) => diagnostic.kind === "ledger-record" && diagnostic.legacyV1 && typeof diagnostic.workspaceId === "string")
+    .map((diagnostic) => {
+      const recordPath = legacyRecordPath(ledger.stateRoot, { repositoryPartition: diagnostic.repositoryPartition ?? "", workspaceId: diagnostic.workspaceId ?? "" });
+      const bytes = readLegacyRecordBytes(recordPath);
+      if (parseLegacyRecordJson(bytes)?.schemaVersion !== LEGACY_LEDGER_SCHEMA_V1) {
+        throw Object.assign(new Error("legacy workspace record content changed"), { code: "MANAGED_WORKSPACE_RECORD" });
+      }
+      return {
+        action: "archive-record",
+        repositoryPartition: diagnostic.repositoryPartition,
+        workspaceId: diagnostic.workspaceId,
+        schemaVersion: LEGACY_LEDGER_SCHEMA_V1,
+        recordSha256: createHash("sha256").update(bytes).digest("hex"),
+        recordBytes: bytes.byteLength,
+        originRootPresent: diagnostic.originRootPresent,
+      };
+    })
+    .sort((left, right) => `${left.repositoryPartition}/${left.workspaceId}`.localeCompare(`${right.repositoryPartition}/${right.workspaceId}`));
+  const body = { schemaVersion: LEGACY_QUARANTINE_PLAN_SCHEMA, stateRoot: ledger.stateRoot, archiveId: randomUUID(), actions, requiresExplicitAuthorization: true };
+  return Object.freeze({ ...body, planHash: planHash(body) }) as LegacyQuarantinePlan;
+}
+
+/** 按计划把明确的 v1 legacy record 移动到 state root 下的 quarantine 目录。
+ * 必须通过 plan hash、record bytes hash、schemaVersion、regular file、计划外
+ * 变化和逐 record 显式授权的全部检查；只移动计划内 record，不删除 worktree、
+ * queue、proof outbox 或任何未知记录。 */
+export function applyManagedWorkspaceLegacyQuarantine({ stateRoot = process.env.PI_CODING_WORKSPACE_DIR, plan, authorizations }: LegacyQuarantineInput = {}) {
+  const ledger = createManagedWorkspaceLedger({ stateRoot });
+  const body = plan ? {
+    schemaVersion: plan.schemaVersion,
+    stateRoot: plan.stateRoot,
+    archiveId: plan.archiveId,
+    actions: plan.actions,
+    requiresExplicitAuthorization: plan.requiresExplicitAuthorization,
+  } : undefined;
+  if (!plan || plan.schemaVersion !== LEGACY_QUARANTINE_PLAN_SCHEMA
+      || plan.stateRoot !== ledger.stateRoot || plan.requiresExplicitAuthorization !== true
+      || typeof plan.archiveId !== "string" || !SAFE_ID.test(plan.archiveId) || plan.archiveId.includes("..")
+      || !Array.isArray(plan.actions) || plan.planHash !== planHash(body)) {
+    throw new Error("managed workspace legacy quarantine plan is invalid or stale");
+  }
+  for (const action of plan.actions) {
+    if (!action || typeof action !== "object" || Array.isArray(action)
+        || Object.keys(action).length !== 7 || action.action !== "archive-record"
+        || action.schemaVersion !== LEGACY_LEDGER_SCHEMA_V1
+        || !SHA256_HEX.test(action.recordSha256 ?? "")
+        || !Number.isSafeInteger(action.recordBytes) || action.recordBytes < 0
+        || (action.originRootPresent !== null && typeof action.originRootPresent !== "boolean")) {
+      throw new Error("managed workspace legacy quarantine plan is invalid or stale");
+    }
+    legacyRecordPath(ledger.stateRoot, action);
+  }
+  // 计划变更检测：重新扫描并重算计划内容，任何 record 增减/字节变化/origin
+  // 存在性翻转都拒绝；archiveId 每次规划新生成，仅作目录名不参与比较。
+  const current = planManagedWorkspaceLegacyQuarantine({ stateRoot: ledger.stateRoot });
+  if (JSON.stringify(canonical(current.actions)) !== JSON.stringify(canonical(plan.actions))) {
+    throw new Error("managed workspace legacy quarantine plan changed or is stale");
+  }
+  if (!Array.isArray(authorizations)) throw new Error("explicit legacy quarantine authorizations are required");
+  const authorized = new Map();
+  for (const value of authorizations) {
+    if (!value || typeof value !== "object" || Array.isArray(value)
+        || Object.keys(value).length !== 2 || !Object.hasOwn(value, "workspaceId") || !Object.hasOwn(value, "recordSha256")
+        || typeof value.workspaceId !== "string" || !SHA256_HEX.test(value.recordSha256)) {
+      throw new Error("legacy quarantine authorization is invalid");
+    }
+    if (authorized.has(value.workspaceId)) throw new Error("legacy quarantine authorization is duplicated");
+    authorized.set(value.workspaceId, value.recordSha256);
+  }
+  if (authorized.size !== plan.actions.length) throw new Error("legacy quarantine authorizations do not match the plan");
+  for (const action of plan.actions) {
+    if (authorized.get(action.workspaceId) !== action.recordSha256) throw new Error(`legacy quarantine is not authorized: ${action.workspaceId}`);
+  }
+  const archived = [];
+  for (const action of plan.actions) {
+    const recordPath = legacyRecordPath(ledger.stateRoot, action);
+    const bytes = readLegacyRecordBytes(recordPath);
+    if (createHash("sha256").update(bytes).digest("hex") !== action.recordSha256
+        || bytes.byteLength !== action.recordBytes
+        || parseLegacyRecordJson(bytes)?.schemaVersion !== LEGACY_LEDGER_SCHEMA_V1) {
+      throw Object.assign(new Error(`legacy workspace record changed before quarantine: ${action.workspaceId}`), { code: "MANAGED_WORKSPACE_RECORD" });
+    }
+    const archiveDir = path.join(ledger.stateRoot, "quarantine", "legacy", plan.archiveId, action.repositoryPartition);
+    mkdirSync(archiveDir, { recursive: true, mode: 0o700 });
+    chmodSync(archiveDir, 0o700);
+    const quarantinePath = path.join(archiveDir, `${action.workspaceId}.json`);
+    if (existsSync(quarantinePath)) {
+      throw Object.assign(new Error(`legacy quarantine target already exists: ${action.workspaceId}`), { code: "MANAGED_WORKSPACE_RECORD" });
+    }
+    // 归档是原子移动原始 record（保留字节/权限/分区/workspaceId），不是删除。
+    renameSync(recordPath, quarantinePath);
+    if (existsSync(recordPath)) {
+      throw Object.assign(new Error(`legacy workspace record did not move: ${action.workspaceId}`), { code: "MANAGED_WORKSPACE_RECORD" });
+    }
+    if (createHash("sha256").update(readLegacyRecordBytes(quarantinePath)).digest("hex") !== action.recordSha256) {
+      throw Object.assign(new Error(`legacy workspace record bytes changed in quarantine: ${action.workspaceId}`), { code: "MANAGED_WORKSPACE_RECORD" });
+    }
+    archived.push({
+      action: "archive-record",
+      repositoryPartition: action.repositoryPartition,
+      workspaceId: action.workspaceId,
+      schemaVersion: action.schemaVersion,
+      recordSha256: action.recordSha256,
+      quarantineRelativePath: path.join("quarantine", "legacy", plan.archiveId, action.repositoryPartition, `${action.workspaceId}.json`),
+    });
+  }
+  return Object.freeze({ schemaVersion: LEGACY_QUARANTINE_RECEIPT_SCHEMA, stateRoot: ledger.stateRoot, archiveId: plan.archiveId, planHash: plan.planHash, archived });
 }

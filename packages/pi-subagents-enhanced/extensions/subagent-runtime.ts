@@ -65,6 +65,17 @@ export async function admitHostRepositoryOrigin(hostCwd: string, requestedCwd: s
   return identity;
 }
 
+// T1 ledger 逐记录诊断的安全转发：诊断只包含 repository partition、
+// workspaceId、schema/error code 与可结构化解析的 owner 投影，不含 ownerToken、
+// lease token 或私有原始路径；sink 自身失败不影响选路，只记录 sink 故障。
+function forwardLedgerInvalidRecord(sink: ((entry: unknown) => void) | undefined, diagnostic: unknown) {
+  try {
+    sink?.({ version: 1, phase: "managed-workspace-invalid-record-skipped", diagnostic });
+  } catch (diagnosticError) {
+    console.error("[subagent-runtime] managed workspace ledger diagnostic sink failed", diagnosticError);
+  }
+}
+
 /** 连接只持有仓库资源；独立单仓库调用方可保留既有 broker 接线。 */
 export async function connectRuntimeCoordinator({ pi, cwd, broker, stateRoot, rpc, diagnosticSink, bindBrokerCallbacks = true }: { pi: object; cwd: string; broker: RootBrokerServer; stateRoot?: string; rpc?: any; diagnosticSink?: (entry: unknown) => void; bindBrokerCallbacks?: boolean }) {
   if (!shouldStartRepositoryCoordinator(cwd) || typeof stateRoot !== "string" || stateRoot.length === 0) return undefined;
@@ -141,7 +152,17 @@ export async function connectRuntimeCoordinator({ pi, cwd, broker, stateRoot, rp
       // resolved from the trusted run registration before this socket call.
       advance_auto_integration: client.advanceAutoIntegration,
     });
-    const bindingResolver = createTrustedRunBindingResolver(client, { rootSessionId: broker.rootSessionId });
+    // run-only 绑定解析保留 coordinator 权威优先；权威查询被无关 invalid record
+    // 阻断时退回本地 ledger 逐记录隔离（foreign v1 skip + 结构化诊断）。回退结果
+    // 仍过 resolver 的唯一性/身份校验；same-owner/unknown invalid 与 v2-invalid
+    // 在回退中抛错 fail-closed，不把查询失败解释为「没有 workspace」。
+    const ledgerInvalidSink = (diagnostic: unknown) => forwardLedgerInvalidRecord(diagnosticSink, diagnostic);
+    const bindingResolver = createTrustedRunBindingResolver(client, {
+      rootSessionId: broker.rootSessionId,
+      readLedger: (runId: string) => createManagedWorkspaceLedger({ stateRoot: metadata.canonicalStateRoot })
+        .listScoped({ owner: proofOwnerScope, onInvalid: ledgerInvalidSink })
+        .filter((record: any) => record.run?.runId === runId),
+    });
     let closing = false;
     const coordinatorRequest: NonNullable<RootBrokerServer["coordinatorRequest"]> = async (runId, operation, input) => {
       if (closing) throw new Error("repository connection is closing");
@@ -157,11 +178,13 @@ export async function connectRuntimeCoordinator({ pi, cwd, broker, stateRoot, rp
         client,
         proofOutbox,
         readLedger: () => createManagedWorkspaceLedger({ stateRoot: metadata.canonicalStateRoot })
-          .listScoped({ owner: proofOwnerScope }).filter((record: any) => record.run?.runId === run.runId),
+          .listScoped({ owner: proofOwnerScope, onInvalid: ledgerInvalidSink }).filter((record: any) => record.run?.runId === run.runId),
         // 跨 owner scope 复查：scoped 查询为空时区分「run 真没有 workspace」与
-        // 「workspace 挂在别的 owner scope 下」（后者记债暴露，不静默）。
+        // 「workspace 挂在别的 owner scope 下」（后者记债暴露，不静默）。无 owner
+        // 的复查只跳过明确 v1 legacy 并记诊断（T1 合同）；v2/未知 schema 仍抛错，
+        // 由上方 catch 转为 proof debt，不降级为 not-applicable。
         readCrossScope: () => createManagedWorkspaceLedger({ stateRoot: metadata.canonicalStateRoot })
-          .list().filter((record: any) => record.run?.runId === run.runId),
+          .list({ onInvalid: ledgerInvalidSink }).filter((record: any) => record.run?.runId === run.runId),
         run,
         proof,
         proofId,
@@ -352,15 +375,55 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
     connectionFlights.set(identity.repositoryId, flight);
     try { return await flight; } finally { connectionFlights.delete(identity.repositoryId); }
   };
+  // run-only 枚举：优先消费 service 的严格 owner 合同；仅当枚举被 schema 级
+  // invalid record 阻断时，用 T1 ledger 逐记录隔离重试——可证明 foreign 的
+  // v1 legacy record 被跳过并转发结构化诊断，same-owner/unknown invalid 与
+  // v2-invalid 在重试中仍 fail-closed。重试得到的每个候选 receipt 都经
+  // readOwned 直读复核身份（workspaceId/leaseId/runId），不外泄枚举原始 record，
+  // 也不把任何查询失败解释为「没有 workspace」。
+  const enumerateOwnedReceipts = (ownerScope: { kind: "standalone-subagent"; rootSessionId: string }, runId?: string) => {
+    try {
+      return workspaceService.listOwned({ ownerScope, ...(runId === undefined ? {} : { runId }) });
+    } catch (error) {
+      if ((error as any)?.code !== "MANAGED_WORKSPACE_SCHEMA") throw error;
+      const matched = createManagedWorkspaceLedger({ stateRoot: process.env.PI_CODING_WORKSPACE_DIR })
+        .listScoped({ owner: ownerScope, onInvalid: (diagnostic: unknown) => forwardLedgerInvalidRecord(diagnosticSink, diagnostic) })
+        .filter((record: any) => runId === undefined || record.run?.runId === runId);
+      return matched.map((record: any) => {
+        const entry = workspaceService.readOwned({ workspaceId: record.workspaceId, ownerScope });
+        if (entry.workspaceId !== record.workspaceId || entry.leaseId !== record.leaseId
+            || (runId !== undefined && entry.run?.runId !== runId)) {
+          throw Object.assign(new Error("owned workspace receipt identity changed during enumeration"), { code: "MANAGED_WORKSPACE_CAS" });
+        }
+        return entry;
+      });
+    }
+  };
   // 唯一同 owner 的本地持久回执是已有 workspace/run 的唯一选路来源。
   const ownedReceipts = (runId?: string) => {
     if (!broker || !workspaceService || repositoriesClosing) throw repositoryError();
-    return workspaceService.listOwned({ ownerScope: { kind: "standalone-subagent", rootSessionId: broker.rootSessionId }, ...(runId === undefined ? {} : { runId }) });
+    if (runId !== undefined && (typeof runId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(runId) || runId.includes(".."))) {
+      const error = new Error("workspace run identity is invalid") as Error & { code?: string };
+      error.code = "MANAGED_WORKSPACE_OWNER_SCOPE";
+      throw error;
+    }
+    return enumerateOwnedReceipts({ kind: "standalone-subagent", rootSessionId: broker.rootSessionId }, runId);
   };
   const selectReceipt = async (runId?: string, workspaceId?: string) => {
-    const entries = ownedReceipts(runId).filter((entry: any) => runId !== undefined || entry.workspaceId === workspaceId);
-    if (entries.length !== 1 || (workspaceId !== undefined && entries[0].workspaceId !== workspaceId)) throw repositoryError();
-    const record = entries[0];
+    if (!broker || !workspaceService || repositoriesClosing) throw repositoryError();
+    let record: any;
+    if (workspaceId !== undefined) {
+      // 已知 workspaceId：直读目标 owner receipt（T2 readOwned），不再经全局
+      // listOwned 枚举反推目标；目标 record 损坏、owner 不匹配或 ID 不存在由
+      // readOwned 以原始错误语义 fail-closed，不把空结果解释为「无 workspace」。
+      record = workspaceService.readOwned({ workspaceId, ownerScope: { kind: "standalone-subagent", rootSessionId: broker.rootSessionId } });
+      if (runId !== undefined && record.run?.runId !== runId) throw repositoryError();
+    } else {
+      // run-only：只接受唯一、身份完整的 valid receipt。
+      const entries = ownedReceipts(runId);
+      if (entries.length !== 1) throw repositoryError();
+      record = entries[0];
+    }
     const context = await selectRepository(record.originRoot);
     // 用选定的 storage identity 再加载，拒绝回执被放进错误分区的现场。
     const lease = createManagedWorkspaceLedger({ stateRoot: process.env.PI_CODING_WORKSPACE_DIR, storageRepositoryId: context.identity.storageRepositoryId })
@@ -502,9 +565,20 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
       return createWorkspaceCompletionReminder({
         events: api.events,
         sendMessage: (message, options) => api.sendMessage(message as any, options),
+        onDiagnostic: (diagnostic) => {
+          try { diagnosticSink?.({ version: 1, phase: "workspace-completion-reminder", diagnostic }); }
+          catch (diagnosticError) { console.error("[subagent-runtime] workspace reminder diagnostic sink failed", diagnosticError); }
+        },
         getContext() {
+          // reminder 的 run-only lookup 走与 ownedReceipts 同一条逐记录隔离枚举：
+          // 无关 foreign v1 只产生诊断，不阻断提醒；lookup 失败由 reminder 记
+          // 结构化 lookup debt，不制造未处理 event-handler exception。
           return workspaceService && workspaceRootSessionId && workspaceLifecycleSessionId
-            ? { service: workspaceService, rootSessionId: workspaceRootSessionId, lifecycleSessionId: workspaceLifecycleSessionId }
+            ? {
+                service: { listOwned: (input: any) => enumerateOwnedReceipts(input.ownerScope, input.runId) },
+                rootSessionId: workspaceRootSessionId,
+                lifecycleSessionId: workspaceLifecycleSessionId,
+              }
             : undefined;
         },
       });
@@ -567,7 +641,11 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
           if (broker !== startingBroker || repositoriesClosing) throw repositoryError();
           if (fixedContext) return fixedContext.recordTerminalProof(run, proof);
           if (ownedReceipts(run.runId).length === 0) {
-            const crossScope = createManagedWorkspaceLedger({ stateRoot }).list().filter((record: any) => record.run?.runId === run.runId);
+            // 跨 scope 复查只跳过明确 v1 legacy 并记诊断（T1 无 owner 扫描合同）；
+            // v2/未知 schema 仍抛错阻断，不把复查失败解释为「run 无 workspace」。
+            const crossScope = createManagedWorkspaceLedger({ stateRoot })
+              .list({ onInvalid: (diagnostic: unknown) => forwardLedgerInvalidRecord(diagnosticSink, diagnostic) })
+              .filter((record: any) => record.run?.runId === run.runId);
             if (crossScope.length > 0) throw repositoryError();
             return { state: "not-applicable", reason: "run owns no managed workspace" };
           }
@@ -789,14 +867,36 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
           if (ownerState === "owned") throw Object.assign(new Error("managed resume coordinator identity is unavailable"), { code: "RESUME_BINDING_BLOCKED" });
           return undefined;
         }
-        if (ownedReceipts(sourceRunId).length === 0) {
+        let localOwned: any[];
+        try {
+          localOwned = ownedReceipts(sourceRunId);
+        } catch (error) {
+          // 枚举被 same-owner/unknown invalid record 阻断时无法确认绑定：转换为
+          // 既有 resume 阻塞语义（保留 cause），不降级为「没有 workspace」。
+          throw Object.assign(new Error("managed resume owned receipts are unavailable"), { code: "RESUME_BINDING_BLOCKED", cause: error });
+        }
+        if (localOwned.length === 0) {
           if (singleRepositoryHost) return undefined;
-          const crossScope = createManagedWorkspaceLedger({ stateRoot: process.env.PI_CODING_WORKSPACE_DIR }).list().filter((record: any) => record.run?.runId === sourceRunId);
+          // 跨 scope 复查只跳过明确 v1 legacy 并记诊断；v2/未知 schema 仍阻断。
+          const crossScope = createManagedWorkspaceLedger({ stateRoot: process.env.PI_CODING_WORKSPACE_DIR })
+            .list({ onInvalid: (diagnostic: unknown) => forwardLedgerInvalidRecord(diagnosticSink, diagnostic) })
+            .filter((record: any) => record.run?.runId === sourceRunId);
           if (crossScope.length > 0) throw repositoryError();
           return undefined;
         }
         const { record: selected, context: coordinatorRuntime } = await selectReceipt(sourceRunId);
-        const owned = await coordinatorRuntime.client.listOwned({ runId: sourceRunId });
+        let owned: any;
+        try {
+          owned = await coordinatorRuntime.client.listOwned({ runId: sourceRunId });
+        } catch (error) {
+          // coordinator run-only 枚举被无关 invalid record 阻断时，退回本地唯一
+          // receipt 继续复核（唯一性与身份已由 selectReceipt 的直读+分区复核确
+          // 认）；目标 record 损坏/owner 不匹配在该路径已 fail-closed，此处不放宽
+          // 任何身份校验，也不把远端失败解释为「没有 workspace」。
+          try { diagnosticSink?.({ version: 1, phase: "managed-resume-owned-receipts-fallback", runId: sourceRunId, error, cause: (error as any)?.cause }); }
+          catch (diagnosticError) { console.error("[subagent-runtime] managed resume diagnostic sink failed", diagnosticError); }
+          owned = [selected];
+        }
         if (!Array.isArray(owned)) throw Object.assign(new Error("managed resume workspace ownership is unavailable"), { code: "RESUME_BINDING_BLOCKED" });
         if (owned.length === 0) return undefined;
         if (owned.length !== 1) throw Object.assign(new Error("managed resume requires exactly one owned workspace"), { code: "RESUME_BINDING_BLOCKED" });

@@ -8,6 +8,7 @@ export type ManagedWorkspaceService = {
   bindRun: (binding: { workspaceId: string; run: { runId: string; asyncDir: string } }) => any;
   recordTerminalProof: (input: any) => any;
   listOwned: (request: { ownerScope: WorkspaceOwnerScope; runId?: string }) => any;
+  readOwned: (request: { workspaceId: string; ownerScope: WorkspaceOwnerScope }) => any;
   status: (request: { workspaceId: string; terminalProof?: any }) => any;
   statusOwned: (request: { workspaceId: string; ownerScope: WorkspaceOwnerScope; terminalProof?: any }) => any;
   issueDisposition: (request: { workspaceId: string; terminalProof?: any }) => any;
@@ -60,7 +61,7 @@ function rootSessionId(value: unknown): string {
 }
 
 function assertService(value: ManagedWorkspaceService): void {
-  const methods = ["reserve", "ensureAllocated", "bindRun", "recordTerminalProof", "listOwned", "status", "statusOwned", "issueDisposition", "issueOwnedDisposition", "dispose", "disposeOwned", "release", "releaseOwned", "reconcile"] as const;
+  const methods = ["reserve", "ensureAllocated", "bindRun", "recordTerminalProof", "listOwned", "readOwned", "status", "statusOwned", "issueDisposition", "issueOwnedDisposition", "dispose", "disposeOwned", "release", "releaseOwned", "reconcile"] as const;
   if (!value || methods.some((method) => typeof value[method] !== "function")) {
     throw new TypeError("Managed workspace service is invalid");
   }

@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { applyManagedWorkspaceCleanup, auditManagedWorkspaces, planManagedWorkspaceCleanup } from "../packages/pi-subagents-enhanced/src/workspace/administration.ts";
+import { applyManagedWorkspaceCleanup, applyManagedWorkspaceLegacyQuarantine, auditManagedWorkspaces, planManagedWorkspaceCleanup, planManagedWorkspaceLegacyQuarantine } from "../packages/pi-subagents-enhanced/src/workspace/administration.ts";
 const DEFAULT_STATE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../var/workspaces");
 const SCHEMAS = {
   audit: { flags: new Set(["json"]), values: new Set() },
   reconcile: { flags: new Set(["json", "apply", "authorization-stdin"]), values: new Set() },
+  quarantine: { flags: new Set(["json", "apply", "authorization-stdin"]), values: new Set() },
 };
 function usage(message) { const error = new Error(message); error.code = "WORKTREE_LIFECYCLE_CLI_USAGE"; throw error; }
 function parseCommand(argv) {
@@ -20,8 +21,8 @@ function parseCommand(argv) {
     if (schema.values.has(name)) { const value = tokens[++index]; if (value === undefined || value === "" || value.startsWith("--")) usage(`Missing --${name}`); values[name] = value; }
   }
   for (const name of schema.values) if (values[name] === undefined) usage(`Missing --${name}`);
-  if (command === "reconcile" && flags.has("apply") && !flags.has("authorization-stdin")) usage("--apply requires --authorization-stdin");
-  if (command === "reconcile" && flags.has("authorization-stdin") && !flags.has("apply")) usage("--authorization-stdin requires --apply");
+  if ((command === "reconcile" || command === "quarantine") && flags.has("apply") && !flags.has("authorization-stdin")) usage("--apply requires --authorization-stdin");
+  if ((command === "reconcile" || command === "quarantine") && flags.has("authorization-stdin") && !flags.has("apply")) usage("--authorization-stdin requires --apply");
   return { command, json: flags.has("json"), apply: flags.has("apply"), values };
 }
 async function readStdin() { return await new Promise((resolveInput, reject) => { let input = ""; process.stdin.setEncoding("utf8"); process.stdin.on("data", (chunk) => { input += chunk; }); process.stdin.on("end", () => resolveInput(input.trim())); process.stdin.on("error", reject); }); }
@@ -51,6 +52,14 @@ function print(value, json) {
     for (const action of safeValue.actions) console.log(`${action.action}\t${action.workspaceId}\t${action.leaseId}`);
     return;
   }
+  if (safeValue?.schemaVersion === "managed-workspace-legacy-quarantine-plan.v1") {
+    for (const action of safeValue.actions) console.log(`${action.action}\t${action.workspaceId}\t${action.recordSha256}`);
+    return;
+  }
+  if (safeValue?.schemaVersion === "managed-workspace-legacy-quarantine-receipt.v1") {
+    for (const entry of safeValue.archived) console.log(`archived\t${entry.workspaceId}\t${entry.recordSha256}`);
+    return;
+  }
   const items = Array.isArray(safeValue) ? safeValue : safeValue?.items;
   if (items) { for (const fact of items) console.log(`${fact?.state ?? "unknown"}\t${escapeSingleLine(fact?.path ?? fact?.registration?.path)}\t${fact?.automaticAction ?? "none"}`); return; }
   console.log(`${safeValue?.state ?? "unknown"}\t${safeValue?.workspaceId ?? safeValue?.id ?? ""}\t${escapeSingleLine(safeValue?.path)}`);
@@ -61,6 +70,7 @@ if (parsed) {
     const { command, json, apply } = parsed; const originRoot = process.cwd(); const stateRoot = process.env.PI_CODING_WORKSPACE_DIR ?? DEFAULT_STATE_ROOT;
     if (command === "audit") print(auditManagedWorkspaces({ stateRoot, originRoot }), json);
     else if (command === "reconcile") { if (!apply) print(planManagedWorkspaceCleanup({ stateRoot, originRoot }), json); else { const { plan, authorizations } = await readApplyPayload(); print(applyManagedWorkspaceCleanup({ stateRoot, plan, authorizations }), json); } }
+    else if (command === "quarantine") { if (!apply) print(planManagedWorkspaceLegacyQuarantine({ stateRoot }), json); else { const { plan, authorizations } = await readApplyPayload(); print(applyManagedWorkspaceLegacyQuarantine({ stateRoot, plan, authorizations }), json); } }
     else usage(`Unknown command: ${command}`);
   } catch (error) { console.error(`${error.code || "WORKTREE_LIFECYCLE_ERROR"}: ${error.message}`); process.exitCode = 1; }
 }

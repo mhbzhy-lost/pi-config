@@ -809,6 +809,20 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
       .map(receipt);
   }
 
+  // 已知 workspaceId 的直读入口：不经过全局枚举，只校验目标 record 本身。
+  // 目标 record 损坏、ID 不存在时保持各自 fail-closed 错误语义；owner 不匹配
+  // 时保持 MANAGED_WORKSPACE_OWNER_SCOPE，消息明确指认 owner scope，不把任何
+  // 空结果解释为「无 workspace」。返回与 listOwned 相同的 public receipt 投影
+  // （不含 ownerToken、lease token 等秘密字段）。
+  function readOwned({ workspaceId, ownerScope }: { workspaceId: string; ownerScope: WorkspaceOwnerScope }) {
+    try {
+      return receipt(loadOwned(workspaceId, ownerScope).record);
+    } catch (error) {
+      if (error?.code === "MANAGED_WORKSPACE_OWNER_SCOPE") throw failure("MANAGED_WORKSPACE_OWNER_SCOPE", "workspace does not belong to the requested owner scope", error);
+      throw error;
+    }
+  }
+
   function reconcile({ originRoot }: ReconcileInput = {}) {
     const results = [];
     for (const record of ledger.list({ originRoot })) {
@@ -848,7 +862,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
       activeFault = options.fault;
       activeAdmissionProbe = options.admissionProbe;
     },
-    reserve, ensureAllocated, bindRun, rebindRunForRecovery, recordTerminalProof, listOwned, status, statusOwned, issueDisposition, issueOwnedDisposition, issueAction,
+    reserve, ensureAllocated, bindRun, rebindRunForRecovery, recordTerminalProof, listOwned, readOwned, status, statusOwned, issueDisposition, issueOwnedDisposition, issueAction,
     prepareOwnedDisposition, readPreparedDisposition, applyPreparedDisposition, listPreparedDispositions, markDispositionSettled,
     publishOwned, applyOwned, discardOwned, dispose, disposeOwned, issueRelease, release, releaseOwned, reconcile,
     integrationAdmissionFacts, admissionFactsForClaim, noPayloadFacts, prepareIntegrationIntent, completeIntegrationIntent, managedRebase, integrationState, inspectIntegrationCompletion, preserveIntegrationDebt, abandonIntegrationIntent,

@@ -5,7 +5,7 @@ import { spawn, execFileSync, type ChildProcessWithoutNullStreams } from 'node:c
 import { mkdtemp, mkdir, chmod, writeFile, readFile, readdir, symlink, rm, realpath } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve, dirname } from 'node:path';
+import { join, resolve, dirname, relative, isAbsolute, sep } from 'node:path';
 
 const repo = resolve(import.meta.dirname, '../..');
 const model = 'qoder-pool/DeepSeek-Flash';
@@ -231,8 +231,21 @@ function multiPlan(name: string) {
   return contract;
 }
 
+// Host/child 全部消费同一 env 的 PI_CODING_WORKSPACE_DIR=join(root,"workspaces")；启动断言只针对该单一 state root。
+function assertIsolatedStateRoot(stateRoot: string | undefined) {
+  const escapes = (parent: string, child: string) => { const rel = relative(parent, child); return isAbsolute(rel) || rel === '..' || rel.startsWith(`..${sep}`); };
+  assert.ok(stateRoot !== undefined, 'MANAGED_WORKSPACE_STATE_ROOT_MISSING：PI_CODING_WORKSPACE_DIR 未设置');
+  assert.ok(isAbsolute(stateRoot), 'MANAGED_WORKSPACE_STATE_ROOT：state root 必须是绝对路径');
+  assert.ok(stateRoot !== root && !escapes(root, stateRoot), 'MANAGED_WORKSPACE_STATE_ROOT：state root 必须位于 probe 临时 root 下');
+  assert.ok(escapes(join(repo, 'var', 'workspaces'), stateRoot), 'MANAGED_WORKSPACE_STATE_ROOT：state root 不得等于或落入仓库默认 var/workspaces');
+  assert.ok(existsSync(stateRoot), 'MANAGED_WORKSPACE_STATE_ROOT_MISSING：state root 目录不存在');
+}
+
 try {
-  for (const dir of [agent, cwd, join(agent, 'agents'), join(agent, 'extensions'), join(root, 'home'), join(root, 'tmp'), join(root, 'sessions')]) await mkdir(dir, { recursive: true, mode: 0o700 });
+  for (const dir of [agent, cwd, join(agent, 'agents'), join(agent, 'extensions'), join(root, 'home'), join(root, 'tmp'), join(root, 'sessions'), join(root, 'workspaces')]) await mkdir(dir, { recursive: true, mode: 0o700 });
+  // 任何 Host/child 生成前先断言隔离；失败经 catch 记录 failure 并以 exit 1 明确拒绝。
+  assertIsolatedStateRoot(env.PI_CODING_WORKSPACE_DIR);
+  emit('state_root_isolation', { exists: true, absolute: true, underProbeTempRoot: true, outsideDefaultVarWorkspaces: true, sharedHostEnv: true });
   // 唯一凭据操作：外部 cp；脚本不读取、解析、打印凭据内容。
   execFileSync('cp', [join(repo, 'pi/auth.json'), join(agent, 'auth.json')]);
   for (const name of ['models.json', 'models-store.json']) execFileSync('cp', [join(repo, 'pi', name), join(agent, name)]);

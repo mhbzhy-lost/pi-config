@@ -8,6 +8,12 @@ type TrustedRunBindingClient = {
   listOwned(input: { runId: string }): Promise<OwnedWorkspaceReceipt[]>;
 };
 
+// run-only 复查回退：coordinator 权威查询被无关 invalid record 阻断时，从本地
+// ledger 逐记录隔离枚举中读取该 run 的绑定。回退结果仍要过 resolve 内的
+// 唯一性与身份校验；回退自身抛错（same-owner/unknown invalid、v2-invalid）则
+// fail-closed 向上传播，不得把「查询失败」解释为「run 没有 workspace」。
+type TrustedRunBindingLedgerFallback = (runId: string) => OwnedWorkspaceReceipt[] | Promise<OwnedWorkspaceReceipt[]>;
+
 export type TrustedRunBinding = Readonly<{
   workspaceId: string;
   leaseId: string;
@@ -27,8 +33,10 @@ function identity(value: unknown, field: string): string {
 /**
  * 将 coordinator 权威返回的 run→workspace 绑定缓存在当前 Root runtime 生命周期内。
  * 失败不缓存；并发首次解析共享同一 promise；dispose 后的晚到结果不得回填缓存。
+ * 可选 readLedger 回退只在权威查询抛错时消费本地 ledger 枚举，且不放宽任何
+ * 唯一性/身份校验（TrustedRunBinding 约束保持不变）。
  */
-export function createTrustedRunBindingResolver(client: TrustedRunBindingClient, { rootSessionId }: { rootSessionId: string }) {
+export function createTrustedRunBindingResolver(client: TrustedRunBindingClient, { rootSessionId, readLedger }: { rootSessionId: string; readLedger?: TrustedRunBindingLedgerFallback }) {
   if (!client || typeof client.listOwned !== "function") throw new TypeError("trusted run binding client is invalid");
   const rootId = identity(rootSessionId, "rootSessionId");
   const cache = new Map<string, TrustedRunBinding>();
@@ -43,7 +51,12 @@ export function createTrustedRunBindingResolver(client: TrustedRunBindingClient,
     if (pending) return pending;
 
     const currentGeneration = generation;
-    const lookup = Promise.resolve(client.listOwned({ runId })).then((owned) => {
+    const lookup = Promise.resolve(client.listOwned({ runId }))
+      .catch((error: unknown) => {
+        if (typeof readLedger !== "function") throw error;
+        return readLedger(runId);
+      })
+      .then((owned) => {
       if (!Array.isArray(owned) || owned.length !== 1) throw new Error("trusted run binding is unavailable");
       const entry = owned[0];
       const workspaceId = identity(entry?.workspaceId, "workspaceId");

@@ -134,8 +134,9 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
 
   function settleOwnedDisposition(input: any, operation: "preserve" | "discard" | "release") {
     if (!workspaceService || !integrationQueue || !dispositionSettlement) throw new Error("coordinator settlement is unavailable");
-    const entry = workspaceService.listOwned({ ownerScope: input.ownerScope }).find(candidate => candidate.workspaceId === input.workspaceId);
-    if (!entry) throw Object.assign(new Error("workspace does not belong to this owner"), { code: "MANAGED_WORKSPACE_OWNER_SCOPE" });
+    // 已知 workspaceId 直读目标 receipt，不经过全局枚举；owner 不匹配或 ID 不
+    // 存在时由 readOwned fail-closed，不把空结果当成无 workspace。
+    const entry = workspaceService.readOwned({ workspaceId: input.workspaceId, ownerScope: input.ownerScope });
     const binding = { workspaceId: entry.workspaceId, leaseId: entry.leaseId, runId: entry.run?.runId ?? null, ownerScope: input.ownerScope };
     const queueItem = integrationQueue.findByBinding(binding);
     const prepared = workspaceService.prepareOwnedDisposition({ ...input, operation }, { settlementId: randomUUID(), queueItem });
@@ -146,9 +147,10 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
 
   function trustedWorkspace(binding: any) {
     if (!workspaceService) throw new Error("coordinator workspace service is unavailable");
-    const owned = workspaceService.listOwned({ ownerScope: binding.ownerScope });
-    const entry = Array.isArray(owned) ? owned.find((candidate: any) => candidate.workspaceId === binding.workspaceId) : undefined;
-    if (!entry || entry.run?.runId !== binding.runId) throw new Error("trusted run binding is unavailable");
+    // 目标 workspaceId 直读：owner 不匹配或记录损坏由 readOwned fail-closed，
+    // 这里只继续校验可信 run/lease 绑定本身。
+    const entry = workspaceService.readOwned({ workspaceId: binding.workspaceId, ownerScope: binding.ownerScope });
+    if (entry.run?.runId !== binding.runId) throw new Error("trusted run binding is unavailable");
     if (entry.leaseId !== binding.leaseId) throw new Error("trusted workspace lease mismatch");
     return entry;
   }
@@ -355,7 +357,7 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
     }
     // Replay after a crash between discard and receipt persistence must stay
     // idempotent; a released workspace already settled this proof.
-    const released = workspaceService!.listOwned({ ownerScope: proofOwnerScope }).find((entry: any) => entry.workspaceId === workspaceId);
+    const released = workspaceService!.readOwned({ workspaceId, ownerScope: proofOwnerScope });
     if (released?.state === "released") return { accepted: true, proofId: terminalProof.proofId, receipt: released };
     workspaceService!.recordTerminalProof({ workspaceId, ownerScope: proofOwnerScope, proof: terminalProof });
     const status = workspaceService!.statusOwned({ workspaceId, ownerScope: proofOwnerScope, terminalProof });
@@ -406,8 +408,7 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
       return structuredClone(trusted);
     };
     const publicBinding = () => {
-      const entry = workspaceService?.listOwned({ ownerScope }).find((candidate: any) => candidate.workspaceId === input.workspaceId);
-      if (!entry) throw Object.assign(new Error("workspace does not belong to this owner"), { code: "MANAGED_WORKSPACE_OWNER_SCOPE" });
+      const entry = workspaceService!.readOwned({ workspaceId: input.workspaceId, ownerScope });
       return { workspaceId: entry.workspaceId, leaseId: entry.leaseId, runId: entry.run?.runId ?? null, ownerScope };
     };
     const binding = ["prepare_auto_integration", "inspect_auto_integration", "advance_auto_integration"].includes(params.operation)
@@ -419,8 +420,9 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
       case "reserve": return workspaceService.reserve({ ...input, owner: { ...(input.owner ?? {}), kind: ownerScope.kind, rootSessionId: ownerScope.rootSessionId } });
       case "ensureAllocated": return workspaceService.ensureAllocated({ ...input, owner: { ...(input.owner ?? {}), kind: ownerScope.kind, rootSessionId: ownerScope.rootSessionId } });
       case "bindRun": {
-        const owned = workspaceService.listOwned({ ownerScope }).some((item: any) => item.workspaceId === input.workspaceId);
-        if (!owned) throw new Error("workspace does not belong to the current standalone session");
+        // 已知 workspaceId 直读：owner 不匹配/ID 不存在由 readOwned fail-closed，
+        // 不再把枚举空结果解释为未归属。
+        workspaceService.readOwned({ workspaceId: input.workspaceId, ownerScope });
         return workspaceService.bindRun(input);
       }
       case "listOwned": return workspaceService.listOwned(ownedInput);

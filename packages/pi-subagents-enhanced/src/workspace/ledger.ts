@@ -29,6 +29,7 @@ import {
 } from "./disposition-contract.ts";
 
 const RECORD_SCHEMA_V2 = "managed-workspace-ledger.v2";
+const LEGACY_RECORD_SCHEMA_V1 = "managed-workspace-ledger.v1";
 const LOCK_SCHEMA = "managed-workspace-lock.v1";
 const OWNER_TOKEN = /^managed-workspace-owner\.v1:[a-f0-9]{64}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -440,6 +441,76 @@ function scopeDirectories(stateRoot) {
     .map((entry) => path.join(repositoriesDir, entry.name));
 }
 
+// invalid record 的安全诊断投影：只保留 repository partition、record filename/
+// workspaceId、schema/error code 和可结构化解析的 owner scope；绝不包含
+// ownerToken、lease token、原始 JSON 或私有原始路径。
+export type LedgerOwnerScopeProjection = { kind: string; rootSessionId: string };
+export type LedgerInvalidRecordDiagnostic = {
+  kind: "ledger-record" | "ledger-storage";
+  status: "invalid";
+  repositoryPartition: string | null;
+  workspaceId: string | null;
+  schemaVersion: string | null;
+  legacyV1: boolean;
+  errorCode: string;
+  ownerScope: LedgerOwnerScopeProjection | null;
+  originRootPresent: boolean | null;
+};
+
+function parseOwnerScopeProjection(value): LedgerOwnerScopeProjection | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  if (typeof value.kind !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(value.kind) || value.kind.includes("..")) return null;
+  if (typeof value.rootSessionId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(value.rootSessionId) || value.rootSessionId.includes("..")) return null;
+  return { kind: value.kind, rootSessionId: value.rootSessionId };
+}
+
+function originRootPresence(parsed): boolean | null {
+  const originRoot = parsed?.request?.originRoot;
+  if (typeof originRoot !== "string" || originRoot.length === 0) return null;
+  try { return existsSync(originRoot); } catch { return null; }
+}
+
+function recordDiagnostic(repositoryPartition: string, workspaceId: string, parsed, errorCode: string): LedgerInvalidRecordDiagnostic {
+  const schemaVersion = typeof parsed?.schemaVersion === "string" ? parsed.schemaVersion : null;
+  return Object.freeze({
+    kind: "ledger-record",
+    status: "invalid",
+    repositoryPartition,
+    workspaceId,
+    schemaVersion,
+    legacyV1: schemaVersion === LEGACY_RECORD_SCHEMA_V1,
+    errorCode,
+    ownerScope: parseOwnerScopeProjection(parsed?.request?.owner),
+    originRootPresent: originRootPresence(parsed),
+  });
+}
+
+function storageDiagnostic(repositoryPartition: string | null, errorCode: string): LedgerInvalidRecordDiagnostic {
+  return Object.freeze({
+    kind: "ledger-storage",
+    status: "invalid",
+    repositoryPartition,
+    workspaceId: null,
+    schemaVersion: null,
+    legacyV1: false,
+    errorCode,
+    ownerScope: null,
+    originRootPresent: null,
+  });
+}
+
+// 复用单条 record 的全部严格校验做失败分类；未编码的异常（如 request contract
+// 抛出的 TypeError）统一归入 schema 失败，不放宽任何校验。
+function classifyRecordFailure(parsed, workspaceId): string | null {
+  try {
+    const request = validateRecordEnvelope(parsed, workspaceId);
+    validateRecord(parsed, canonicalOrigin(request.originRoot));
+    return null;
+  } catch (error) {
+    return error?.code ?? "MANAGED_WORKSPACE_SCHEMA";
+  }
+}
+
 export function createManagedWorkspaceLedger({ stateRoot = process.env.PI_CODING_WORKSPACE_DIR, storageRepositoryId, fault }: LedgerOptions = {}) {
   const root = normalizedStateRoot(stateRoot);
   if (storageRepositoryId !== undefined && !SHA256.test(storageRepositoryId)) throw failure("MANAGED_WORKSPACE_STORAGE", "storageRepositoryId is invalid");
@@ -550,7 +621,7 @@ export function createManagedWorkspaceLedger({ stateRoot = process.env.PI_CODING
     });
   }
 
-  function listScoped({ owner }: { owner: { kind: "standalone-subagent"; rootSessionId: string } }) {
+  function listScoped({ owner, onInvalid }: { owner: { kind: "standalone-subagent"; rootSessionId: string }; onInvalid?: (diagnostic: LedgerInvalidRecordDiagnostic) => void }) {
     if (!exactKeys(owner, ["kind", "rootSessionId"]) || owner.kind !== "standalone-subagent"
         || typeof owner.rootSessionId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(owner.rootSessionId) || owner.rootSessionId.includes("..")) {
       throw failure("MANAGED_WORKSPACE_OWNER_SCOPE", "workspace owner scope is invalid");
@@ -564,8 +635,20 @@ export function createManagedWorkspaceLedger({ stateRoot = process.env.PI_CODING
       for (const entry of readdirSync(recordsDir, { withFileTypes: true })) {
         if (!entry.name.endsWith(".json")) continue;
         if (!entry.isFile() || entry.isSymbolicLink()) throw failure("MANAGED_WORKSPACE_RECORD", "records storage contains a non-regular entry");
+        const workspaceId = entry.name.slice(0, -".json".length);
         const parsed = readPrivateJson(path.join(recordsDir, entry.name), "managed workspace record");
-        const request = validateRecordEnvelope(parsed, entry.name.slice(0, -".json".length));
+        if (typeof onInvalid === "function" && parsed?.schemaVersion === LEGACY_RECORD_SCHEMA_V1) {
+          // 带 owner 的跳过只允许三元条件同时成立：原始 schemaVersion 明确是
+          // v1 legacy、owner 形状可结构化解析、且 scope 可证明不等于查询 scope。
+          // v2 校验失败、owner 形状不可信或 scope 相同一律继续走下方严格
+          // fail-closed 路径；不信任任何坏 v2 record 自报的 owner。
+          const ownerScope = parseOwnerScopeProjection(parsed?.request?.owner);
+          if (ownerScope && (ownerScope.kind !== owner.kind || ownerScope.rootSessionId !== owner.rootSessionId)) {
+            onInvalid(recordDiagnostic(path.basename(repositoryDir), workspaceId, parsed, classifyRecordFailure(parsed, workspaceId) ?? "MANAGED_WORKSPACE_SCHEMA"));
+            continue;
+          }
+        }
+        const request = validateRecordEnvelope(parsed, workspaceId);
         if (hashValue(request) !== parsed.requestHash || request.workspaceId !== parsed.workspaceId) {
           throw failure("MANAGED_WORKSPACE_IDENTITY", "managed workspace request identity is invalid");
         }
@@ -576,7 +659,7 @@ export function createManagedWorkspaceLedger({ stateRoot = process.env.PI_CODING
     return records.sort((left, right) => left.workspaceId.localeCompare(right.workspaceId)).map((record) => structuredClone(record));
   }
 
-  function list({ originRoot, storagePartitionOnly = false }: LoadOptions & { storagePartitionOnly?: boolean } = {}) {
+  function list({ originRoot, storagePartitionOnly = false, onInvalid }: LoadOptions & { storagePartitionOnly?: boolean; onInvalid?: (diagnostic: LedgerInvalidRecordDiagnostic) => void } = {}) {
     const records = [];
     const scopes = originRoot
       ? [managedWorkspacePaths({ stateRoot: root, originRoot, workspaceId: "inventory", storageRepositoryId }).repositoryDir]
@@ -591,11 +674,63 @@ export function createManagedWorkspaceLedger({ stateRoot = process.env.PI_CODING
         if (!entry.isFile() || entry.isSymbolicLink()) throw failure("MANAGED_WORKSPACE_RECORD", "records storage contains a non-regular entry");
         const recordPath = path.join(recordsDir, entry.name);
         const parsed = readPrivateJson(recordPath, "managed workspace record");
+        // 无 owner 的 callback 扫描只允许跳过原始 schemaVersion 明确为 v1 legacy
+        // 的 record 并记录诊断；owner 字段不构成授权依据，v2/未知 schema 仍走
+        // 严格校验。未提供 callback 时保持默认严格 fail-closed 行为。
+        if (typeof onInvalid === "function" && parsed?.schemaVersion === LEGACY_RECORD_SCHEMA_V1) {
+          onInvalid(recordDiagnostic(path.basename(repositoryDir), entry.name.slice(0, -".json".length), parsed, classifyRecordFailure(parsed, entry.name.slice(0, -".json".length)) ?? "MANAGED_WORKSPACE_SCHEMA"));
+          continue;
+        }
         records.push(validateRecord(parsed, canonicalOrigin(parsed.request.originRoot)));
       }
     }
     return records.sort((left, right) => left.workspaceId.localeCompare(right.workspaceId)).map((record) => structuredClone(record));
   }
 
-  return Object.freeze({ stateRoot: root, reserve, load, mutate, list, listScoped, issueRecoveryChallenge, consumeRecoveryChallenge });
+  // 只读全 state root 扫描：报告所有无法通过单条严格校验的 record/storage 状态，
+  // 不修改任何文件，也不吞掉错误码；用于管理面 audit 与 legacy quarantine 规划。
+  function scanInvalidRecords(): LedgerInvalidRecordDiagnostic[] {
+    const diagnostics: LedgerInvalidRecordDiagnostic[] = [];
+    let partitions: string[] = [];
+    try {
+      partitions = scopeDirectories(root);
+    } catch (error) {
+      diagnostics.push(storageDiagnostic(null, error?.code ?? "MANAGED_WORKSPACE_STORAGE"));
+      return diagnostics;
+    }
+    for (const repositoryDir of partitions) {
+      const repositoryPartition = path.basename(repositoryDir);
+      const recordsDir = path.join(repositoryDir, "records");
+      if (!existsSync(recordsDir)) continue;
+      let entries;
+      try {
+        const info = lstatSync(recordsDir);
+        if (!info.isDirectory() || info.isSymbolicLink()) throw failure("MANAGED_WORKSPACE_STORAGE", "records storage is invalid");
+        entries = readdirSync(recordsDir, { withFileTypes: true });
+      } catch (error) {
+        diagnostics.push(storageDiagnostic(repositoryPartition, error?.code ?? "MANAGED_WORKSPACE_STORAGE"));
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.name.endsWith(".json")) continue;
+        const workspaceId = entry.name.slice(0, -".json".length);
+        const recordPath = path.join(recordsDir, entry.name);
+        let parsed;
+        let errorCode: string | null = null;
+        try {
+          if (!entry.isFile() || entry.isSymbolicLink()) throw failure("MANAGED_WORKSPACE_RECORD", "records storage contains a non-regular entry");
+          parsed = readPrivateJson(recordPath, "managed workspace record");
+          errorCode = classifyRecordFailure(parsed, workspaceId);
+        } catch (error) {
+          errorCode = error?.code ?? "MANAGED_WORKSPACE_RECORD";
+        }
+        if (errorCode === null) continue;
+        diagnostics.push(recordDiagnostic(repositoryPartition, workspaceId, parsed, errorCode));
+      }
+    }
+    return diagnostics.sort((left, right) =>
+      `${left.repositoryPartition ?? ""}/${left.workspaceId ?? ""}`.localeCompare(`${right.repositoryPartition ?? ""}/${right.workspaceId ?? ""}`));
+  }
+
+  return Object.freeze({ stateRoot: root, reserve, load, mutate, list, listScoped, scanInvalidRecords, issueRecoveryChallenge, consumeRecoveryChallenge });
 }
