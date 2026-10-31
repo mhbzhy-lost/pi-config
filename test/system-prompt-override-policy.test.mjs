@@ -120,7 +120,11 @@ const EXPECTED_SITE_COUNTS = Object.freeze({
   "data-dto": 1,
   "type-declaration": 2,
   "flag-classifier-literal": 2,
-  "append-flag-literal": 2,
+  // append-flag-literal 三处：src/session-owner/contract.ts 与 scripts/assert-session-tool-policy.ts
+  // 中的 flag 名分类集合成员；scripts/probes/goal-smoke.ts 冒烟 launcher 向 pi spawn argv
+  // 传入 --append-system-prompt 注入获授权冒烟提示（合法 append，非完整替换入口）。
+  // 第三处由 b5730308「feat(goal): 增加计划执行与多仓库支持」新增，已复核为合法 append 用法。
+  "append-flag-literal": 3,
 });
 
 const GLOBAL_FIXTURE = "# PI AGENTS GLOBAL 正文\n- 全局规则一\n- 全局规则二";
