@@ -33,7 +33,7 @@ test("compact spawn summary uses structured identity without mutating the result
 
   assert.equal(
     formatCompactSubagentSpawnSummary(result),
-    "* subagent started executor: 迁移 Shell 到官方 fullscreen",
+    "executor: 迁移 Shell 到官方 fullscreen · started",
   );
   assert.deepEqual(result, before);
 });
@@ -41,7 +41,7 @@ test("compact spawn summary uses structured identity without mutating the result
 test("compact spawn summary supports generic failures and rejects missing structured identity", () => {
   assert.equal(
     formatCompactSubagentSpawnSummary({ isError: true, details: { agent: "reviewer", title: "审查兼容性报告" } }),
-    "* subagent failed reviewer: 审查兼容性报告",
+    "reviewer: 审查兼容性报告 · failed",
   );
   for (const result of [
     { content: [{ type: "text", text: "Started guessed: from content" }], details: { title: "Missing agent" } },

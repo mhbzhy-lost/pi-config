@@ -728,7 +728,7 @@ test("spawn rendering keeps the complete execute result while showing one statef
 
   assert.deepEqual(
     renderers.renderSubagentCall(context.args, theme, context).render(120).map((line) => line.trimEnd()),
-    ["subagent start", "executor: Install the typed subagent runtime"],
+    ["subagent start · executor: Install the typed subagent runtime"],
   );
   assert.equal(
     result.content[0].text,
@@ -739,10 +739,10 @@ test("spawn rendering keeps the complete execute result while showing one statef
     renderers.renderSubagentResult(result, { expanded: false }, theme, context).render(120),
     [],
   );
-  assert.equal(context.state.subagentSpawnSummary, "* subagent started executor: Install the typed subagent runtime");
+  assert.equal(context.state.subagentSpawnSummary, "executor: Install the typed subagent runtime · started");
   assert.deepEqual(
     renderers.renderSubagentCall(context.args, theme, context).render(120).map((line) => line.trimEnd()),
-    ["* subagent started executor: Install the typed subagent runtime"],
+    ["executor: Install the typed subagent runtime · started"],
   );
   assert.deepEqual(
     renderers.renderSubagentResult(result, { expanded: true }, theme, context).render(120),
@@ -751,7 +751,7 @@ test("spawn rendering keeps the complete execute result while showing one statef
 
   const failed = { isError: true, details: { agent: "executor", title: "Install the typed subagent runtime" } };
   assert.deepEqual(renderers.renderSubagentResult(failed, { expanded: false }, theme, context).render(120), []);
-  assert.equal(context.state.subagentSpawnSummary, "* subagent failed executor: Install the typed subagent runtime");
+  assert.equal(context.state.subagentSpawnSummary, "executor: Install the typed subagent runtime · failed");
 
   const statusState = { subagentSpawnSummary: "unchanged" };
   assert.deepEqual(

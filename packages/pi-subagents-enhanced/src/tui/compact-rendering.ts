@@ -169,7 +169,10 @@ export function formatCompactSubagentSpawnSummary(result: unknown, context?: { i
   const agent = typeof details?.agent === "string" ? details.agent.trim() : "";
   const title = typeof details?.title === "string" ? details.title.trim() : "";
   if (!agent || !title) return undefined;
-  return `* subagent ${value?.isError === true || context?.isError === true ? "failed" : "started"} ${agent}: ${title}`;
+  // 成功/失败已由工具卡背景色表达，回执只保身份 + `·` + 状态，不带 glyph 前缀。
+  return value?.isError === true || context?.isError === true
+    ? `${agent}: ${title} · failed`
+    : `${agent}: ${title} · started`;
 }
 
 export function formatCompactSubagentSteerResult(result: unknown, args: unknown, context?: { isError?: boolean }): string {

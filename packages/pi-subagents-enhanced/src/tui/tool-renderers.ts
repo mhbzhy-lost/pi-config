@@ -46,14 +46,15 @@ function toolHint(context: unknown): string | undefined {
   return isRecord(context) && typeof context.tool === "string" ? context.tool : undefined;
 }
 
-function spawnStartingSummary(args: unknown, operation?: string): string | undefined {
+// spawn call 的目标投影：agent + title 身份（与 result 回执同源同格式），不含工具名/操作前缀。
+// 新工具按工具名映射的 operation 判定 spawn；无工具名提示（旧历史调用）时沿用 args.action 缺失判定。
+function spawnStartingTarget(args: unknown, operation?: string): string | undefined {
   if (!isRecord(args)) return undefined;
-  // 新工具按工具名映射的 operation 判定 spawn；无工具名提示（旧历史调用）时沿用 args.action 缺失判定。
   const spawn = operation === undefined ? !Object.hasOwn(args, "action") : operation === "start";
   if (!spawn) return undefined;
   const agent = typeof args.agent === "string" ? args.agent.trim() : "";
   const title = typeof args.title === "string" ? args.title.trim() : "";
-  return agent && title ? `subagent start\n${agent}: ${title}` : undefined;
+  return agent && title ? `${agent}: ${title}` : undefined;
 }
 
 export function createSubagentToolRenderers() {
@@ -69,18 +70,22 @@ export function createSubagentToolRenderers() {
   const renderSubagentCall: NonNullable<ToolRenderers["renderCall"]> = (args, theme, context) => {
     const tool = toolHint(context);
     const operation = operationHint(SUBAGENT_OPERATION_BY_TOOL, context);
-    const starting = spawnStartingSummary(args, operation);
-    if (!starting) {
-      const record: Record<string, unknown> = isRecord(args) ? args : {};
-      const action = typeof record.action === "string" ? record.action.trim() : "";
-      const target = record.id ?? record.runId ?? record.index ?? record.dir;
-      // 新工具名本身已表达 operation，不再从 args.action 取；旧历史名保持原有显示形状。
-      const label = tool ?? "subagent";
-      const suffix = operation === undefined && action ? ` ${action}` : "";
-      return new Text(theme.fg("dim", `${label}${suffix}${target !== undefined ? ` · ${String(target)}` : ""}`), 0, 0);
-    }
-    const summary = context?.state?.[SUBAGENT_SPAWN_SUMMARY_KEY] ?? starting;
-    return new Text(typeof summary === "string" ? theme.fg("dim", summary) : "", 0, 0);
+    const record: Record<string, unknown> = isRecord(args) ? args : {};
+    const action = typeof record.action === "string" ? record.action.trim() : "";
+    const target = record.id ?? record.runId ?? record.index ?? record.dir;
+    // 所有操作（含 spawn）统一为单行 `工具名/操作 · 目标` 紧凑层级：新工具名本身已表达
+    // operation，不再从 args.action 取；旧历史名保持 `subagent <action>` 措辞（spawn
+    // 历史无 action，沿用既有「subagent start」字样）。spawn 在 result 已把统一回执
+    // 写入 context.state 时按既有机制以回执行替换，维持一个 stateful call line。
+    const label = tool ?? "subagent";
+    const suffix = operation === undefined && action ? ` ${action}` : "";
+    const spawnTarget = spawnStartingTarget(args, operation);
+    const stateSummary = context?.state?.[SUBAGENT_SPAWN_SUMMARY_KEY];
+    const receipt = typeof stateSummary === "string" ? stateSummary : undefined;
+    const text = spawnTarget
+      ? receipt ?? `${label}${operation === undefined ? " start" : ""} · ${spawnTarget}`
+      : `${label}${suffix}${target !== undefined ? ` · ${String(target)}` : ""}`;
+    return new Text(theme.fg("dim", text), 0, 0);
   };
   const renderSubagentResult: NonNullable<ToolRenderers["renderResult"]> = (result, _options, theme, context) => {
     const args = context?.args;
