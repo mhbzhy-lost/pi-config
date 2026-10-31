@@ -55,6 +55,14 @@ export async function loadOpenAIApi() {
   return module.openAIResponsesApi();
 }
 
+// 保留 OpenAI Codex 分支：codex 后端（chatgpt.com/backend-api/codex）与 api.openai.com
+// 是两套独立网关，账号在 subscription sharing 上的资格限制不影响前者。codex 需要
+// 自己的登录（JWT 里带 chatgpt_account_id claim），因此两个分支并行注册。
+export async function loadOpenAICodexApi() {
+  const module = await import("@earendil-works/pi-ai/compat");
+  return module.openAICodexResponsesApi();
+}
+
 
 function validProxy(value: unknown): value is string {
   if (typeof value !== "string" || !value.trim()) return false;
@@ -131,23 +139,37 @@ export async function ensureScopedProxyFetch(
 }
 
 // 只覆盖 provider 的 api + streamSimple：models、baseUrl、auth、filter、classify
-// 全部沿用内置 openai provider 定义（provider-composer 的 overlay 合并）。
-// 注入的 fetch 仅存在于该 provider 的 streamSimple 闭包内，不改 process.env，
+// 全部沿用内置 provider 定义（provider-composer 的 overlay 合并）。
+// 注入的 fetch 仅存在于被覆盖 provider 的 streamSimple 闭包内，不改 process.env，
 // 因此 deepseek、zai-coding-cn 等其他 provider 完全不受影响。
 export async function createOpenAIProxyExtension(
   pi: any,
-  { openaiApi, proxy, createProxyFetch = defaultCreateProxyFetch }: any = {},
+  { openaiApi, codexApi, proxy, createProxyFetch = defaultCreateProxyFetch }: any = {},
 ) {
   if (!validProxy(proxy)) return;
-  const api = openaiApi ?? await loadOpenAIApi();
   const fetch = await createProxyFetch(proxy);
+  // 宿主可能在设置变更后重装全局 fetch，这里在每次请求前把 OAuth 白名单包装层补回来。
+  const keepOAuthProxy = () => {
+    void ensureScopedProxyFetch(proxy, { createProxyFetch: async () => fetch });
+  };
   await ensureScopedProxyFetch(proxy, { createProxyFetch: async () => fetch });
+
+  const openai = openaiApi ?? await loadOpenAIApi();
   pi.registerProvider("openai", {
     api: "openai-responses",
     streamSimple(model: any, context: any, options: any = {}) {
-      // 宿主可能在设置变更后重装全局 fetch，这里顺手把 OAuth 白名单包装层补回来。
-      void ensureScopedProxyFetch(proxy, { createProxyFetch: async () => fetch });
-      return api.streamSimple(model, context, { ...options, fetch });
+      keepOAuthProxy();
+      return openai.streamSimple(model, context, { ...options, fetch });
+    },
+  });
+
+  const codex = codexApi ?? await loadOpenAICodexApi();
+  pi.registerProvider("openai-codex", {
+    api: "openai-codex-responses",
+    streamSimple(model: any, context: any, options: any = {}) {
+      keepOAuthProxy();
+      // codex 的 auto 传输会选 WebSocket，而 WebSocket 不吃注入的 fetch；强制 sse 才能走代理。
+      return codex.streamSimple(model, context, { ...options, fetch, transport: "sse" });
     },
   });
 }

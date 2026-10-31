@@ -10,11 +10,18 @@ const {
   createOpenAIProxyExtension,
   ensureScopedProxyFetch,
   loadOpenAIApi,
+  loadOpenAICodexApi,
   loadOpenAIProxyConfig,
 } = await jiti.import("../pi/extensions/openai-proxy.ts");
 
 test("OpenAI proxy default API loader uses the public openai-responses api factory", async () => {
   const api = await loadOpenAIApi();
+  assert.equal(typeof api.streamSimple, "function");
+  assert.equal(typeof api.stream, "function");
+});
+
+test("Codex proxy default API loader uses the public openai-codex-responses api factory", async () => {
+  const api = await loadOpenAICodexApi();
   assert.equal(typeof api.streamSimple, "function");
   assert.equal(typeof api.stream, "function");
 });
@@ -45,25 +52,32 @@ test("OpenAI proxy config rejects credentials and reports invalid configuration"
   }
 });
 
-test("OpenAI proxy extension scopes proxy settings to the openai stream", async () => {
+test("OpenAI proxy extension scopes proxy settings to the openai streams", async () => {
   const originalProxy = { HTTP_PROXY: process.env.HTTP_PROXY, HTTPS_PROXY: process.env.HTTPS_PROXY };
-  let registration;
+  const registrations = [];
   const seen = [];
   const proxyFetch = () => {};
   const proxyFetches = [];
   const openaiApi = {
     streamSimple(model, context, options) {
-      seen.push({ model, context, options });
-      return "stream";
+      seen.push({ provider: "openai", model, context, options });
+      return "openai-stream";
+    },
+  };
+  const codexApi = {
+    streamSimple(model, context, options) {
+      seen.push({ provider: "openai-codex", model, context, options });
+      return "codex-stream";
     },
   };
 
   await createOpenAIProxyExtension({
     registerProvider(name, config) {
-      registration = { name, config };
+      registrations.push({ name, config });
     },
   }, {
     openaiApi,
+    codexApi,
     proxy: "http://127.0.0.1:7897",
     createProxyFetch(proxy) {
       proxyFetches.push(proxy);
@@ -71,20 +85,30 @@ test("OpenAI proxy extension scopes proxy settings to the openai stream", async 
     },
   });
 
-  assert.equal(registration.name, "openai");
-  assert.equal(registration.config.api, "openai-responses");
-  const model = { provider: "openai", id: "gpt-5.6-sol" };
+  assert.deepEqual(registrations.map((r) => [r.name, r.config.api]), [
+    ["openai", "openai-responses"],
+    ["openai-codex", "openai-codex-responses"],
+  ]);
+
+  const [openaiRegistration, codexRegistration] = registrations;
+  const openaiModel = { provider: "openai", id: "gpt-5.6-sol" };
+  const codexModel = { provider: "openai-codex", id: "gpt-5.6-sol" };
   const context = { messages: [] };
-  const result = registration.config.streamSimple(model, context, {
+
+  assert.equal(openaiRegistration.config.streamSimple(openaiModel, context, {
     apiKey: "runtime-token",
     env: { EXISTING: "preserved" },
     reasoning: "high",
-  });
+  }), "openai-stream");
+  assert.equal(codexRegistration.config.streamSimple(codexModel, context, {
+    apiKey: "runtime-token",
+    transport: "auto",
+  }), "codex-stream");
 
-  assert.equal(result, "stream");
-  // 只注入 fetch：apiKey、env、reasoning 等原样透传，不额外注入 transport 或代理 env。
-  assert.deepEqual(seen, [{
-    model,
+  // openai 只注入 fetch：apiKey、env、reasoning 等原样透传，不额外注入 transport。
+  assert.deepEqual(seen[0], {
+    provider: "openai",
+    model: openaiModel,
     context,
     options: {
       apiKey: "runtime-token",
@@ -92,8 +116,19 @@ test("OpenAI proxy extension scopes proxy settings to the openai stream", async 
       reasoning: "high",
       fetch: proxyFetch,
     },
-  }]);
-  assert.equal("transport" in seen[0].options, false);
+  });
+  // codex 的 auto 传输会选 WebSocket（不吃注入的 fetch），必须强制 sse。
+  assert.deepEqual(seen[1], {
+    provider: "openai-codex",
+    model: codexModel,
+    context,
+    options: {
+      apiKey: "runtime-token",
+      transport: "sse",
+      fetch: proxyFetch,
+    },
+  });
+
   assert.deepEqual(proxyFetches, ["http://127.0.0.1:7897"]);
   assert.equal(process.env.HTTP_PROXY, originalProxy.HTTP_PROXY);
   assert.equal(process.env.HTTPS_PROXY, originalProxy.HTTPS_PROXY);
