@@ -24,6 +24,24 @@ function piRunner() {
   };
 }
 const rpc = { dispose() {} };
+// 2c00477a 起 ready 飞行以真实 ExtensionContext 事实面推进：runtimeIdentity、名册
+// initialize 与 matchesRuntime 都依赖 ctx.sessionManager 与 repository-configured
+// admission。真实 Host 的 session_start ctx 必带 sessionManager（ExtensionRunner
+// createContext 保证），生产装配入口（installSubagentRuntime）也总是注入真实
+// admission 源；本文件的合成 ctx 按同一事实面补最小 stub，不要求 production
+// 为缺字段的合成 ctx 增加兼容分支。
+const repositoryAdmission = {
+  async discoverAgents() {
+    return { admission: "repository-configured", agents: [{ name: "executor", description: "executor" }] };
+  },
+};
+function syntheticSessionCtx(pi, sessionId) {
+  // 真实 Host 的 ctx.sessionManager 是同一会话内跨代稳定的身份对象；合成 runner
+  // 用 pi.events 充当该身份，使 session lane 与 pi fallback lane 重合，未绑定过
+  // session lane 的前代债务仍留在同一 lane，可被新代 ready 偿还。
+  pi.events.getSessionId = () => sessionId;
+  return { cwd: "/repo", sessionManager: pi.events };
+}
 async function emitRunner(pi, type, event = {}, ctx = {}) {
   // ExtensionRunner records an error and continues with later handlers.
   const errors = [];
@@ -40,6 +58,7 @@ test("project startup observes a synchronous recovered started event as an unown
   installHeadlessTypedSubagentRuntime(pi, {
     cleanupStore: {},
     rpc,
+    ...repositoryAdmission,
     bootstrap(api) {
       api.registerTool({ name: "subagent_supervisor", execute() {} });
       api.on("session_start", () => {
@@ -68,7 +87,7 @@ test("project startup observes a synchronous recovered started event as an unown
   });
 
   try {
-    const errors = await emitRunner(pi, "session_start", { reason: "reload" }, { cwd: "/repo" });
+    const errors = await emitRunner(pi, "session_start", { reason: "reload" }, syntheticSessionCtx(pi, rootSessionId));
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(errors, []);
     assert.ok(broker, "the project startup hook must run before upstream recovery");
@@ -110,15 +129,15 @@ test("reload gate keeps a bootstrapped RPC bridge isolated until old shutdown de
     api.on("session_start", () => started.push(generation));
     api.on("session_shutdown", () => {});
   };
-  installHeadlessTypedSubagentRuntime(pi, { cleanupStore: store, rpc, bootstrap: bootstrap("old"), async beforeRuntimeDispose() { if (failDrain) throw new Error("old drain"); pi.events.emit("request"); } });
-  await emitRunner(pi, "session_start");
+  installHeadlessTypedSubagentRuntime(pi, { cleanupStore: store, rpc, ...repositoryAdmission, bootstrap: bootstrap("old"), async beforeRuntimeDispose() { if (failDrain) throw new Error("old drain"); pi.events.emit("request"); } });
+  await emitRunner(pi, "session_start", {}, syntheticSessionCtx(pi, "reload-gate-session"));
   pi.events.emit("request");
   assert.deepEqual(replies, ["old"]);
   await assert.rejects(() => pi.handlers.get("session_shutdown")[0]({}, {}), /old drain/);
 
-  installHeadlessTypedSubagentRuntime(pi, { cleanupStore: store, rpc, bootstrap: bootstrap("new") });
+  installHeadlessTypedSubagentRuntime(pi, { cleanupStore: store, rpc, ...repositoryAdmission, bootstrap: bootstrap("new") });
   failDrain = false;
-  const errors = await emitRunner(pi, "session_start");
+  const errors = await emitRunner(pi, "session_start", {}, syntheticSessionCtx(pi, "reload-gate-session"));
   assert.deepEqual(errors, [], "the runner may swallow failures, but no later handler may bypass ready");
   assert.deepEqual(replies, ["old", "old"], "the new bridge is still unsubscribed during old drain");
   assert.deepEqual(started, ["old", "new"]);
@@ -155,6 +174,12 @@ test("real Pi reload keeps every RPC bridge inactive until old debt is repaid", 
       runtime = installHeadlessTypedSubagentRuntime(pi, {
         cleanupStore,
         rpc: { dispose() { order.push(`project-${current}`); } },
+        // 2c00477a 起 ready 在 beforeSessionStart 后 await 名册 initialize，admission
+        // 源缺失时按声明语义 fail-closed（AGENT_ADMISSION_UNAVAILABLE，见
+        // docs/plans/2026-10-27-subagent-catalog-injection.md §3.7 与 F6 验收）；
+        // 生产装配入口总是注入真实 admission 源，本用例同步注入
+        // repository-configured 名册以维持“健康 runtime 的 reload 门控”断言意图。
+        ...repositoryAdmission,
         bootstrap(api) {
           api.registerTool({ name: "subagent_supervisor", execute() {} });
           api.events.on("shutdown-debt:request", () => replies.push(current));
@@ -239,10 +264,10 @@ test("direct replacement retains a failed dispose as retryable debt", async () =
     bootstrap() {},
     rpc: { dispose() { calls.push("old-dispose"); if (failDispose) throw new Error("old dispose failed"); } },
   });
-  const current = installHeadlessTypedSubagentRuntime(pi, { cleanupStore: store, bootstrap() {}, rpc });
+  const current = installHeadlessTypedSubagentRuntime(pi, { cleanupStore: store, ...repositoryAdmission, bootstrap() {}, rpc });
   await new Promise((resolve) => setImmediate(resolve));
   failDispose = false;
-  await current.ready({}, {});
+  await current.ready({}, syntheticSessionCtx(pi, "direct-replacement-dispose"));
   assert.deepEqual(calls, ["old-dispose", "old-dispose"]);
   assert.equal(store.__typedSubagentRuntimeShutdownDebt.debts.length, 1, "only the current generation debt remains");
 });
@@ -256,12 +281,12 @@ test("replacement disposal cannot settle debt after ordered cleanup fails", asyn
     rpc: { dispose() { return disposePending; } },
     async beforeRuntimeDispose() { cleanupCalls += 1; if (cleanupFails) throw new Error("ordered cleanup failed"); },
   });
-  const current = installHeadlessTypedSubagentRuntime(pi, { cleanupStore: store, bootstrap() {}, rpc });
-  await assert.rejects(() => current.ready({}, {}), /ordered cleanup failed/);
+  const current = installHeadlessTypedSubagentRuntime(pi, { cleanupStore: store, ...repositoryAdmission, bootstrap() {}, rpc });
+  await assert.rejects(() => current.ready({}, syntheticSessionCtx(pi, "replacement-ordered-cleanup")), /ordered cleanup failed/);
   releaseDispose();
   await new Promise((resolve) => setImmediate(resolve));
   cleanupFails = false;
-  await current.ready({}, {});
+  await current.ready({}, syntheticSessionCtx(pi, "replacement-ordered-cleanup"));
   assert.equal(cleanupCalls, 2, "a transport disposal result must not erase failed ordered cleanup debt");
 });
 
@@ -302,11 +327,11 @@ test("three direct replacements repay every intermediate generation in order", a
     bootstrap() {},
     rpc: { dispose() { calls.push("second"); } },
   });
-  const current = installHeadlessTypedSubagentRuntime(pi, { cleanupStore: store, bootstrap() {}, rpc });
+  const current = installHeadlessTypedSubagentRuntime(pi, { cleanupStore: store, ...repositoryAdmission, bootstrap() {}, rpc });
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(calls, ["first"]);
   releaseFirst();
-  await current.ready({}, {});
+  await current.ready({}, syntheticSessionCtx(pi, "three-direct-replacements"));
   assert.deepEqual(calls, ["first", "second"]);
   await pi.handlers.get("session_shutdown").at(-1)({}, {});
   assert.equal(store.__typedSubagentRuntimeShutdownDebt.debts.length, 0);
