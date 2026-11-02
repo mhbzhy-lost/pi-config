@@ -19,7 +19,7 @@ import { createSubagentDispatchTrace, createSubagentDispatchTraceFileSink, insta
 import { captureSupervisorCorrelation, reconcileSupervisorConsumption } from "../src/subagent-dispatch/supervisor-consumption.ts";
 import { registerConfiguredChildToolCeiling } from "../src/subagent-dispatch/child-tool-policy.ts";
 import { createSupervisorControlPlane, supervisorCanonicalDigest } from "../src/subagent-dispatch/supervisor-control-plane.ts";
-import { runtimeFromStatus } from "../src/subagent-dispatch/runtime-state.ts";
+import { createSupervisorRuntimeReader } from "../src/subagent-dispatch/supervisor-runtime-source.ts";
 import { createRenewableTypedSubagentRpcClient, createTypedSubagentRpcClient } from "../src/subagent-dispatch/rpc-client.ts";
 import { createCoordinatorProofOutbox } from "../src/subagent-dispatch/coordinator-proof-outbox.ts";
 import { classifyTerminalProofBinding } from "../src/subagent-dispatch/terminal-proof-binding.ts";
@@ -487,18 +487,15 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
         throw error;
       }
     },
-    readRuntime: async (runId) => {
-      if (!brokerReady) return undefined;
-      try {
-        const status: any = await rpc.status({ id: runId });
-        const owner = broker ? await broker.readOwnerReceipt(runId) : undefined;
-        const runtime = runtimeFromStatus(runId, status);
-        return { ...runtime, ...(owner?.ownerGeneration !== undefined ? { ownerGeneration: owner.ownerGeneration } : {}) };
-      } catch (error) {
-        if (process.env.T11B1_DEBUG === "1") console.error(`[t11b1-debug] runtime-read error=${error instanceof Error ? error.message : String(error)} runId=${runId}`);
-        return undefined;
-      }
-    },
+    // 双源判定：主链（rpc.status → runtimeFromStatus）判 running 零变化；缺源场景
+    // （session-guard 空快照等）经 broker 生命周期登记二次判定，拒绝路径落诊断。
+    // 实现与语义见 src/subagent-dispatch/supervisor-runtime-source.ts。
+    readRuntime: createSupervisorRuntimeReader({
+      brokerReady: () => brokerReady,
+      broker: () => broker,
+      status: (args: { id: string }) => rpc.status(args),
+      diagnosticSink: () => diagnosticSink,
+    }),
   });
   // 首派 workspace.run 依法只有 runId/asyncDir；profile 归官方 broker binding 所有。
   const managedCodingBinding = (record: any, owner: any, currentBroker: RootBrokerServer) => {
