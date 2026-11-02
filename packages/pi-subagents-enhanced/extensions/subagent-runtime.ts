@@ -41,6 +41,7 @@ import { createManagedWorkspaceService } from "../src/workspace/service.ts";
 import { createCoordinatorDispositionFacade } from "../src/workspace/disposition-facade.ts";
 import { createWorkspaceCompletionReminder } from "../src/workspace/completion-reminder.ts";
 import { bindManagedWorkspaceServiceSession, unbindManagedWorkspaceServiceSession } from "../src/workspace/registry.ts";
+import { descriptorBrokerBindingReplay, readResumeTargetDescriptor, resolveAsyncRunsRootDir } from "../src/subagent-dispatch/resume-lineage.ts";
 
 export function shouldStartRepositoryCoordinator(cwd: string): boolean {
   try {
@@ -461,6 +462,123 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
   let workspaceRootSessionId: string | undefined;
   let workspaceLifecycleSessionId: string | undefined;
   let childToolCeilingRegistration: { dispose(): void } | undefined;
+  // managed resume 的结构化诊断：只经既有 diagnosticSink 通道，不新增日志面；
+  // sink 自身故障不影响选路。
+  const managedResumeDiagnostic = (phase: string, payload: Record<string, unknown>) => {
+    try { diagnosticSink?.({ version: 1, phase, ...payload }); }
+    catch (diagnosticError) { console.error("[subagent-runtime] managed resume diagnostic sink failed", diagnosticError); }
+  };
+  // managed resume 的 lineage 归一化（缺陷修复规格 A）：resume 请求携带旧祖先 run id
+  // 时，workspace ledger 只按当前 owner run 记账，直接以请求 id 查 owned receipts 必然
+  // 为空并静默放行，复活 child 会因 broker binding 5s 超时失败。此处沿 resume intent
+  // 链（integration-queue 持久记录的 sourceRunId→resumedRun）把旧祖先 id 解析为同一
+  // workspace lineage 的当前 owner run：从本 root session 拥有的全部 workspace record
+  // 出发连接 coordinator 收集 intents，逐跳校验 workspace/lease 与首跳一致；环、跨
+  // workspace、歧义或深度超限一律视为不可解析，交由 fail-closed 分支处置。
+  const resolveManagedResumeLineageOwner = async (sourceRunId: string): Promise<{
+    resolvedRunId?: string; record?: any; chain: string[]; sourceAsyncDir?: string; lineageWorkspaceId?: string; ownedByRoot: any[];
+  }> => {
+    if (!broker || !workspaceService) throw repositoryError();
+    const currentBroker = broker;
+    const intentsBySource = new Map<string, any>();
+    const ownedByRoot: any[] = [];
+    try { ownedByRoot.push(...ownedReceipts()); } catch (error) {
+      // 枚举失败不猜 lineage：按不可解析处理（fail-closed 分支仍会复核 descriptor）。
+      managedResumeDiagnostic("managed-resume-lineage-enumeration-failed", { sourceRunId, error, cause: (error as any)?.cause });
+    }
+    const visitedRepositories = new Set<string>();
+    for (const ownedReceipt of ownedByRoot) {
+      let context: RepositoryContext;
+      try { ({ context } = await selectReceipt(ownedReceipt.run?.runId, ownedReceipt.workspaceId)); }
+      catch (error) {
+        managedResumeDiagnostic("managed-resume-lineage-repository-unavailable", { sourceRunId, workspaceId: ownedReceipt?.workspaceId, error, cause: (error as any)?.cause });
+        continue;
+      }
+      if (visitedRepositories.has(context.identity.repositoryId)) continue;
+      visitedRepositories.add(context.identity.repositoryId);
+      let intents: unknown;
+      try { intents = await context.client.recoveryStatus(); } catch (error) {
+        managedResumeDiagnostic("managed-resume-lineage-intents-unavailable", { sourceRunId, repositoryId: context.identity.repositoryId, error, cause: (error as any)?.cause });
+        continue;
+      }
+      if (!Array.isArray(intents)) continue;
+      for (const entry of intents) {
+        if (entry?.version !== "integration-resume-intent.v1" || typeof entry.sourceRunId !== "string") continue;
+        if (entry.ownerScope?.rootSessionId !== currentBroker.rootSessionId) continue;
+        const prior = intentsBySource.get(entry.sourceRunId);
+        if (!prior || (entry.attempt ?? 0) >= (prior.attempt ?? 0)) intentsBySource.set(entry.sourceRunId, entry);
+      }
+    }
+    const chain = [sourceRunId];
+    const seen = new Set(chain);
+    const first = intentsBySource.get(sourceRunId);
+    const lineageBinding = first ? { workspaceId: first.workspaceId, leaseId: first.leaseId } : undefined;
+    const sourceAsyncDir = typeof first?.sourceAsyncDir === "string" && path.isAbsolute(first.sourceAsyncDir) ? first.sourceAsyncDir : undefined;
+    let current = sourceRunId;
+    for (let hop = 0; hop < 16; hop++) {
+      const intent = intentsBySource.get(current);
+      if (!intent) break;
+      const next = typeof intent.resumedRun?.runId === "string" ? intent.resumedRun.runId : undefined;
+      if (!next || seen.has(next)) break;
+      // 续跑链不允许跨 workspace/lease：与首跳不一致即视为链证据不可信。
+      if (lineageBinding && (intent.workspaceId !== lineageBinding.workspaceId || intent.leaseId !== lineageBinding.leaseId)) break;
+      chain.push(next);
+      seen.add(next);
+      current = next;
+      let ownedAtNext: any[];
+      try { ownedAtNext = ownedReceipts(next); } catch { break; }
+      if (ownedAtNext.length === 1) {
+        const record = ownedAtNext[0];
+        if (lineageBinding && record.workspaceId === lineageBinding.workspaceId && record.leaseId === lineageBinding.leaseId
+            && record.owner?.kind === "standalone-subagent" && record.owner.rootSessionId === currentBroker.rootSessionId) {
+          return { resolvedRunId: current, record, chain, sourceAsyncDir, lineageWorkspaceId: lineageBinding?.workspaceId, ownedByRoot };
+        }
+        // ledger 记录与 intent lineage 证据不一致：不猜，按不可解析处置。
+        break;
+      }
+      if (ownedAtNext.length > 1) {
+        managedResumeDiagnostic("managed-resume-lineage-ambiguous-owner", { sourceRunId, runId: next, matches: ownedAtNext.length });
+        break;
+      }
+      // 该 run 已被再次续跑改绑（owned receipts 为空）：沿链继续。
+    }
+    return { chain, sourceAsyncDir, lineageWorkspaceId: lineageBinding?.workspaceId, ownedByRoot };
+  };
+  // 归一化不可行时的 fail-closed 判定（缺陷修复规格 B）：复活目标 descriptor 将重放
+  // broker 绑定装配（extensionBindings 含 pi-config.root/1，或 requiredExtensions 含
+  // integration-queue.ts / root-session-owner.ts）即快速失败 RESUME_BINDING_BLOCKED；
+  // 无 broker 绑定装配的非托管目标保持既有静默放行（含跨 scope 复查）。
+  const blockOrPassUnresolvableLineageResume = (sourceRunId: string, lineage: Awaited<ReturnType<typeof resolveManagedResumeLineageOwner>>, note?: string) => {
+    const asyncDir = lineage.sourceAsyncDir ?? path.join(resolveAsyncRunsRootDir(), sourceRunId);
+    const descriptorRead = readResumeTargetDescriptor(asyncDir);
+    const replay = descriptorRead.status === "read" ? descriptorBrokerBindingReplay(descriptorRead.descriptor)
+      : { replays: false, rootBinding: false, brokerRequiredExtension: false };
+    const currentOwnerRunId = lineage.lineageWorkspaceId !== undefined
+      ? lineage.ownedByRoot.find((record: any) => record.workspaceId === lineage.lineageWorkspaceId)?.run?.runId : undefined;
+    if (replay.replays) {
+      managedResumeDiagnostic("managed-resume-binding-blocked", {
+        sourceRunId, chain: lineage.chain, asyncDir, descriptorStatus: descriptorRead.status,
+        descriptorRootBinding: replay.rootBinding, descriptorBrokerRequiredExtension: replay.brokerRequiredExtension,
+        lineageWorkspaceId: lineage.lineageWorkspaceId, currentOwnerRunId, note,
+      });
+      throw Object.assign(new Error(
+        `managed resume broker binding blocked: run ${sourceRunId} 不是其 workspace lineage 的当前 owner run（归一化解析未达成${note ? `，${note}` : ""}），且其 recovery descriptor 将重放 Root Broker 绑定装配（${replay.rootBinding ? "extensionBindings 含 pi-config.root/1" : "requiredExtensions 含 broker 绑定扩展"}）；静默放行会使复活 child 在装载期 5s 轮询后以「child broker binding身份未就绪」必然失败。`
+        + (currentOwnerRunId ? `请改用当前 owner run id（${currentOwnerRunId}）重新发起 resume，或放弃续跑改为 fresh 派发新 run。` : "请改用该 lineage 当前 owner run id 重新发起 resume（可经 subagent status 或 workspace 记录查询），或放弃续跑改为 fresh 派发新 run。")
+        + (lineage.chain.length > 1 ? `lineage 链：${lineage.chain.join(" -> ")}。` : ""),
+      ), { code: "RESUME_BINDING_BLOCKED" });
+    }
+    // 非托管目标（descriptor 无 broker 绑定装配）保持现状静默放行；仅补记诊断。
+    managedResumeDiagnostic("managed-resume-unmanaged-passthrough", {
+      sourceRunId, chain: lineage.chain, asyncDir, descriptorStatus: descriptorRead.status, note,
+    });
+    if (singleRepositoryHost) return undefined;
+    // 跨 scope 复查只跳过明确 v1 legacy 并记诊断；v2/未知 schema 仍阻断。
+    const crossScope = createManagedWorkspaceLedger({ stateRoot: process.env.PI_CODING_WORKSPACE_DIR })
+      .list({ onInvalid: (diagnostic: unknown) => forwardLedgerInvalidRecord(diagnosticSink, diagnostic) })
+      .filter((record: any) => record.run?.runId === sourceRunId);
+    if (crossScope.length > 0) throw repositoryError();
+    return undefined;
+  };
   const supervisorControlPlane = createSupervisorControlPlane({
     persistenceRoot: (typeof process.env.PI_CODING_WORKSPACE_DIR === "string" && process.env.PI_CODING_WORKSPACE_DIR.length > 0
       ? process.env.PI_CODING_WORKSPACE_DIR
@@ -872,44 +990,65 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
           // 既有 resume 阻塞语义（保留 cause），不降级为「没有 workspace」。
           throw Object.assign(new Error("managed resume owned receipts are unavailable"), { code: "RESUME_BINDING_BLOCKED", cause: error });
         }
+        // 绑定键归一化：默认按请求 id；请求 id 是旧祖先 id（ledger 已改绑到续跑后的新
+        // run）时改写为 lineage 当前 owner run，后续 register+activate 全部按 owner run
+        // 走既有合同（复活 child 的新 run 注册仍按当次 processBirth 写入，与首次
+        // resume 语义一致）。
+        let bindingRunId = sourceRunId;
+        let bindingOwner = owner;
+        let bindingOwnerState = ownerState;
         if (localOwned.length === 0) {
-          if (singleRepositoryHost) return undefined;
-          // 跨 scope 复查只跳过明确 v1 legacy 并记诊断；v2/未知 schema 仍阻断。
-          const crossScope = createManagedWorkspaceLedger({ stateRoot: process.env.PI_CODING_WORKSPACE_DIR })
-            .list({ onInvalid: (diagnostic: unknown) => forwardLedgerInvalidRecord(diagnosticSink, diagnostic) })
-            .filter((record: any) => record.run?.runId === sourceRunId);
-          if (crossScope.length > 0) throw repositoryError();
-          return undefined;
+          const lineage = await resolveManagedResumeLineageOwner(sourceRunId);
+          if (lineage.resolvedRunId) {
+            try {
+              // owner 身份按 owner run 的 authority receipt 复核；请求 id 的旧身份
+              // 不再作为绑定键。读取失败（已 revoke/superseded 或存储不可用）时按
+              // 归一化不可行处置，交由 fail-closed 分支。
+              bindingOwner = await broker.readOwnerReceipt(lineage.resolvedRunId);
+              bindingOwnerState = "owned";
+              bindingRunId = lineage.resolvedRunId;
+              managedResumeDiagnostic("managed-resume-lineage-normalized", {
+                sourceRunId, resolvedRunId: bindingRunId, chain: lineage.chain, workspaceId: lineage.lineageWorkspaceId,
+              });
+            } catch (error) {
+              managedResumeDiagnostic("managed-resume-lineage-owner-unavailable", {
+                sourceRunId, resolvedRunId: lineage.resolvedRunId, chain: lineage.chain, error, cause: (error as any)?.cause,
+              });
+              return blockOrPassUnresolvableLineageResume(sourceRunId, lineage, "归一化命中的 owner run 无当前 authority receipt");
+            }
+          } else {
+            return blockOrPassUnresolvableLineageResume(sourceRunId, lineage);
+          }
         }
-        const { record: selected, context: coordinatorRuntime } = await selectReceipt(sourceRunId);
+        const { record: selected, context: coordinatorRuntime } = await selectReceipt(bindingRunId);
         let owned: any;
         try {
-          owned = await coordinatorRuntime.client.listOwned({ runId: sourceRunId });
+          owned = await coordinatorRuntime.client.listOwned({ runId: bindingRunId });
         } catch (error) {
           // coordinator run-only 枚举被无关 invalid record 阻断时，退回本地唯一
           // receipt 继续复核（唯一性与身份已由 selectReceipt 的直读+分区复核确
           // 认）；目标 record 损坏/owner 不匹配在该路径已 fail-closed，此处不放宽
           // 任何身份校验，也不把远端失败解释为「没有 workspace」。
-          try { diagnosticSink?.({ version: 1, phase: "managed-resume-owned-receipts-fallback", runId: sourceRunId, error, cause: (error as any)?.cause }); }
+          try { diagnosticSink?.({ version: 1, phase: "managed-resume-owned-receipts-fallback", runId: bindingRunId, error, cause: (error as any)?.cause }); }
           catch (diagnosticError) { console.error("[subagent-runtime] managed resume diagnostic sink failed", diagnosticError); }
           owned = [selected];
         }
         if (!Array.isArray(owned)) throw Object.assign(new Error("managed resume workspace ownership is unavailable"), { code: "RESUME_BINDING_BLOCKED" });
         if (owned.length === 0) return undefined;
         if (owned.length !== 1) throw Object.assign(new Error("managed resume requires exactly one owned workspace"), { code: "RESUME_BINDING_BLOCKED" });
-        if (ownerState !== "owned" || !owner || owner.runId !== sourceRunId || owner.rootSessionId !== broker.rootSessionId) {
+        if (bindingOwnerState !== "owned" || !bindingOwner || bindingOwner.runId !== bindingRunId || bindingOwner.rootSessionId !== broker.rootSessionId) {
           throw Object.assign(new Error("managed resume owner identity is unavailable"), { code: "RESUME_BINDING_BLOCKED" });
         }
         const record = owned[0];
         if (record.workspaceId !== selected.workspaceId || record.leaseId !== selected.leaseId || record.originRoot !== selected.originRoot
             || record?.owner?.kind !== "standalone-subagent" || record.owner.rootSessionId !== broker.rootSessionId
-            || record?.run?.runId !== sourceRunId || !Number.isSafeInteger(owner.ownerGeneration) || owner.ownerGeneration <= 0) {
+            || record?.run?.runId !== bindingRunId || !Number.isSafeInteger(bindingOwner.ownerGeneration) || bindingOwner.ownerGeneration <= 0) {
           throw Object.assign(new Error("managed resume owner binding is invalid"), { code: "RESUME_BINDING_BLOCKED" });
         }
-        const expectedAgent = managedCodingBinding(record, owner, broker).binding.agentProfile;
+        const expectedAgent = managedCodingBinding(record, bindingOwner, broker).binding.agentProfile;
         const intents = await coordinatorRuntime.client.recoveryStatus();
         const matches = Array.isArray(intents)
-          ? intents.filter((entry: any) => entry?.version === "integration-resume-intent.v1" && entry.sourceRunId === sourceRunId)
+          ? intents.filter((entry: any) => entry?.version === "integration-resume-intent.v1" && entry.sourceRunId === bindingRunId)
           : [];
         if (matches.length !== 1) throw Object.assign(new Error("managed resume intent is unavailable or ambiguous"), { code: "RESUME_BINDING_BLOCKED" });
         const intent = parseIntegrationResumeIntentV1(matches[0], { rootSessionId: broker.rootSessionId });
