@@ -75,7 +75,16 @@ Probe 使用独立 temporary repo、session、state 和 socket roots。失败时
 
 两种来源互斥，同一 Pi 配置中只能启用一种。不得同时安装或启用 standalone `npm:pi-subagents@0.80.0`，否则会形成重复 runtime、tool、message renderer 或模块身份。
 
+## DurableStorage 锁协议
+
+`DurableStorage` 在 macOS 和 Linux 上使用 `fs-ext@2.1.1` 的内核 `flock(fd, "exnb")`。每个 key 都对应稳定的 `.flock-v1.<key>.lock` 文件；文件会保留，release 只关闭持有的句柄，因此异常终止后内核会释放锁，下一次 acquire 可以立即重获同一 inode。锁覆盖 revision 检查、临时文件 fsync、原子 rename 和目录 fsync，`staleLockMs` 仅为旧调用方保留，不参与所有权判断。
+
+支持平台上的运行时依赖必须在当前 Node 版本下构建。安装或升级后运行 `npm run setup:subagents-enhanced`，脚本在 `--ignore-scripts` 安装后只显式 rebuild `fs-ext` 并验证 `flock` 可加载。Windows、无法加载原生依赖或其他 flock 错误都会 fail closed。
+
+新版 writer 不与旧 guard 协议在线混跑。发现 `<key>.lock` 或 `<key>.lock.guard` 时会报告 `DURABLE_LOCK_MIGRATION_REQUIRED` 并保留文件；不能按 PID、年龄或文件内容自动清理。迁移前须停止同一存储根的全部旧 Host/child writer，保留 JSON 状态，针对该 scope 归档旧协议现场后统一启动新版，不能仅 `/reload`。新版稳定锁文件必须保留，不要在运行或常规维护时删除。支持范围为本地文件系统，不承诺 NFS/SMB 等共享文件系统的锁语义。
+
 ## 准备与升级
+
 
 在仓库根目录首次准备或升级 package 依赖：
 

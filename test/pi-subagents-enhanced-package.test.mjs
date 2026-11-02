@@ -42,6 +42,8 @@ async function preparedPackageFixture() {
       cwd: fixtureRoot,
       env: { ...process.env, NPM_CONFIG_REGISTRY: "https://registry.npmjs.org", npm_config_cache: process.env.npm_config_cache ?? join(repoRoot, "var/tmp/npm-cache") },
     });
+    // 该测试专用安装会重新落盘原生依赖；只重建 fs-ext，恢复与 setup 成功时相同的 fixture。
+    execFileSync("npm", ["rebuild", "fs-ext", "--ignore-scripts=false", "--registry=https://registry.npmjs.org/"], { cwd: fixtureRoot });
     manifest.bundleDependencies = ["pi-subagents"];
     await writeFile(join(fixtureRoot, "package.json"), JSON.stringify(manifest));
     return fixtureRoot;
@@ -142,6 +144,15 @@ test("pi-subagents-enhanced exposes a publishable pinned package contract", asyn
     "./workspace/admin": "./src/workspace/administration.ts",
   });
   assert.deepEqual(manifest.dependencies, { "pi-subagents": "0.80.0", typescript: "5.9.3" });
+  assert.deepEqual(manifest.optionalDependencies, { "fs-ext": "2.1.1" });
+  const packageLock = JSON.parse(await readFile(join(packageRoot, "package-lock.json"), "utf8"));
+  for (const [lock, entry] of [[rootLock, 'packages/pi-subagents-enhanced'], [packageLock, '']]) {
+    assert.deepEqual(lock.packages[entry].optionalDependencies, { "fs-ext": "2.1.1" });
+    const native = Object.entries(lock.packages).find(([key]) => key.endsWith('node_modules/fs-ext'))?.[1];
+    assert.equal(native.version, "2.1.1");
+    assert.equal(native.optional, true);
+    assert.equal(native.resolved, "https://registry.npmjs.org/fs-ext/-/fs-ext-2.1.1.tgz");
+  }
   assert.deepEqual(manifest.devDependencies, {
     "@earendil-works/pi-agent-core": "1.4.0",
     "@earendil-works/pi-ai": "1.4.0",
@@ -170,9 +181,14 @@ test("package setup and verify exercise the package-local upstream without patch
     run: async (...args) => { calls.push(args); },
   });
   assert.deepEqual(calls[0]?.[1], [
-    "--no-audit", "--no-fund", "install", "--prefix", packageRoot, "--ignore-scripts", "--omit=peer", "--save-exact", "pi-subagents@0.80.0",
+    "--no-audit", "--no-fund", "install", "--prefix", packageRoot, "--ignore-scripts", "--omit=peer", "--save-exact", "--registry=https://registry.npmjs.org/", "pi-subagents@0.80.0",
   ]);
+  assert.deepEqual(calls[1]?.[1], ["rebuild", "fs-ext", "--prefix", packageRoot, "--ignore-scripts=false", "--registry=https://registry.npmjs.org/"]);
+  assert.equal(calls[2]?.[0], process.execPath);
+  assert.equal(calls[2]?.[2].cwd, packageRoot);
+  assert.match(calls[2]?.[1].at(-1), /require\('fs-ext'\)\.flock/);
   const root = await preparedPackageFixture();
+  assert.equal(typeof createRequire(join(root, 'package.json'))('fs-ext').flock, 'function');
   const report = await verify.verifyEnhancedPackage({ packageRoot: root });
   assert.deepEqual({ name: report.name, version: report.version, upstreamVersion: report.upstreamVersion }, {
     name: "pi-subagents-enhanced",

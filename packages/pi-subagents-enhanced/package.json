@@ -55,5 +55,8 @@
   },
   "bundleDependencies": [
     "pi-subagents"
-  ]
+  ],
+  "optionalDependencies": {
+    "fs-ext": "2.1.1"
+  }
 }

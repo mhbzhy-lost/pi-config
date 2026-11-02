@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { constants, open, mkdir, readFile, rename, stat, unlink } from "node:fs/promises";
+import { constants, open, mkdir, lstat, rename } from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
 
 export class DurableStorageError extends Error {
@@ -8,9 +9,24 @@ export class DurableStorageError extends Error {
 }
 export interface StoredValue<T = unknown> { revision: number; value: T; }
 const name = (value: string) => { if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(value)) throw new DurableStorageError("DURABLE_STORAGE_NAME"); return value; };
+type Flock = (fd: number, operation: "exnb", callback: (error: NodeJS.ErrnoException | null) => void) => void;
 export class DurableStorage {
   readonly root: string; readonly staleLockMs: number;
-  constructor(input: { root: string; staleLockMs?: number }) { if (!path.isAbsolute(input.root)) throw new DurableStorageError("DURABLE_STORAGE_ROOT"); this.root = input.root; this.staleLockMs = input.staleLockMs ?? 60_000; }
+  private readonly flock: Flock;
+  constructor(input: { root: string; staleLockMs?: number }) {
+    if (!path.isAbsolute(input.root)) throw new DurableStorageError("DURABLE_STORAGE_ROOT");
+    this.root = input.root;
+    // 仅保留构造参数兼容性；锁所有权不再依赖时间。
+    this.staleLockMs = input.staleLockMs ?? 60_000;
+    if (process.platform !== "darwin" && process.platform !== "linux") throw new DurableStorageError("DURABLE_LOCK_UNSUPPORTED_PLATFORM", `DURABLE_LOCK_UNSUPPORTED_PLATFORM: ${process.platform}`);
+    try {
+      const native = createRequire(import.meta.url)("fs-ext");
+      if (typeof native.flock !== "function") throw new Error("fs-ext.flock 不可用");
+      this.flock = native.flock;
+    } catch (cause) {
+      throw new DurableStorageError("DURABLE_LOCK_UNAVAILABLE", "DURABLE_LOCK_UNAVAILABLE: 请在当前 Node 版本下运行 setup:runtime 构建 fs-ext", { cause });
+    }
+  }
   private file(key: string, suffix = ".json") { return path.join(this.root, `${name(key)}${suffix}`); }
   private async ensureRoot() { await mkdir(this.root, { recursive: true, mode: 0o700 }); }
   async read<T = unknown>(key: string): Promise<StoredValue<T> | null> {
@@ -21,75 +37,37 @@ export class DurableStorage {
     finally { await handle?.close(); }
   }
   async acquireLock(key: string): Promise<() => Promise<void>> {
-    await this.ensureRoot(); const lock = this.file(key, ".lock"); const owner = randomUUID();
-    // 创建、回收和释放都在同一个短临界区内，避免回收者移动已经被替换的新锁。
-    await this.withLockMutation(key, async () => {
-      const held = await this.readLock(lock);
-      if (held) {
-        const birth = typeof held.value.processBirth === "string" ? /^(\d+):\d+(?:\.\d+)?$/.exec(held.value.processBirth) : null;
-        const pid = held.value.pid ?? (birth ? Number(birth[1]) : undefined);
-        if (!Number.isSafeInteger(pid) || pid <= 0 || typeof held.value.owner !== "string" || !held.value.owner
-          || (birth && Number(birth[1]) !== pid)) throw new DurableStorageError("DURABLE_LOCK_UNPROVEN");
-        try { process.kill(pid, 0); throw new DurableStorageError("DURABLE_LOCK_HELD", `DURABLE_LOCK_HELD: durable owner PID ${pid} is still present; key=${key}`); }
-        catch (error: any) {
-          if (error instanceof DurableStorageError) throw error;
-          // 只有内核明确回答ESRCH才能证明原owner已退出；EPERM或其他错误均不抢。
-          if (error?.code !== "ESRCH") throw new DurableStorageError("DURABLE_LOCK_UNPROVEN", "DURABLE_LOCK_UNPROVEN", { cause: error });
-        }
-        await rename(lock, `${lock}.quarantine-${Date.now()}-${randomUUID()}`);
-      }
-      const handle = await open(lock, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-      try { await handle.writeFile(JSON.stringify({ owner, pid: process.pid, processBirth: `${process.pid}:${process.uptime()}` })); await handle.sync(); }
-      finally { await handle.close(); }
-    });
-    let released = false;
-    return async () => {
-      if (released) return;
-      const deadline = Date.now() + 5000;
-      for (;;) {
-        try {
-          await this.withLockMutation(key, async () => {
-            const current = await this.readLock(lock);
-            if (current && current.value.owner === owner) await unlink(lock);
-          });
-          released = true; return;
-        } catch (error: any) {
-          if (error?.code !== "DURABLE_LOCK_HELD" || Date.now() >= deadline) throw error;
-          await new Promise(resolve => setTimeout(resolve, 1));
-        }
-      }
-    };
-  }
-  private async readLock(file: string): Promise<{ value: any } | null> {
+    await this.ensureRoot();
+    // 文件名标识新协议；旧 writer 的合法 key 不能以点开头，避免命名冲突。
+    // 创建后立即终止留下的空文件仍是新版稳定锁，不需要非原子的 owner 写入。
+    const lock = path.join(this.root, `.flock-v1.${name(key)}.lock`);
     let handle;
     try {
-      handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
-      const info = await handle.stat();
-      if (!info.isFile() || info.uid !== process.getuid?.() || (info.mode & 0o077) !== 0 || info.size > 4096) throw new DurableStorageError("DURABLE_LOCK_UNPROVEN");
-      let value;
-      try { value = JSON.parse(await handle.readFile("utf8")); } catch {
-        // 旧版本wx写入尚未完成时允许调用方按既有期限等待；老化坏数据不自动恢复。
-        throw new DurableStorageError(Date.now() - info.mtimeMs <= this.staleLockMs ? "DURABLE_LOCK_HELD" : "DURABLE_LOCK_UNPROVEN");
+      for (const suffix of [".lock", ".lock.guard"]) {
+        const legacy = this.file(key, suffix);
+        try { await lstat(legacy); }
+        catch (error: any) { if (error?.code === "ENOENT") continue; throw error; }
+        throw new DurableStorageError("DURABLE_LOCK_MIGRATION_REQUIRED", `DURABLE_LOCK_MIGRATION_REQUIRED: key=${key}; 旧协议文件 ${legacy} 已保留；停止该存储根的全部旧 writer 后归档旧锁并统一升级`);
       }
-      if (!value || typeof value !== "object" || Array.isArray(value)) throw new DurableStorageError("DURABLE_LOCK_UNPROVEN");
-      return { value };
-    } catch (error: any) {
-      if (error?.code === "ENOENT") return null;
-      if (error instanceof DurableStorageError) throw error;
-      throw new DurableStorageError("DURABLE_LOCK_UNPROVEN", "DURABLE_LOCK_UNPROVEN", { cause: error });
-    } finally { await handle?.close(); }
-  }
-  private async withLockMutation<T>(key: string, work: () => Promise<T>): Promise<T> {
-    const guard = this.file(key, ".lock.guard");
-    let handle;
-    try { handle = await open(guard, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); }
-    catch (error: any) {
-      // 空 guard 无 owner 证据；保留现场并指出实际阻塞阶段，不能按年龄自动抢锁。
-      if (error?.code === "EEXIST") throw new DurableStorageError("DURABLE_LOCK_HELD", `DURABLE_LOCK_HELD: mutation guard exists; key=${key}; guard owner is unproven, preserve the guard for scoped recovery`, { cause: error });
-      throw new DurableStorageError("DURABLE_LOCK_UNPROVEN", "DURABLE_LOCK_UNPROVEN", { cause: error });
+      handle = await open(lock, constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
+      const info = await handle.stat();
+      if (!info.isFile() || info.uid !== process.getuid?.() || (info.mode & 0o077) !== 0) throw new DurableStorageError("DURABLE_LOCK_UNPROVEN");
+      await new Promise<void>((resolve, reject) => {
+        this.flock(handle.fd, "exnb", error => {
+          if (!error) { resolve(); return; }
+          const code = error.code === "EAGAIN" || error.code === "EWOULDBLOCK" ? "DURABLE_LOCK_HELD" : "DURABLE_LOCK_UNPROVEN";
+          reject(new DurableStorageError(code, `${code}: key=${key}`, { cause: error }));
+        });
+      });
+    } catch (cause) {
+      await handle?.close();
+      if (cause instanceof DurableStorageError) throw cause;
+      throw new DurableStorageError("DURABLE_LOCK_UNPROVEN", `DURABLE_LOCK_UNPROVEN: key=${key}`, { cause });
     }
-    try { return await work(); }
-    finally { await handle.close(); await unlink(guard); }
+    // 闭包持有 FileHandle；只关闭一次，不删除或替换内核锁对应的 inode。
+    const held = handle;
+    let releasePromise: Promise<void> | undefined;
+    return () => releasePromise ??= held.close();
   }
   private async writeUnlocked<T>(key: string, value: T, expectedRevision: number): Promise<StoredValue<T>> {
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) throw new DurableStorageError("DURABLE_REVISION_CONFLICT");
