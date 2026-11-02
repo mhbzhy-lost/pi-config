@@ -19,6 +19,18 @@
 
 外部消费者只使用 bare specifier `pi-subagents-enhanced/tui/background-activity`（解析到 `src/tui/index.ts`），不深引 `src/tui/*.ts`。`pi.extensions` 仍只声明 `extensions/subagent-runtime.ts` 与 `extensions/custom-footer.ts` 两项 Host 入口。Git mutation、owner token 与 durable ledger 的实现均只归 `src/workspace/` 所有。
 
+## workspace coordinator 生命周期（无主 daemon）
+
+coordinator 是仓库级共享单例（merge queue / 处置 / terminal proof / trusted broker 的唯一仲裁者），但不属于任何会话 Host：
+
+- **懒加载**：首个需要类操作（集成任务入队、处置、proof 结算、broker 注册、recovery 提交）在 spawn 锁内拉起独立 detached daemon；分配（`reserve/ensureAllocated`）与全部读取/查询不触发拉起，daemon 缺位时绑定解析等利用类读降级 ledger 目标直读。
+- **引用计数**：引用 = Host 到 daemon 的持久 socket 连接，进程任何死法下由内核保证关闭；统一 idle 快照（连接/在途/保留全零）持续宽限（默认 60s，`PI_COORDINATOR_IDLE_EXIT_GRACE_MS` 可覆盖）后 daemon 优雅退出并清理 socket 与 metadata；退出清理以 instanceId 守卫防旧实例误删新产物。
+- **崩溃恢复**：daemon 死亡后下一个需要类操作在锁内重拉（四态活性判定 fail-closed：pid 复用/undetermined 不覆盖）；durable 状态（ledger/queue/proof outbox）无损失。
+- **recovery 投递**：daemon 无 `pi.sendMessage` 快路径，事件一律落 durable 记 debt，由持引用的 Host 以轮询泵等价送达 handoff followUp 并幂等回写 delivered。
+- **旧入口**：`coordinator-process.ts` 收敛为 daemon 的 env 形 wrapper（`PI_COORDINATOR_*` 协议兼容）；registry 的 claim/release owner 语义已移除，仅保留原子 metadata 登记面与四态活性判定。
+
+相关模块：`src/workspace/coordinator-daemon.ts`（进程入口）、`coordinator-spawn.ts`（拉起器）、`coordinator-client.ts`（requireCoordinator/preferCoordinator 两类入口）、`coordinator-registry.ts`（登记面）。
+
 ## Subagent 独立操作工具
 
 `getPlanExecutionService(pi, rootSessionId)` 在主 Host ready 后提供 `start/resume/inspect/subscribe`。计划沿用普通 `standalone-subagent` owner；分配与授权绑定后的异步回调必须完成持久化后才返回。调用失败不能推断 child 未启动；同代相同 dispatchKey 复用原结果，跨 reload 的 intent/run 由调用方 session 状态恢复。订阅仅提示事实失效，建立后应立即 inspect 已知引用；未覆盖最终变化的 pending 工作明确报告 wakeup unavailable。

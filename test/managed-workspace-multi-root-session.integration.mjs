@@ -70,6 +70,22 @@ async function spawnRootClient(t, { rootSessionId, metadata, repositoryId, origi
   return { child, pid: ready.pid, call(method, input = {}) { return new Promise((resolve) => { pending = resolve; child.stdin.write(`${JSON.stringify({ method, input })}\n`); }); } };
 }
 
+
+/** 测试内 in-process coordinator 的登记：用 daemon 形 metadata 描述本进程
+ * （pid+birthIdentity 真实，audit 视角 alive），取代已移除的 registry.claim。 */
+async function registerInProcessCoordinator(registry, repositoryId, storageRepositoryId, stateRoot) {
+  const { captureProcessBirthIdentity } = await import("../packages/pi-subagents-enhanced/src/subagent-dispatch/process-birth-identity.ts");
+  const metadata = {
+    protocol: "repository-workspace-coordinator.v1", kind: "daemon",
+    instanceId: `inproc-${process.pid}-${Date.now().toString(16)}`,
+    pid: process.pid, birthIdentity: await captureProcessBirthIdentity(process.pid),
+    repositoryId, storageRepositoryId: storageRepositoryId ?? repositoryId,
+    canonicalStateRoot: stateRoot, endpoint: registry.endpoint,
+  };
+  await registry.writeRaw(`${JSON.stringify(metadata)}\n`);
+  return registry.read();
+}
+
 function workspaceRequest(f, rootSessionId) {
   return { workspaceId: `workspace-${rootSessionId}`, owner: { kind: "standalone-subagent", rootSessionId, toolCallId: `tool-${rootSessionId}` }, originRoot: f.originRoot, requestedCwd: path.join(f.originRoot, "src"), originRef: "refs/heads/main", baseCommit: f.baseCommit, contractHash: "a".repeat(64), policy: { publication: "allowed", application: "allowed", writePaths: ["src/**"] } };
 }
@@ -79,8 +95,7 @@ test("two real Root client processes share repository audit while owned operatio
   const repositoryId = (await resolveRepositoryIdentity(f.originRoot)).repositoryId;
   const stateRoot = path.join(f.root, "state");
   const registry = createCoordinatorRegistry({ commonDir: path.resolve(f.originRoot, git(f.originRoot, "rev-parse", "--git-common-dir")), stateRoot });
-  const metadata = await registry.claim({ repositoryId });
-  t.after(() => registry.release());
+  const metadata = await registerInProcessCoordinator(registry, repositoryId, repositoryId, stateRoot);
   const server = createCoordinatorServer({ endpoint: metadata.endpoint, repositoryId, instanceId: metadata.instanceId, stateRoot, idleGraceMs: 10_000 });
   await server.listen();
   t.after(() => server.close());
@@ -118,8 +133,9 @@ test("canonical storage, migration debt, and state root conflict remain persiste
   assert.equal(linkedIdentity.originRoot, main.originRoot);
   assert.equal(linkedIdentity.migrationDebt?.action, "inventory-only");
   const registry = createCoordinatorRegistry({ commonDir: main.commonDir, stateRoot: path.join(f.root, "state") });
-  await registry.claim({ repositoryId: main.repositoryId });
-  t.after(() => registry.release());
-  const conflicting = createCoordinatorRegistry({ commonDir: main.commonDir, stateRoot: path.join(f.root, "other-state") });
-  await assert.rejects(() => conflicting.claim({ repositoryId: main.repositoryId }), /state root/i);
+  await registerInProcessCoordinator(registry, main.repositoryId, main.repositoryId, path.join(f.root, "state"));
+  // 跨 state root 的拉起必须 scope fail-closed（预置死 pid 登记，避免真实拉起）。
+  await registry.writeRaw(`${JSON.stringify({ ...await registry.read(), pid: 999999999, birthIdentity: "0".repeat(64) })}\n`);
+  const { ensureCoordinatorDaemon } = await import("../packages/pi-subagents-enhanced/src/workspace/coordinator-spawn.ts");
+  await assert.rejects(() => ensureCoordinatorDaemon({ stateRoot: path.join(f.root, "other-state"), repositoryId: main.repositoryId, commonDir: main.commonDir, endpoint: registry.endpoint }), (error) => error.code === "COORDINATOR_SCOPE_MISMATCH");
 });

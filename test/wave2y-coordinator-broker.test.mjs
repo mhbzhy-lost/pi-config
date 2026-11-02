@@ -11,6 +11,22 @@ import { connectRepositoryCoordinator } from "../packages/pi-subagents-enhanced/
 import { DurableStorage, DurableStorageError } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/durable-storage.ts";
 import { createCoordinatorProofOutbox } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/coordinator-proof-outbox.ts";
 
+
+/** 测试内 in-process coordinator 的登记：用 daemon 形 metadata 描述本进程
+ * （pid+birthIdentity 真实，audit 视角 alive），取代已移除的 registry.claim。 */
+async function registerInProcessCoordinator(registry, repositoryId, storageRepositoryId, stateRoot) {
+  const { captureProcessBirthIdentity } = await import("../packages/pi-subagents-enhanced/src/subagent-dispatch/process-birth-identity.ts");
+  const metadata = {
+    protocol: "repository-workspace-coordinator.v1", kind: "daemon",
+    instanceId: `inproc-${process.pid}-${Date.now().toString(16)}`,
+    pid: process.pid, birthIdentity: await captureProcessBirthIdentity(process.pid),
+    repositoryId, storageRepositoryId: storageRepositoryId ?? repositoryId,
+    canonicalStateRoot: stateRoot, endpoint: registry.endpoint,
+  };
+  await registry.writeRaw(`${JSON.stringify(metadata)}\n`);
+  return registry.read();
+}
+
 test("B8 process liveness distinguishes identity mismatch from dead", () => {
   const dead = processAliveStatus(999999, "a".repeat(64));
   const mismatch = processAliveStatus(process.pid, "a".repeat(64));
@@ -31,13 +47,13 @@ test("B7 dead metadata PID is reclaimed when ps rejects it but kill proves ESRCH
   const commonDir = path.join(repo, ".git");
   const options = { commonDir, stateRoot: path.join(root, "state") };
   const first = createCoordinatorRegistry(options);
-  const metadata = await first.claim({ repositoryId: "a".repeat(64), storageRepositoryId: "b".repeat(64) });
+  const metadata = await registerInProcessCoordinator(first, "a".repeat(64), "b".repeat(64), path.join(root, "state"));
   const metadataPath = path.join(commonDir, ".pi-coordinator", COORDINATOR_METADATA_FILE);
   await writeFile(metadataPath, JSON.stringify({ ...metadata, pid: 999999999, birthIdentity: "0".repeat(64) }));
-  const second = createCoordinatorRegistry(options);
-  const replacement = await second.claim({ repositoryId: "a".repeat(64), storageRepositoryId: "b".repeat(64) });
-  assert.notEqual(replacement.instanceId, metadata.instanceId);
-  await second.release();
+  const { ensureCoordinatorDaemon } = await import("../packages/pi-subagents-enhanced/src/workspace/coordinator-spawn.ts");
+  const replacement = await ensureCoordinatorDaemon({ stateRoot: path.join(root, "state"), repositoryId: "a".repeat(64), storageRepositoryId: "b".repeat(64), commonDir, endpoint: first.endpoint, idleExitGraceMs: 60_000 });
+  assert.notEqual(replacement.metadata.instanceId, metadata.instanceId);
+  try { process.kill(replacement.metadata.pid, "SIGKILL"); } catch { /* 已退出 */ }
 });
 
 test("A6 malformed coordinator reply fails the pending request and closes transport", async () => {

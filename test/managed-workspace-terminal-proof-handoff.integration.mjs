@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { createCoordinatorProofOutbox } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/coordinator-proof-outbox.ts";
-import { createCoordinatorServer } from "../packages/pi-subagents-enhanced/src/workspace/coordinator-server.ts";
+import { canonicalWorkspaceStateRoot } from "../packages/pi-subagents-enhanced/src/workspace/coordinator-registry.ts";
 import { createManagedWorkspaceRequestV2 } from "../packages/pi-subagents-enhanced/src/workspace/contract.ts";
 import { createManagedWorkspaceService } from "../packages/pi-subagents-enhanced/src/workspace/service.ts";
 import { execFileSync } from "node:child_process";
@@ -121,12 +121,12 @@ async function handoffRuntime(t, fixture, rootSessionId) {
   await startAndBindRootBroker(pi, broker);
   const runtime = await connectRuntimeCoordinator({ pi, cwd: fixture.originRoot, broker, stateRoot: fixture.stateRoot });
   t.after(async () => { await runtime?.close().catch(() => undefined); await broker.closeRootSession().catch(() => undefined); });
-  const metadata = await runtime.registry.read();
   const identity = await resolveRepositoryIdentity(fixture.originRoot);
+  // 懒加载契约：仓库选择后无 daemon 无登记；outbox 路径由 canonical state root 推导。
   return {
-    broker, runtime, metadata, identity,
+    broker, runtime, identity,
     service: createManagedWorkspaceService({ stateRoot: fixture.stateRoot }),
-    outboxFile: path.join(metadata.canonicalStateRoot, "repositories", identity.storageRepositoryId, "terminal-proof-outbox", "terminal-proofs.json"),
+    outboxFile: path.join(canonicalWorkspaceStateRoot(fixture.stateRoot), "repositories", identity.storageRepositoryId, "terminal-proof-outbox", "terminal-proofs.json"),
   };
 }
 
@@ -200,7 +200,7 @@ test("authoritative child terminal is delivered through Root Broker and persiste
   const rootSessionId = `root-handoff-${process.pid}-${Date.now()}`;
   const runtime = await handoffRuntime(t, fixture, rootSessionId);
   const runId = "child-handoff";
-  const child = await allocatedChild(fixture, { ...runtime, client: runtime.runtime.client }, rootSessionId, { workspaceId: "workspace-handoff", runId, toolCallId: "tool-handoff" });
+  const child = await allocatedChild(fixture, { ...runtime, client: await runtime.runtime.requireClient() }, rootSessionId, { workspaceId: "workspace-handoff", runId, toolCallId: "tool-handoff" });
   assert.equal(runtime.broker.inspectTerminalProofDelivery(runId).state, "none", "no terminal has been accepted yet");
   runtime.broker.observeTerminal(terminalEvent(runId, { sessionId: rootSessionId, asyncDir: child.asyncDir, pid: process.pid }));
   const state = await waitForOutbox(runtime.outboxFile, (value) => Object.keys(value.receipts).length === 1 && value.pending.length === 0);
@@ -212,25 +212,23 @@ test("authoritative child terminal is delivered through Root Broker and persiste
   assert.equal(runtime.broker.inspectTerminalProofDelivery(runId).state, "delivered");
 });
 
-test("coordinator unavailability leaves a replayable pending proof that a restarted coordinator delivers", { timeout: 60_000 }, async (t) => {
+test("coordinator daemon crash leaves a replayable pending proof that a respawned daemon delivers", { timeout: 60_000 }, async (t) => {
   const fixture = await handoffFixture(t);
   const rootSessionId = `root-replay-${process.pid}-${Date.now()}`;
   const runtime = await handoffRuntime(t, fixture, rootSessionId);
   const runId = "child-replay";
-  const child = await allocatedChild(fixture, { ...runtime, client: runtime.runtime.client }, rootSessionId, { workspaceId: "workspace-replay", runId, toolCallId: "tool-replay" });
-  await runtime.runtime.server.close();
+  const client = await runtime.runtime.requireClient();
+  const child = await allocatedChild(fixture, { ...runtime, client }, rootSessionId, { workspaceId: "workspace-replay", runId, toolCallId: "tool-replay" });
+  // 懒加载形态：kill -9 daemon，缓存连接失效；proof 结算需重拉 daemon 后重放。
+  const metadata = await runtime.runtime.registry.read();
+  process.kill(metadata.pid, "SIGKILL");
+  await new Promise((resolve) => setTimeout(resolve, 150));
   runtime.broker.observeTerminal(terminalEvent(runId, { sessionId: rootSessionId, asyncDir: child.asyncDir, pid: process.pid }));
-  const pending = await waitForOutbox(runtime.outboxFile, (value) => value.pending.length === 1 && Object.keys(value.receipts).length === 0);
-  assert.equal(pending.pending[0].runId, runId);
-  assert.equal(pending.pending[0].workspaceId, child.active.workspaceId);
-  assert.equal(runtime.broker.inspectTerminalProofDelivery(runId).state, "pending");
-  assert.equal(ownedReceipt(runtime, child.active.workspaceId, rootSessionId).state, "active", "an undelivered proof must retain the workspace");
-  const restarted = createCoordinatorServer({ endpoint: runtime.metadata.endpoint, repositoryId: runtime.identity.repositoryId, storageRepositoryId: runtime.identity.storageRepositoryId, instanceId: runtime.metadata.instanceId, stateRoot: runtime.metadata.canonicalStateRoot, idleGraceMs: 10_000 });
-  await restarted.listen();
-  t.after(() => restarted.close());
   const delivered = await waitForOutbox(runtime.outboxFile, (value) => Object.keys(value.receipts).length === 1 && value.pending.length === 0);
   assert.equal(Object.values(delivered.receipts)[0].receipt.state, "released");
   assert.equal(ownedReceipt(runtime, child.active.workspaceId, rootSessionId).state, "released");
+  const respawned = await runtime.runtime.registry.read();
+  assert.notEqual(respawned.instanceId, client.instanceId, "a fresh daemon must have served the replayed proof");
 });
 
 test("unresolved trusted run binding forms an observable proof debt and retains the workspace", { timeout: 60_000 }, async (t) => {
@@ -239,7 +237,7 @@ test("unresolved trusted run binding forms an observable proof debt and retains 
   const brokerRootSessionId = `root-debt-${process.pid}-${Date.now()}`;
   const runtime = await handoffRuntime(t, fixture, brokerRootSessionId);
   const runId = "child-debt";
-  const child = await allocatedChild(fixture, { ...runtime, client: runtime.runtime.client }, ownerRootSessionId, { workspaceId: "workspace-debt", runId, toolCallId: "tool-debt", publish: false, authorizationSessionId: brokerRootSessionId });
+  const child = await allocatedChild(fixture, runtime, ownerRootSessionId, { workspaceId: "workspace-debt", runId, toolCallId: "tool-debt", publish: false, authorizationSessionId: brokerRootSessionId });
   runtime.broker.observeTerminal(terminalEvent(runId, { sessionId: brokerRootSessionId, asyncDir: child.asyncDir, pid: process.pid }));
   const state = await waitForOutbox(runtime.outboxFile, (value) => Object.keys(value.debts ?? {}).length === 1);
   const debt = Object.values(state.debts)[0];

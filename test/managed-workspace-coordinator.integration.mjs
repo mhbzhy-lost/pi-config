@@ -7,6 +7,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { canonicalWorkspaceStateRoot, createCoordinatorRegistry } from "../packages/pi-subagents-enhanced/src/workspace/coordinator-registry.ts";
+import { ensureCoordinatorDaemon } from "../packages/pi-subagents-enhanced/src/workspace/coordinator-spawn.ts";
 import { auditManagedWorkspaces } from "../packages/pi-subagents-enhanced/src/workspace/administration.ts";
 import { connectRepositoryCoordinator } from "../packages/pi-subagents-enhanced/src/workspace/coordinator-client.ts";
 import { createCoordinatorServer } from "../packages/pi-subagents-enhanced/src/workspace/coordinator-server.ts";
@@ -44,16 +45,23 @@ async function spawnRootBroker(t, rootSessionId) {
   });
 }
 
-test("coordinator registry uses one endpoint per common dir and canonical state root", async () => {
+test("coordinator registry derives one endpoint per common dir and spawn enforces one state-root scope", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "coordinator-"));
-  const a = createCoordinatorRegistry({ commonDir: path.join(root, "common"), stateRoot: path.join(root, "state-a") });
-  const first = await a.claim({ repositoryId: "a".repeat(64), endpoint: path.join(root, "coordinator.sock") });
-  const b = createCoordinatorRegistry({ commonDir: path.join(root, "common"), stateRoot: path.join(root, "state-b") });
-  await assert.rejects(() => b.claim({ repositoryId: "a".repeat(64), endpoint: path.join(root, "other.sock") }), /state root/i);
-  await a.release();
+  const commonDir = path.join(root, "common");
+  const a = createCoordinatorRegistry({ commonDir, stateRoot: path.join(root, "state-a") });
+  const b = createCoordinatorRegistry({ commonDir, stateRoot: path.join(root, "state-b") });
+  assert.equal(a.endpoint, b.endpoint, "endpoint 由 commonDir 哈希推导，与 state root 无关");
+  // 预置 daemon 登记（state-a），另一个 state root 的拉起必须 scope fail-closed。
+  const handle = await ensureCoordinatorDaemon({ stateRoot: path.join(root, "state-a"), repositoryId: "a".repeat(64), commonDir, endpoint: a.endpoint, idleExitGraceMs: 60_000 });
+  try {
+    await assert.rejects(() => ensureCoordinatorDaemon({ stateRoot: path.join(root, "state-b"), repositoryId: "a".repeat(64), commonDir, endpoint: b.endpoint }), (error) => error.code === "COORDINATOR_SCOPE_MISMATCH");
+  } finally {
+    process.kill(handle.metadata.pid, "SIGKILL");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
 });
 
-test("aliased state root is realpath-normalized so coordinator and ledger claim one scope", async () => {
+test("aliased state root is realpath-normalized so coordinator and ledger share one scope", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "coordinator-canonical-"));
   const target = path.join(root, "state");
   const alias = path.join(root, "state-alias");
@@ -61,34 +69,28 @@ test("aliased state root is realpath-normalized so coordinator and ledger claim 
   await symlink(target, alias, "dir");
   const canonical = realpathSync(target);
   assert.notEqual(alias, canonical, "the fixture must reproduce the macOS /var alias form");
+  assert.equal(canonicalWorkspaceStateRoot(alias), canonical, "规范化把 alias 归一到 realpath");
   const commonDir = path.join(root, "common");
   const repositoryId = "a".repeat(64);
   const registry = createCoordinatorRegistry({ commonDir, stateRoot: alias });
-  const metadata = await registry.claim({ repositoryId });
-  assert.equal(metadata.canonicalStateRoot, canonical, "coordinator metadata must record the ledger canonical state root");
-  const canonicalRegistry = createCoordinatorRegistry({ commonDir, stateRoot: canonical });
-  assert.equal((await canonicalRegistry.claim({ repositoryId })).instanceId, metadata.instanceId,
-    "the canonical and aliased state root must not be treated as two coordinator scopes");
-  await registry.release();
+  // daemon 登记面：原子写入 + 读回，canonical scope 一致。
+  await registry.writeRaw(`${JSON.stringify({ protocol: "repository-workspace-coordinator.v1", kind: "daemon", instanceId: "i".repeat(8), pid: 1, birthIdentity: "0".repeat(64), repositoryId, storageRepositoryId: repositoryId, canonicalStateRoot: canonical, endpoint: registry.endpoint })}\n`);
+  const metadata = await registry.read();
+  assert.equal(metadata.canonicalStateRoot, canonical, "登记的 canonical state root 必须是 realpath");
 });
 
-test("release retains coordinator metadata so durable audits stay observable after idle exit", async (t) => {
-  // R12f 归因：daemon idle-exit 删除 metadata 后，audit 的 coordinator.status 恒为
-  // missing，验收 settlement 判定永远不满足；而 claim 路径已具备 pid+birth-identity
-  // 活性检查与 stale-owner 接管，退出保留 metadata 是安全的。
-  const root = await mkdtemp(path.join(tmpdir(), "coordinator-release-retains-"));
-  const commonDir = path.join(root, "common");
-  const repositoryId = "f".repeat(64);
-  const registry = createCoordinatorRegistry({ commonDir, stateRoot: path.join(root, "state") });
-  const metadata = await registry.claim({ repositoryId });
-  await registry.release();
-  const retained = JSON.parse(await readFile(registry.metadataPath, "utf8"));
-  assert.equal(retained.instanceId, metadata.instanceId, "release must retain the coordinator metadata for durable audits");
-  // 下一个 daemon 可以识别 stale owner 并接管
-  const next = createCoordinatorRegistry({ commonDir, stateRoot: path.join(root, "state") });
-  const reclaimed = await next.claim({ repositoryId });
-  assert.equal(typeof reclaimed.endpoint, "string");
-  await next.release();
+test("registry writeRaw is atomic and leaves no temp residue", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "coordinator-write-atomic-"));
+  const registry = createCoordinatorRegistry({ commonDir: path.join(root, "common"), stateRoot: path.join(root, "state") });
+  const payload = { protocol: "repository-workspace-coordinator.v1", kind: "daemon", instanceId: "atomic".slice(0, 8), pid: 1, birthIdentity: "0".repeat(64), repositoryId: "e".repeat(64), storageRepositoryId: "e".repeat(64), canonicalStateRoot: path.join(root, "state"), endpoint: registry.endpoint };
+  await registry.writeRaw(`${JSON.stringify(payload)}\n`);
+  assert.equal((await registry.read()).instanceId, payload.instanceId);
+  const dirEntries = [];
+  const { readdir } = await import("node:fs/promises");
+  for (const entry of await readdir(registry.metadataDir)) dirEntries.push(entry);
+  assert.deepEqual(dirEntries, ["coordinator.json"], "原子写不留 temp 残留");
+  assert.equal((await stat(registry.metadataPath)).mode & 0o777, 0o600);
+  assert.equal((await stat(registry.metadataDir)).mode & 0o777, 0o700);
 });
 
 test("long Git common-dir metadata uses a short endpoint that can listen and connect", async (t) => {
@@ -96,17 +98,17 @@ test("long Git common-dir metadata uses a short endpoint that can listen and con
   const commonDir = path.join(root, "common", ...Array.from({ length: 8 }, (_, i) => `directory-${i}-${"x".repeat(24)}`));
   execFileSync("git", ["init", "--bare", commonDir], { stdio: "ignore" });
   const registry = createCoordinatorRegistry({ commonDir, stateRoot: path.join(root, "state") });
-  const metadata = await registry.claim({ repositoryId: "e".repeat(64), endpoint: path.join(commonDir, ".pi-coordinator", "coordinator.sock") });
-  assert.ok(metadata.endpoint.length < 100);
-  const server = createCoordinatorServer({ endpoint: metadata.endpoint, repositoryId: metadata.repositoryId, idleGraceMs: 10_000, handler: () => ({ accepted: true }) });
+  const endpoint = registry.endpoint;
+  await mkdir(registry.metadataDir, { recursive: true, mode: 0o700 });
+  assert.ok(endpoint.length < 100);
+  const server = createCoordinatorServer({ endpoint, repositoryId: "e".repeat(64), handler: () => ({ accepted: true }) });
   await server.listen();
-  t.after(async () => { await server.close(); await registry.release(); });
+  t.after(() => server.close());
   const connected = await new Promise((resolve, reject) => {
-    const socket = net.createConnection(metadata.endpoint, () => { socket.end(); resolve(true); });
+    const socket = net.createConnection(endpoint, () => { socket.end(); resolve(true); });
     socket.once("error", reject);
   });
   assert.equal(connected, true);
-  assert.equal((await stat(registry.metadataPath)).mode & 0o777, 0o600);
   assert.equal((await stat(registry.metadataDir)).mode & 0o777, 0o700);
   assert.equal((await stat(registry.dir)).mode & 0o777, 0o700);
 });
@@ -127,28 +129,36 @@ test("runtime propagates the claimed hash endpoint instead of rebuilding a socke
   const runtime = await connectRuntimeCoordinator({ pi, cwd: repository, broker, stateRoot: path.join(root, "state") });
   t.after(() => runtime?.close());
   assert.ok(runtime);
+  // 懒加载契约：仓库选择阶段零登记零连接；endpoint 仍由 registry 哈希推导。
+  assert.equal(path.basename(runtime.registry.endpoint), runtime.registry.endpoint.split("/").pop());
+  assert.notEqual(path.basename(runtime.registry.endpoint), "coordinator.sock");
+  await assert.rejects(() => runtime.registry.read());
+  // 首个需要类操作拉起 daemon：登记后 instanceId 与 client 一致。
+  const client = await runtime.requireClient();
   const metadata = await runtime.registry.read();
   assert.equal(metadata.endpoint, runtime.registry.endpoint);
   assert.notEqual(path.basename(metadata.endpoint), "coordinator.sock");
-  assert.equal(runtime.client.instanceId, metadata.instanceId);
-  assert.deepEqual(await runtime.client.ping(), { instanceId: metadata.instanceId, repositoryId: metadata.repositoryId, storageRepositoryId: metadata.storageRepositoryId, endpoint: metadata.endpoint });
+  assert.equal(client.instanceId, metadata.instanceId);
+  assert.deepEqual(await client.ping(), { instanceId: metadata.instanceId, repositoryId: metadata.repositoryId, storageRepositoryId: metadata.storageRepositoryId, endpoint: metadata.endpoint });
 });
 
 test("real coordinator process and client bind the registry metadata endpoint and identity", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "coordinator-process-endpoint-"));
   const repositoryId = "9".repeat(64);
+  const instanceId = `coordinator-instance-${process.pid}`;
+  const endpoint = createCoordinatorRegistry({ commonDir: path.join(root, "common"), stateRoot: path.join(root, "state") }).endpoint;
   const registry = createCoordinatorRegistry({ commonDir: path.join(root, "common"), stateRoot: path.join(root, "state") });
-  const metadata = await registry.claim({ repositoryId, endpoint: path.join(root, "renamed-regression.sock") });
   const broker = await spawnRootBroker(t, `root-process-${process.pid}-${Date.now()}`);
   const child = spawn(process.execPath, ["--experimental-strip-types", path.resolve("packages/pi-subagents-enhanced/src/workspace/coordinator-process.ts")], {
     env: {
       ...process.env,
-      PI_COORDINATOR_ENDPOINT: metadata.endpoint,
-      PI_COORDINATOR_REPOSITORY_ID: metadata.repositoryId,
-      PI_COORDINATOR_STORAGE_REPOSITORY_ID: metadata.storageRepositoryId,
-      PI_COORDINATOR_INSTANCE_ID: metadata.instanceId,
-      PI_COORDINATOR_STATE_ROOT: metadata.canonicalStateRoot,
+      PI_COORDINATOR_ENDPOINT: endpoint,
+      PI_COORDINATOR_REPOSITORY_ID: repositoryId,
+      PI_COORDINATOR_INSTANCE_ID: instanceId,
+      PI_COORDINATOR_STATE_ROOT: path.join(root, "state"),
       PI_COORDINATOR_CAPABILITY: "a".repeat(64),
+      PI_COORDINATOR_COMMON_DIR: path.join(root, "common"),
+      PI_COORDINATOR_IDLE_EXIT_GRACE_MS: "60000",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -165,74 +175,83 @@ test("real coordinator process and client bind the registry metadata endpoint an
     child.once("error", reject);
     child.once("exit", (code) => { clearTimeout(timer); reject(new Error(`Coordinator process exited ${code}: ${stderr}`)); });
   });
+  // daemon 在 startupReady 后自行原子登记 metadata（env 形实例 id 被沿用）。
+  const metadata = await registry.read();
+  assert.equal(metadata.endpoint, endpoint);
+  assert.equal(metadata.instanceId, instanceId);
   assert.deepEqual(ready, {
     protocol: metadata.protocol,
+    kind: "daemon",
     repositoryId: metadata.repositoryId,
-    storageRepositoryId: repositoryId,
+    storageRepositoryId: metadata.storageRepositoryId,
     instanceId: metadata.instanceId,
     endpoint: metadata.endpoint,
   });
-  const client = await connectRepositoryCoordinator({ repositoryId }, broker, { metadata });
+  const client = await connectRepositoryCoordinator({ repositoryId, storageRepositoryId: metadata.storageRepositoryId }, broker, { metadata });
   t.after(() => client.close());
   assert.deepEqual(await client.ping(), { instanceId: metadata.instanceId, repositoryId, storageRepositoryId: metadata.storageRepositoryId, endpoint: metadata.endpoint });
 });
 
-test("two real child processes racing for one repository converge on one coordinator", async () => {
+test("two real child processes racing to spawn one daemon converge on one instance", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "coordinator-race-"));
-  const script = `import { createCoordinatorRegistry } from ${JSON.stringify(path.resolve("packages/pi-subagents-enhanced/src/workspace/coordinator-registry.ts") )}; const r=createCoordinatorRegistry({commonDir:process.env.C,stateRoot:process.env.S}); const m=await r.claim({repositoryId:process.env.R,endpoint:process.env.E}); process.stdout.write(JSON.stringify(m)); setTimeout(()=>{},1000);`;
-  const env = { ...process.env, C: path.join(root, "common"), S: path.join(root, "state"), R: "c".repeat(64), E: path.join(root, "coordinator.sock") };
+  const script = `import { createCoordinatorRegistry } from ${JSON.stringify(path.resolve("packages/pi-subagents-enhanced/src/workspace/coordinator-registry.ts"))};
+import { ensureCoordinatorDaemon } from ${JSON.stringify(path.resolve("packages/pi-subagents-enhanced/src/workspace/coordinator-spawn.ts"))};
+const r = createCoordinatorRegistry({ commonDir: process.env.C, stateRoot: process.env.S });
+const h = await ensureCoordinatorDaemon({ stateRoot: process.env.S, repositoryId: process.env.R, commonDir: process.env.C, endpoint: r.endpoint, idleExitGraceMs: 60_000 });
+process.stdout.write(JSON.stringify(h.metadata));`;
+  const env = { ...process.env, C: path.join(root, "common"), S: path.join(root, "state"), R: "c".repeat(64) };
+  await mkdir(path.join(root, "state"), { recursive: true });
   const children = [0, 1].map(() => spawn(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", script], { env, stdio: ["ignore", "pipe", "pipe"] }));
-  const outputs = await Promise.all(children.map((child) => new Promise((resolve, reject) => { let out = ""; child.stdout.on("data", (chunk) => { out += chunk; }); child.once("error", reject); setTimeout(() => resolve(JSON.parse(out)), 3000); })));
-  assert.equal(outputs[0].instanceId, outputs[1].instanceId);
-  for (const child of children) child.kill("SIGKILL");
+  const outputs = await Promise.all(children.map((child) => new Promise((resolve, reject) => { let out = ""; child.stdout.on("data", (chunk) => { out += chunk; }); child.once("error", reject); child.once("exit", () => { try { resolve(JSON.parse(out)); } catch (error) { reject(error); } }); })));
+  assert.equal(outputs[0].instanceId, outputs[1].instanceId, "并发拉起锁内只产生一个 daemon 实例");
+  process.kill(outputs[0].pid, "SIGKILL");
 });
 
-test("registry rejects malformed metadata and supports stale takeover", async () => {
+test("registry rejects malformed metadata and respawn replaces a dead owner", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "coordinator-"));
-  const registry = createCoordinatorRegistry({ commonDir: root, stateRoot: path.join(root, "state") });
+  const commonDir = path.join(root, "common");
+  const stateRoot = path.join(root, "state");
+  await mkdir(stateRoot, { recursive: true });
+  const registry = createCoordinatorRegistry({ commonDir, stateRoot });
   await registry.writeRaw("not-json");
   await assert.rejects(() => registry.read(), /metadata/i);
-  const claimed = await registry.claim({ repositoryId: "b".repeat(64), endpoint: path.join(root, "c.sock") });
-  assert.equal(claimed.protocol, "repository-workspace-coordinator.v1");
-  await registry.release();
+  // 预置死 owner 登记（pid 必然不存在），拉起器应锁内清理并重拉。
+  await registry.writeRaw(`${JSON.stringify({ protocol: "repository-workspace-coordinator.v1", kind: "daemon", instanceId: "stale0000", pid: 999999999, birthIdentity: "0".repeat(64), repositoryId: "b".repeat(64), storageRepositoryId: "b".repeat(64), canonicalStateRoot: stateRoot, endpoint: registry.endpoint })}\n`);
+  const handle = await ensureCoordinatorDaemon({ stateRoot, repositoryId: "b".repeat(64), commonDir, endpoint: registry.endpoint, idleExitGraceMs: 60_000 });
+  t.after(() => { try { process.kill(handle.metadata.pid, "SIGKILL"); } catch { /* 已退出 */ } });
+  assert.equal(handle.metadata.protocol, "repository-workspace-coordinator.v1");
+  assert.notEqual(handle.metadata.pid, 999999999);
 });
 
-test("a confirmed dead coordinator owner is replaced for a new canonical state root while its abandoned root stays audit debt", async () => {
+test("cross state-root coordinator scope fails closed and pre-daemon registration surfaces audit debt", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "coordinator-stale-root-"));
   const originRoot = path.join(root, "origin");
   execFileSync("git", ["init", "-b", "main", originRoot], { stdio: "ignore" });
   const commonDir = path.join(originRoot, ".git");
   const repositoryId = "7".repeat(64);
-  const abandoned = createCoordinatorRegistry({ commonDir, stateRoot: path.join(root, "state-abandoned") });
-  const owner = await abandoned.claim({ repositoryId });
-  const abandonedRoot = owner.canonicalStateRoot;
-  // A live owner keeps exactly one coordinator scope per repository common dir.
-  const liveConflict = createCoordinatorRegistry({ commonDir, stateRoot: path.join(root, "state-live") });
-  await assert.rejects(() => liveConflict.claim({ repositoryId }), /state root/i);
-  // Only a dead owner whose recorded process birth identity no longer matches may be replaced.
-  await abandoned.writeRaw(JSON.stringify({ ...owner, pid: 1, birthIdentity: "0".repeat(64) }));
-  const recoveredRoot = path.join(root, "state-recovered");
-  const recovered = createCoordinatorRegistry({ commonDir, stateRoot: recoveredRoot });
-  const metadata = await recovered.claim({ repositoryId });
-  assert.notEqual(metadata.instanceId, owner.instanceId, "a dead owner must not retain the coordinator generation");
-  assert.equal(metadata.canonicalStateRoot, canonicalWorkspaceStateRoot(recoveredRoot));
-  assert.equal(metadata.endpoint, owner.endpoint, "the replacement reuses the one repository endpoint");
-  assert.deepEqual(metadata.supersededStateRoots, [abandonedRoot], "the abandoned canonical state root must stay observable");
-  const audit = auditManagedWorkspaces({ stateRoot: recoveredRoot, originRoot });
-  assert.equal(audit.coordinator.status, "observed");
-  assert.equal(audit.coordinator.instanceId, metadata.instanceId);
-  assert.deepEqual(audit.debts.filter((debt) => debt.kind === "state-root-split-brain"),
-    [{ kind: "state-root-split-brain", status: "migration-debt", supersededStateRoot: abandonedRoot }]);
-  await recovered.release();
+  const stateRoot = path.join(root, "state");
+  await mkdir(stateRoot, { recursive: true });
+  const registry = createCoordinatorRegistry({ commonDir, stateRoot });
+  // 预置另一 state root 的死 owner 登记：拉起器必须 scope fail-closed，不自动跨根接管。
+  const foreignRoot = path.join(root, "state-foreign");
+  await mkdir(foreignRoot, { recursive: true });
+  await registry.writeRaw(`${JSON.stringify({ protocol: "repository-workspace-coordinator.v1", kind: "daemon", instanceId: "foreign0", pid: 999999999, birthIdentity: "0".repeat(64), repositoryId, storageRepositoryId: repositoryId, canonicalStateRoot: foreignRoot, endpoint: registry.endpoint })}\n`);
+  await assert.rejects(() => ensureCoordinatorDaemon({ stateRoot, repositoryId, commonDir, endpoint: registry.endpoint }), (error) => error.code === "COORDINATOR_SCOPE_MISMATCH");
+  // 无 kind 的旧 claim 残留：audit 以 legacy-registration 债暴露，不当作 daemon。
+  await registry.writeRaw(`${JSON.stringify({ protocol: "repository-workspace-coordinator.v1", instanceId: "legacy000", pid: 999999999, birthIdentity: "0".repeat(64), repositoryId, storageRepositoryId: repositoryId, canonicalStateRoot: stateRoot, endpoint: registry.endpoint })}\n`);
+  const audit = auditManagedWorkspaces({ stateRoot, originRoot });
+  assert.equal(audit.coordinator.status, "stale");
+  assert.ok(audit.debts.some((debt) => debt.kind === "coordinator-legacy-registration"), "旧 claim 残留以 legacy 债暴露");
 });
 
 test("runtime endpoint metadata mismatch fails closed", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "coordinator-mismatch-"));
-  const registry = createCoordinatorRegistry({ commonDir: root, stateRoot: path.join(root, "state") });
-  const claimed = await registry.claim({ repositoryId: "f".repeat(64), endpoint: path.join(root, "too-long.sock") });
-  await registry.release();
-  await registry.writeRaw(JSON.stringify({ ...claimed, repositoryId: "0".repeat(64) }));
-  await assert.rejects(() => registry.claim({ repositoryId: "f".repeat(64), endpoint: claimed.endpoint }), /repository scope mismatch/i);
+  const stateRoot = path.join(root, "state");
+  await mkdir(stateRoot, { recursive: true });
+  const registry = createCoordinatorRegistry({ commonDir: root, stateRoot });
+  // 预置 repositoryId 不匹配的死 owner 登记：拉起器 scope fail-closed。
+  await registry.writeRaw(`${JSON.stringify({ protocol: "repository-workspace-coordinator.v1", kind: "daemon", instanceId: "mismatch0", pid: 999999999, birthIdentity: "0".repeat(64), repositoryId: "0".repeat(64), storageRepositoryId: "0".repeat(64), canonicalStateRoot: stateRoot, endpoint: registry.endpoint })}\n`);
+  await assert.rejects(() => ensureCoordinatorDaemon({ stateRoot, repositoryId: "f".repeat(64), commonDir: root, endpoint: registry.endpoint }), (error) => error.code === "COORDINATOR_SCOPE_MISMATCH");
 });
 
 test("real cross-process Root Broker challenge registers trusted owner and rejects replay or forged identity", async (t) => {

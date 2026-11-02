@@ -28,7 +28,7 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
   const registrationBindings = new Map<string, any>();
   const brokerCapabilities = new Map<string, string>();
   const socketCapabilities = new Map<net.Socket, Set<string>>();
-  const clients = new Set<net.Socket>(); let active = 0; let retained = 0; let timer: NodeJS.Timeout | undefined;
+  const clients = new Set<net.Socket>(); let active = 0; let retained = 0;
   let startupReady = false;
   // The durable queue, ledger records and proof outbox must share the ledger's
   // canonical partition; a symlinked alias would otherwise split the bucket.
@@ -474,6 +474,15 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
         if (!intent || intent.ownerScope?.rootSessionId !== binding.ownerScope.rootSessionId) throw new Error("resume intent owner scope denied");
         return integrationQueue.markResumeDelivery(intent.resumeIntentId, { state: "debt", reason: String(input.reason ?? "resume failed").slice(0, 240) });
       }
+      case "recovery.resume-delivered": {
+        // D7：Host 轮询泵送达 handoff followUp 后的幂等回执；daemon 自身无
+        // pi.sendMessage 快路径，送达标记必须由持引用的 Host 回写。
+        if (!integrationQueue) throw new Error("coordinator integration queue is unavailable");
+        if (input.authorization !== "root" || binding.ownerScope.rootSessionId !== input.ownerScope?.rootSessionId) throw new Error("root authorization required for recovery");
+        const delivered = integrationQueue.listResumeIntents().find((entry: any) => entry.resumeIntentId === input.resumeIntentId);
+        if (!delivered || delivered.ownerScope?.rootSessionId !== binding.ownerScope.rootSessionId) throw new Error("resume intent owner scope denied");
+        return integrationQueue.markResumeDelivery(input.resumeIntentId, { state: "delivered", reason: String(input.reason ?? "host handoff delivered").slice(0, 240) });
+      }
       case "recovery.activate-resume": {
         if (!integrationQueue || !workspaceService) throw new Error("coordinator integration queue is unavailable");
         if (input.authorization !== "root" || binding.ownerScope.rootSessionId !== input.ownerScope?.rootSessionId) throw new Error("root authorization required for recovery");
@@ -520,6 +529,12 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
         let requestId = "unknown"; let handling = false;
         try {
           const raw = JSON.parse(line); requestId = raw.requestId;
+          // 拉起器的 startupReady 握手探测：免认证、无状态泄漏，只报告本实例
+          // 是否已完成 startup recovery（未就绪期间普通业务请求仍会被拒）。
+          if (raw.method === "startup.ping") {
+            socket.write(`${JSON.stringify({ protocol: raw.protocol ?? "repository-workspace-coordinator.v1", requestId, repositoryId: options.repositoryId, ok: true, result: { instanceId, ready: startupReady } })}\n`);
+            continue;
+          }
           if (raw.method === "broker.register") {
             const registrationRequest = parseCoordinatorRegistrationRequest(raw);
             if (registrationRequest.repositoryId !== options.repositoryId) throw new TypeError("Coordinator repository scope mismatch");
@@ -557,9 +572,8 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
         registrations.delete(capability); registrationBindings.delete(capability);
         if (registration && brokerCapabilities.get(registration.ownerScope.rootSessionId) === capability) brokerCapabilities.delete(registration.ownerScope.rootSessionId);
       }
-      socketCapabilities.delete(socket); schedule();
+      socketCapabilities.delete(socket);
     }); });
-  function schedule() { if (clients.size || active || retained || timer) return; timer = setTimeout(() => { if (!clients.size && !active && !retained) server.close(); timer = undefined; }, options.idleGraceMs ?? 30_000); timer.unref(); }
   async function closeAfterPermissionFailure(error: unknown) {
     let actualMode: number | undefined;
     try { actualMode = (await stat(options.endpoint)).mode & 0o777; } catch (statError) { error = new Error("coordinator socket permission verification failed", { cause: new AggregateError([error, statError], "coordinator socket permission verification failed") }); }
@@ -576,13 +590,16 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
       void chmod(options.endpoint, 0o600).then(async () => {
         const actualMode = (await stat(options.endpoint)).mode & 0o777;
         if (actualMode !== 0o600) throw new Error(`coordinator socket mode is ${actualMode.toString(8)}, expected 600`);
-        schedule(); resolve();
+        resolve();
       }).catch((error) => { void closeAfterPermissionFailure(error).then(() => undefined, reject); });
     });
     server.once("error", reject);
     server.listen(options.endpoint);
   });
-  function beginActivity() { retained++; if (timer) { clearTimeout(timer); timer = undefined; } let released = false; return () => { if (released) return; released = true; retained--; schedule(); }; }
+  // listener 生命周期 = 宿主进程生命周期：idle 不再收缩 listener（收缩后
+  // 注册仍在名下会造成「owner 活着但聋」的永久缺口），归零退出由 daemon
+  // 进程退出承担。retained/active 仅用于统一 idle 快照。
+  function beginActivity() { retained++; let released = false; return () => { if (released) return; released = true; retained--; }; }
   async function finishStartupRecovery() {
     startupReady = false;
     // Terminal proof is the authority required by destructive workspace settlement.
@@ -593,25 +610,33 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
     await pumpResumeIntents();
     startupReady = true;
   }
+  // 计划契约：startupReady 供拉起器/宿主等待（Promise 形式），与 isStartupReady 同源。
+  let whenStartupReadyPromise: Promise<void> | undefined;
   async function listen() {
-    try {
-      await listenOnEndpoint();
-      await finishStartupRecovery();
-    } catch (error: any) {
-      if (error?.code !== "EADDRINUSE") throw error;
-      // A killed daemon can leave the UNIX socket inode behind. Probe it
-      // first so a live coordinator is never displaced.
-      const live = await new Promise<boolean>((resolve) => {
-        const probe = net.createConnection(options.endpoint);
-        probe.once("connect", () => { probe.destroy(); resolve(true); });
-        probe.once("error", () => resolve(false));
-      });
-      if (live) throw error;
-      await unlink(options.endpoint).catch(() => undefined);
-      await listenOnEndpoint();
-      await finishStartupRecovery();
-    }
+    whenStartupReadyPromise = (async () => {
+      try {
+        await listenOnEndpoint();
+        await finishStartupRecovery();
+      } catch (error: any) {
+        if (error?.code !== "EADDRINUSE") throw error;
+        // A killed daemon can leave the UNIX socket inode behind. Probe it
+        // first so a live coordinator is never displaced.
+        const live = await new Promise<boolean>((resolve) => {
+          const probe = net.createConnection(options.endpoint);
+          probe.once("connect", () => { probe.destroy(); resolve(true); });
+          probe.once("error", () => resolve(false));
+        });
+        if (live) throw error;
+        await unlink(options.endpoint).catch(() => undefined);
+        await listenOnEndpoint();
+        await finishStartupRecovery();
+      }
+    })();
+    await whenStartupReadyPromise;
   }
   const internal = workspaceService && integrationQueue ? Object.freeze({ workspaceService, integrationQueue, enqueueIntegration, awaitIntegrationAdmission, publishRebasedCandidate, reportResolvingConflict, abandonIntegration, inspectIntegrationState, prepareAutoIntegration, inspectAutoIntegration, advanceAutoIntegration, preserveIntegrationDebt, reconcileIntegrations }) : undefined;
-  return { server, clients, instanceId, internal, proofOutbox, proofOutboxDirectory, listen, beginActivity, close: async () => { if (timer) clearTimeout(timer); timer = undefined; registrations.clear(); registrationBindings.clear(); brokerCapabilities.clear(); socketCapabilities.clear(); for (const socket of clients) socket.destroy(); if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve())); await unlink(options.endpoint).catch(() => undefined); } };
+  // 统一 idle 快照：daemon 的引用计数归零判定依据（连接/在途/保留全零）。
+  function idleSnapshot() { return Object.freeze({ clients: clients.size, active, retained }); }
+  return { server, clients, instanceId, internal, proofOutbox, proofOutboxDirectory, listen, whenStartupReady: () => { if (!whenStartupReadyPromise) throw new Error("coordinator server has not started listening"); return whenStartupReadyPromise; }, beginActivity, idleSnapshot, isStartupReady: () => startupReady, close: async (closeOptions?: { unlinkEndpoint?: boolean }) => { registrations.clear(); registrationBindings.clear(); brokerCapabilities.clear(); socketCapabilities.clear(); for (const socket of clients) socket.destroy(); if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve())); // unlinkEndpoint:false 用于「新实例已接管 endpoint」时防止旧进程误删新 socket。
+    if (closeOptions?.unlinkEndpoint !== false) await unlink(options.endpoint).catch(() => undefined); } };
 }

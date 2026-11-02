@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
-import { chmod, mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { chmod, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { captureProcessBirthIdentity } from "../subagent-dispatch/process-birth-identity.ts";
@@ -28,13 +29,81 @@ export function canonicalWorkspaceStateRoot(value: string): string {
 }
 
 export const COORDINATOR_METADATA_FILE = "coordinator.json";
-export type CoordinatorMetadata = { protocol: string; instanceId: string; pid: number; birthIdentity: string; repositoryId: string; storageRepositoryId: string; canonicalStateRoot: string; endpoint: string; supersededStateRoots?: string[] };
+export type CoordinatorMetadata = { protocol: string; kind?: string; instanceId: string; pid: number; birthIdentity: string; repositoryId: string; storageRepositoryId: string; canonicalStateRoot: string; endpoint: string; supersededStateRoots?: string[] };
 const protocol = "repository-workspace-coordinator.v1";
 
-export function createCoordinatorRegistry(options: { commonDir: string; stateRoot: string; diagnosticSink?: (entry: unknown) => void }) {
-  const diagnose = (entry: unknown) => {
-    try { options.diagnosticSink?.(entry); } catch (diagnosticError) { console.error("[coordinator-registry] diagnostic sink failed", { entry, diagnosticError }); }
+/**
+ * 四态活性判定（alive/dead/mismatch/undetermined）：daemon 登记与 spawn 锁
+ * 共用的唯一活性语义；undetermined（权限未知、identity 不可读等）一律由调用
+ * 方 fail-closed，不得当作 stale 覆盖。
+ */
+export async function classifyCoordinatorOwner(owner: { pid?: unknown; birthIdentity?: unknown }, diagnosticSink?: (entry: unknown) => void): Promise<"alive" | "dead" | "mismatch" | "undetermined"> {
+  const diagnose = (entry: unknown) => { try { diagnosticSink?.(entry); } catch { /* 诊断失败不影响判定 */ } };
+  if (typeof owner.pid !== "number" || !Number.isSafeInteger(owner.pid) || owner.pid <= 0
+      || typeof owner.birthIdentity !== "string" || !/^[a-f0-9]{64}$/.test(owner.birthIdentity)) return "undetermined";
+  try {
+    const observed = await captureProcessBirthIdentity(owner.pid);
+    if (observed === owner.birthIdentity) return "alive";
+    diagnose({ version: 1, phase: "coordinator-owner-mismatch", reason: "birth-identity-mismatch", owner });
+    return "mismatch";
+  } catch (error) {
+    let errno = (error as { cause?: { code?: string } })?.cause?.code ?? (error as { code?: string }).code;
+    if (errno !== "ESRCH") {
+      try { process.kill(owner.pid, 0); } catch (signalError) {
+        if ((signalError as { code?: string }).code === "ESRCH") errno = "ESRCH";
+        else errno = (signalError as { code?: string }).code ?? errno;
+      }
+    }
+    if (errno === "ESRCH") {
+      diagnose({ version: 1, phase: "coordinator-owner-dead", reason: "process-not-found", error, errno, owner });
+      return "dead";
+    }
+    diagnose({ version: 1, phase: "coordinator-owner-liveness-undetermined", error, errno, owner });
+    return "undetermined";
+  }
+}
+
+/**
+ * 同步四态活性判定：与 classifyCoordinatorOwner 同语义，用 execFileSync 的 ps
+ * 探测换取同步契约（audit 只读投影要求同步返回）；供只读管理面消费。
+ */
+export function classifyCoordinatorOwnerSync(owner: { pid?: unknown; birthIdentity?: unknown }, diagnosticSink?: (entry: unknown) => void): "alive" | "dead" | "mismatch" | "undetermined" {
+  const diagnose = (entry: unknown) => { try { diagnosticSink?.(entry); } catch { /* 诊断失败不影响判定 */ } };
+  if (typeof owner.pid !== "number" || !Number.isSafeInteger(owner.pid) || owner.pid <= 0
+      || typeof owner.birthIdentity !== "string" || !/^[a-f0-9]{64}$/.test(owner.birthIdentity)) return "undetermined";
+  const killProbe = (): "alive" | "dead" | "undetermined" => {
+    try { process.kill(owner.pid as number, 0); return "alive"; }
+    catch (signalError) {
+      if ((signalError as { code?: string }).code === "ESRCH") return "dead";
+      return "undetermined";
+    }
   };
+  let output: Buffer | undefined;
+  try {
+    output = execFileSync("ps", ["-ww", "-p", String(owner.pid), "-o", "lstart=", "-o", "command="], { encoding: "buffer", stdio: ["ignore", "pipe", "ignore"] });
+  } catch (error) {
+    // ps 失败不能宜判死亡：以 kill 探测区分 ESRCH 与权限/其他未知。
+    const probe = killProbe();
+    diagnose({ version: 1, phase: probe === "dead" ? "coordinator-owner-dead" : "coordinator-owner-liveness-undetermined", errno: (error as { code?: string }).code, owner });
+    return probe;
+  }
+  if (!output || output.length === 0 || output.toString("utf8").trim().length === 0) {
+    const probe = killProbe();
+    diagnose({ version: 1, phase: probe === "dead" ? "coordinator-owner-dead" : "coordinator-owner-liveness-undetermined", reason: "empty-ps-output", owner });
+    return probe;
+  }
+  const observed = createHash("sha256").update(output).digest("hex");
+  if (observed === owner.birthIdentity) return "alive";
+  diagnose({ version: 1, phase: "coordinator-owner-mismatch", reason: "birth-identity-mismatch", owner });
+  return "mismatch";
+}
+
+/**
+ * 提供只读 read、原子 writeRaw 与路径/endpoint 推导；claim/release 的 owner
+ * 语义与锁文件协议已随 in-process coordinator 形态移除（生命周期归
+ * coordinator-daemon + coordinator-spawn 所有）。
+ */
+export function createCoordinatorRegistry(options: { commonDir: string; stateRoot: string; diagnosticSink?: (entry: unknown) => void }) {
   const metadataDir = path.join(options.commonDir, ".pi-coordinator");
   const repositoryHash = createHash("sha256").update(path.resolve(options.commonDir)).digest("hex");
   const uid = typeof process.getuid === "function" ? String(process.getuid()) : "user";
@@ -45,145 +114,25 @@ export function createCoordinatorRegistry(options: { commonDir: string; stateRoo
   const endpointHash = repositoryHash.slice(0, 32);
   const endpoint = process.platform === "win32" ? `${runtimeRoot}-${endpointHash}` : path.join(runtimeRoot, `${endpointHash}.sock`);
   const metadataPath = path.join(metadataDir, COORDINATOR_METADATA_FILE);
-  const lockPath = `${metadataPath}.lock`;
-  // Resolved at claim time: the ledger may create the state root afterwards.
-  const canonicalStateRoot = () => canonicalWorkspaceStateRoot(options.stateRoot);
   async function read(): Promise<CoordinatorMetadata> {
     let value: unknown;
-    try { value = JSON.parse(await readFile(metadataPath, "utf8")); } catch (error) { throw new Error(`Coordinator metadata is invalid: ${error.message}`); }
+    try { value = JSON.parse(await readFile(metadataPath, "utf8")); } catch (error) { throw new Error(`Coordinator metadata is invalid: ${(error as Error).message}`); }
     if (!value || typeof value !== "object" || (value as any).protocol !== protocol || !(value as any).instanceId) throw new Error("Coordinator metadata is invalid");
     return value as CoordinatorMetadata;
   }
-  async function writeRaw(value: string) { await mkdir(metadataDir, { recursive: true, mode: 0o700 }); await chmod(metadataDir, 0o700); await writeFile(metadataPath, value, { mode: 0o600 }); }
-  async function claim(input: { repositoryId: string; storageRepositoryId: string }): Promise<CoordinatorMetadata> {
-    await mkdir(metadataDir, { recursive: true, mode: 0o700 }); await chmod(metadataDir, 0o700);
-    if (process.platform !== "win32") { await mkdir(dir, { recursive: true, mode: 0o700 }); await chmod(dir, 0o700); }
-    let existing: CoordinatorMetadata | undefined;
-    let supersededStateRoots: string[] = [];
-    try { existing = await read(); } catch (error) {
-      if (!String(error?.message).includes("ENOENT") && !String(error?.message).includes("invalid")) throw error;
-      await unlink(metadataPath).catch(() => undefined);
-    }
-    if (existing) {
-      if (existing.repositoryId !== input.repositoryId) throw new Error("Coordinator repository scope mismatch");
-      if (existing.storageRepositoryId && existing.storageRepositoryId !== input.storageRepositoryId) throw new Error("Coordinator storage repository scope mismatch");
-      let ownerState: "alive" | "dead" | "mismatch" | "undetermined" = "undetermined";
-      if (existing.pid > 0 && typeof existing.birthIdentity === "string" && /^[a-f0-9]{64}$/.test(existing.birthIdentity)) {
-        try {
-          const observed = await captureProcessBirthIdentity(existing.pid);
-          ownerState = observed === existing.birthIdentity ? "alive" : "mismatch";
-          if (ownerState === "mismatch") diagnose({ version: 1, phase: "coordinator-owner-mismatch", reason: "birth-identity-mismatch", owner: existing });
-        } catch (error: any) {
-          let errno = error?.cause?.code ?? error?.code;
-          if (errno !== "ESRCH") {
-            try { process.kill(existing.pid, 0); } catch (signalError: any) {
-              if (signalError?.code === "ESRCH") {
-                errno = "ESRCH";
-                diagnose({ version: 1, phase: "coordinator-owner-dead", reason: "process-not-found", error: signalError, cause: error, errno, owner: existing });
-              } else errno = signalError?.code ?? errno;
-            }
-          }
-          ownerState = errno === "ESRCH" ? "dead" : "undetermined";
-          if (ownerState === "dead" && error?.cause?.code === "ESRCH") diagnose({ version: 1, phase: "coordinator-owner-dead", reason: "process-not-found", error, cause: error?.cause, errno, owner: existing });
-          if (ownerState === "undetermined") diagnose({ version: 1, phase: "coordinator-owner-liveness-undetermined", error, cause: error?.cause, errno, owner: existing });
-        }
-      } else {
-        diagnose({ version: 1, phase: "coordinator-owner-identity-invalid", owner: existing });
-      }
-      // A legacy metadata file can still carry the aliased form; comparing
-      // canonical values keeps one coordinator scope per state root. An
-      // unusable recorded root fails closed as a scope mismatch.
-      let recorded: string | undefined;
-      try { recorded = canonicalWorkspaceStateRoot(existing.canonicalStateRoot); } catch { recorded = undefined; }
-      const inherited = Array.isArray(existing.supersededStateRoots) ? existing.supersededStateRoots.filter((value): value is string => typeof value === "string") : [];
-      if (ownerState === "alive") {
-        // A live owner holds the single repository endpoint, so a different
-        // canonical state root is an unrecoverable split brain. A recorded
-        // root that cannot be resolved is equally unusable.
-        if (recorded !== canonicalStateRoot()) throw new Error("Coordinator state root scope mismatch");
-        return existing;
-      }
-      // Only a confirmed dead owner (ESRCH or observed identity mismatch)
-      // may be replaced; a wall-clock TTL or a missing socket never
-      // authorizes it. The abandoned canonical state root is retained so the
-      // audit keeps reporting the migration debt instead of erasing history.
-      if (ownerState === "undetermined") throw new Error("Coordinator owner liveness is undetermined");
-      supersededStateRoots = [...new Set(typeof recorded === "string" && recorded !== canonicalStateRoot() ? [...inherited, recorded] : inherited)];
-      await unlink(metadataPath).catch(() => undefined);
-    }
-    let handle;
-    try { handle = await open(lockPath, "wx", 0o600); } catch {
-      // A SIGKILL can leave the lock behind. Reclaim it only when the recorded
-      // owner is confirmed dead (pid unavailable or birth identity mismatch);
-      // a live owner's lock survives any wall-clock age (a slow claim is not
-      // a deadlock). Legacy locks without owner data keep the TTL fallback.
-      if (await lockOwnerIsDead()) { await unlink(lockPath); return claim(input); }
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      return claim(input);
-    }
+  /** 原子登记写（temp+rename）：崩溃中断不会留下半写 metadata。 */
+  async function writeRaw(value: string): Promise<void> {
+    await mkdir(metadataDir, { recursive: true, mode: 0o700 });
+    await chmod(metadataDir, 0o700);
+    const temp = `${metadataPath}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
     try {
-      // Record the owner identity so a racing claim can distinguish a live
-      // slow owner from a SIGKILL leftover.
-      await writeFile(lockPath, `${JSON.stringify({ pid: process.pid, birthIdentity: await captureProcessBirthIdentity(process.pid) })}\n`, { mode: 0o600 });
-      try { existing = await read(); if (existing) return existing; } catch { /* claim */ }
-      const metadata: CoordinatorMetadata = { protocol, instanceId: randomBytes(16).toString("hex"), pid: process.pid,
-        birthIdentity: await captureProcessBirthIdentity(process.pid), repositoryId: input.repositoryId, storageRepositoryId: input.storageRepositoryId,
-        canonicalStateRoot: canonicalStateRoot(), endpoint,
-        // The replacement is written through one atomic temp+rename so the
-        // endpoint owner and the recorded canonical state root never diverge.
-        ...(supersededStateRoots.length ? { supersededStateRoots } : {}) };
-      const temp = `${metadataPath}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-      await writeFile(temp, `${JSON.stringify(metadata)}\n`, { mode: 0o600 }); await rename(temp, metadataPath); await chmod(metadataPath, 0o600);
-      return metadata;
-    } finally { await handle.close(); await unlink(lockPath).catch(() => undefined); }
-  }
-  // 遗留 lock 的回收判定：带 owner 数据时仅确认 owner 死亡（pid 不可用或
-  // birth identity 不匹配）才回收；无 owner 数据的旧格式 lock 退回 TTL 兜底。
-  async function lockOwnerIsDead(): Promise<boolean> {
-    let owner: { pid?: unknown; birthIdentity?: unknown } | undefined;
-    try {
-      owner = JSON.parse((await readFile(lockPath, "utf8")).trim());
-    } catch { owner = undefined; }
-    if (!owner || typeof owner.pid !== "number" || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || typeof owner.birthIdentity !== "string" || !/^[a-f0-9]{64}$/.test(owner.birthIdentity)) {
-      try {
-        const age = Date.now() - (await stat(lockPath)).mtimeMs;
-        return age > 30_000;
-      } catch { return false; }
-    }
-    try {
-      const observed = await captureProcessBirthIdentity(owner.pid);
-      if (observed !== owner.birthIdentity) {
-        const error = new Error("coordinator lock owner birth identity mismatch");
-        error.code = "COORDINATOR_OWNER_IDENTITY_MISMATCH";
-        diagnose({ version: 1, phase: "coordinator-lock-owner-mismatch", error, reason: "birth-identity-mismatch", owner });
-        return true;
-      }
-      return false;
-    } catch (error: any) {
-      const cause = error?.cause;
-      let errno = cause?.code ?? error?.code;
-      if (errno !== "ESRCH") {
-        try { process.kill(owner.pid, 0); } catch (signalError: any) {
-          if (signalError?.code === "ESRCH") {
-            diagnose({ version: 1, phase: "coordinator-lock-owner-dead", reason: "process-not-found", error: signalError, cause: error, errno: "ESRCH", owner });
-            return true;
-          }
-          errno = signalError?.code ?? errno;
-        }
-      }
-      diagnose({ version: 1, phase: errno === "ESRCH" ? "coordinator-lock-owner-dead" : "coordinator-lock-liveness-check-failed", ...(errno === "ESRCH" ? { reason: "process-not-found" } : {}), error, cause, errno, owner });
-      return errno === "ESRCH";
+      await writeFile(temp, value, { mode: 0o600 });
+      await rename(temp, metadataPath);
+      await chmod(metadataPath, 0o600);
+    } catch (error) {
+      await unlink(temp).catch(() => undefined);
+      throw error;
     }
   }
-  async function release() {
-    const current = await read().catch(() => undefined);
-    if (current?.pid !== process.pid) return;
-    let identity: string;
-    try { identity = await captureProcessBirthIdentity(process.pid); } catch { return; }
-    // 保留 metadata：durable audit（coordinator.status=observed）依赖它，而 claim
-    // 路径已具备 pid+birth-identity 活性检查与 stale-owner 接管，退出删除只会
-    // 让验收 settlement 在 daemon idle-exit 后永久失明（R12f）。
-    if (identity === current.birthIdentity) await unlink(`${metadataPath}.lock`).catch(() => undefined);
-  }
-  return { dir, metadataDir, metadataPath, endpoint, read, writeRaw, claim, release };
+  return { dir, metadataDir, metadataPath, endpoint, read, writeRaw, classify: (owner: { pid?: unknown; birthIdentity?: unknown }) => classifyCoordinatorOwner(owner, options.diagnosticSink) };
 }

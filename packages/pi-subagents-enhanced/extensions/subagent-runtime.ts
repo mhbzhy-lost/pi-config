@@ -22,19 +22,20 @@ import { createSupervisorControlPlane, supervisorCanonicalDigest } from "../src/
 import { createSupervisorRuntimeReader } from "../src/subagent-dispatch/supervisor-runtime-source.ts";
 import { createRenewableTypedSubagentRpcClient, createTypedSubagentRpcClient } from "../src/subagent-dispatch/rpc-client.ts";
 import { createCoordinatorProofOutbox } from "../src/subagent-dispatch/coordinator-proof-outbox.ts";
+import { createIntegrationQueue } from "../src/workspace/integration-queue.ts";
 import { classifyTerminalProofBinding } from "../src/subagent-dispatch/terminal-proof-binding.ts";
 import { resolveRootSessionId } from "../src/subagent-dispatch/root-broker-protocol.ts";
 import { createRunAuthorization } from "../src/subagent-dispatch/run-authorization.ts";
-import { parseIntegrationResumeIntentV1 } from "../src/subagent-dispatch/recovery-resume-contract.ts";
+import { createManualIntegrationHandoff, parseIntegrationResumeIntentV1 } from "../src/subagent-dispatch/recovery-resume-contract.ts";
 import { COORDINATOR_OPERATIONS } from "../src/subagent-dispatch/root-broker-protocol.ts";
 import { closeAndUnbindRootBroker, inspectRootBrokerExecutionProof, registerRootBrokerAuthorizedRun, startAndBindRootBroker } from "../src/subagent-dispatch/root-broker-registry.ts";
 import { RootBrokerServer, rootBrokerTerminalProofId, type TerminalProofDeliveryOutcome } from "../src/subagent-dispatch/root-broker-server.ts";
 import { AuthorityStore } from "../src/subagent-dispatch/authority-store.ts";
 import { rootBrokerRegistryEntry } from "../src/subagent-dispatch/root-broker-registry.ts";
 import { createTrustedRunBindingResolver } from "../src/subagent-dispatch/run-binding-resolver.ts";
-import { connectRepositoryCoordinator } from "../src/workspace/coordinator-client.ts";
-import { createCoordinatorRegistry } from "../src/workspace/coordinator-registry.ts";
-import { createCoordinatorServer } from "../src/workspace/coordinator-server.ts";
+import { createLazyCoordinator } from "../src/workspace/coordinator-client.ts";
+import { canonicalWorkspaceStateRoot, createCoordinatorRegistry } from "../src/workspace/coordinator-registry.ts";
+import { ensureCoordinatorDaemon } from "../src/workspace/coordinator-spawn.ts";
 import { createManagedWorkspaceLedger } from "../src/workspace/ledger.ts";
 import { resolveRepositoryIdentity } from "../src/workspace/repository-identity.ts";
 import { createManagedWorkspaceService } from "../src/workspace/service.ts";
@@ -82,64 +83,81 @@ export async function connectRuntimeCoordinator({ pi, cwd, broker, stateRoot, rp
   if (!shouldStartRepositoryCoordinator(cwd) || typeof stateRoot !== "string" || stateRoot.length === 0) return undefined;
   const identity = await resolveRepositoryIdentity(cwd);
   const registry = createCoordinatorRegistry({ commonDir: identity.commonDir, stateRoot });
-  const metadata = await registry.claim({ repositoryId: identity.repositoryId, storageRepositoryId: identity.storageRepositoryId });
-  let server: any;
-  const ownsServer = metadata.pid === process.pid;
-  if (ownsServer) {
-    try {
-      server = createCoordinatorServer({
-        endpoint: metadata.endpoint,
-        repositoryId: metadata.repositoryId,
-        storageRepositoryId: metadata.storageRepositoryId,
-        instanceId: metadata.instanceId,
-        stateRoot: metadata.canonicalStateRoot,
-        diagnosticSink,
-        recoveryEventSink: async (intent: any) => {
-          // resume intent 的快路径：本 Host 的 orchestrator 直接消费（仅限本
-          // root 拥有的 intent，submit 内部校验 owner scope）；跨 Host 投递由
-          // durable recovery.status 轮询通道负责。legacy preserve 事件仍走
-          // broker push。coordinator 的 durable 状态仍是唯一权威。
-          if (intent?.requiredAction === "resume-child") {
-            const handoff = intent.handoff;
-            if (!handoff || handoff.customType !== "subagent-integration-handoff") {
-              diagnosticSink?.({ version: 1, phase: "recovery-handoff-invalid", resumeIntentId: intent?.resumeIntentId, sourceRunId: intent?.sourceRunId });
-              return { state: "debt", reason: "manual handoff notification is invalid" };
-            }
-            try {
-              await (pi as any).sendMessage(handoff, { deliverAs: "followUp", triggerTurn: true });
-              return { state: "delivered" };
-            } catch (error) {
-              diagnosticSink?.({ version: 1, phase: "recovery-handoff-delivery-failed", error, cause: error?.cause, resumeIntentId: intent?.resumeIntentId, sourceRunId: intent?.sourceRunId });
-              return { state: "debt", reason: "manual handoff notification failed" };
-            } finally {
-              // coordinator 尚需落盘 delivery；proof delivery 完成后还会再发最终失效提示。
-              broker.notifyExecutionFacts(intent.sourceRunId);
-            }
-          }
-          return broker.publishRecoveryEvent(intent);
-        },
-      });
-      await server.listen();
-    } catch (error) {
+  const canonicalStateRoot = canonicalWorkspaceStateRoot(stateRoot);
+  // 懒加载（D1/D2）：仓库选择阶段零 claim、零 listen、零连接；首个需要类
+  // 操作在 spawn 锁内拉起独立 daemon，Host 持久连接即引用（D3）。
+  const lazy = createLazyCoordinator({
+    identity,
+    brokerRegistration: () => rootBrokerRegistryEntry(pi, broker.rootSessionId),
+    ensure: async () => (await ensureCoordinatorDaemon({
+      stateRoot, repositoryId: identity.repositoryId, storageRepositoryId: identity.storageRepositoryId,
+      commonDir: identity.commonDir, endpoint: registry.endpoint,
+      // 归零宽限可由环境覆盖（测试用小宽限快速观察自退；生产缺省 60s）。
+      idleExitGraceMs: Number(process.env.PI_COORDINATOR_IDLE_EXIT_GRACE_MS) || undefined,
+    })).metadata,
+    readMetadata: async () => { try { return await registry.read(); } catch { return undefined; } },
+  });
+  const requireClient = () => lazy.requireClient();
+  const preferClient = () => lazy.preferClient();
+  const proofOwnerScope = Object.freeze({ kind: "standalone-subagent" as const, rootSessionId: broker.rootSessionId });
+  // One durable proof outbox shared with the coordinator daemon; the broker
+  // writes pending/debt entries when the daemon cannot settle them.
+  const proofOutbox = createCoordinatorProofOutbox(path.join(canonicalStateRoot, "repositories", identity.storageRepositoryId, "terminal-proof-outbox"));
+  // run-only 绑定解析：ledger 即绑定权威（coordinator 读同一 ledger），直读
+  // scoped 记录不依赖 daemon（D5 利用类）；唯一性/身份校验仍由 resolver 执行，
+  // same-owner/unknown invalid 与 v2-invalid 在直读中抛错 fail-closed。
+  const ledgerInvalidSink = (diagnostic: unknown) => forwardLedgerInvalidRecord(diagnosticSink, diagnostic);
+  const scopedLedgerRecords = (runId: string) => createManagedWorkspaceLedger({ stateRoot: canonicalStateRoot })
+    .listScoped({ owner: proofOwnerScope, onInvalid: ledgerInvalidSink })
+    .filter((record: any) => record.run?.runId === runId);
+  const bindingResolver = createTrustedRunBindingResolver({
+    listOwned: async (input: { runId: string }) => scopedLedgerRecords(input.runId),
+  }, {
+    rootSessionId: broker.rootSessionId,
+    readLedger: (runId: string) => scopedLedgerRecords(runId),
+  });
+  let closing = false;
+  // D7 轮询泵：daemon 无 pi.sendMessage 快路径，Host 持引用期间以固定间隔轮询
+  // resume intents 并等价送达 handoff followUp；送达后幂等回写 delivered，失败
+  // 保留 debt 由下一轮重放（极端下可能重复触发一次 followUp，消费方幂等）。无
+  // 引用（daemon 未拉起）时泵空转跳过，不破坏 F1 懒加载语义。
+  let pumpBusy = false;
+  const pumpResumeHandoffs = async () => {
+    if (closing || pumpBusy || !lazy.hasClient()) return;
+    pumpBusy = true;
+    let client: Awaited<ReturnType<typeof lazy.preferClient>>;
+    try { client = await lazy.preferClient(); } catch { return; }
+    if (!client) return;
+    let intents: unknown;
+    try { intents = await client.recoveryStatus(); } catch { return; }
+    for (const intent of Array.isArray(intents) ? intents : []) {
+      const entry = intent as { requiredAction?: string; state?: string; delivery?: { state?: string }; resumeIntentId?: string; queueItemId?: string; workspaceId?: string; leaseId?: string; ownerScope?: unknown; sourceRunId?: string };
+      if (entry?.requiredAction !== "resume-child" || entry.state !== "pending" || entry.delivery?.state === "delivered") continue;
+      if (typeof entry.resumeIntentId !== "string" || typeof entry.sourceRunId !== "string" || typeof entry.workspaceId !== "string" || typeof entry.queueItemId !== "string") continue;
+      // 存储 intent 不携带 handoff（daemon 侧临时构造）；此处同样重建后经
+      // pi.sendMessage 送达，等价旧 in-process sink 快路径。
+      const handoff = createManualIntegrationHandoff({ resumeIntentId: entry.resumeIntentId, sourceRunId: entry.sourceRunId, workspaceId: entry.workspaceId, queueItemId: entry.queueItemId });
       try {
-        // listen 失败可能是已有活 socket；只清理本连接实际监听的 server。
-        if (server?.server.listening) await server.close();
-        await registry.release();
-      } catch (cleanupError) {
-        try { diagnosticSink?.({ version: 1, phase: "coordinator-start-cleanup-failed", error, cause: error?.cause, secondaryError: cleanupError }); } catch (diagnosticError) { console.error("[subagent-runtime] recovery diagnostic sink failed", diagnosticError); }
-        throw new AggregateError([error, cleanupError], "coordinator startup and cleanup failed", { cause: error });
+        await (pi as any).sendMessage(handoff, { deliverAs: "followUp", triggerTurn: true });
+        await client.resumeDelivered({ resumeIntentId: entry.resumeIntentId, workspaceId: entry.workspaceId, leaseId: entry.leaseId, ownerScope: entry.ownerScope, authorization: "root", reason: "host handoff delivered" });
+        diagnosticSink?.({ version: 1, phase: "recovery-handoff-pumped", resumeIntentId: entry.resumeIntentId, sourceRunId: entry.sourceRunId });
+      } catch (error) {
+        diagnosticSink?.({ version: 1, phase: "recovery-handoff-pump-failed", error, cause: (error as { cause?: unknown })?.cause, resumeIntentId: entry.resumeIntentId, sourceRunId: entry.sourceRunId });
+      } finally {
+        try { broker.notifyExecutionFacts(entry.sourceRunId); } catch { /* 通知失败不影响下一轮 */ }
       }
-      throw error;
     }
-  }
-  let client: Awaited<ReturnType<typeof connectRepositoryCoordinator>> | undefined;
-  try {
-    client = await connectRepositoryCoordinator(identity, await rootBrokerRegistryEntry(pi, broker.rootSessionId), { metadata });
-    const proofOwnerScope = Object.freeze({ kind: "standalone-subagent" as const, rootSessionId: broker.rootSessionId });
-    // One durable proof outbox shared with the coordinator daemon; the broker
-    // writes pending/debt entries when the daemon cannot settle them.
-    const proofOutbox = createCoordinatorProofOutbox(path.join(metadata.canonicalStateRoot, "repositories", identity.storageRepositoryId, "terminal-proof-outbox"));
-    const operationMethods = Object.freeze({
+    pumpBusy = false;
+  };
+  const pumpHandle: NodeJS.Timeout | undefined = setInterval(() => { void pumpResumeHandoffs(); }, 5_000);
+  pumpHandle.unref?.();
+  const coordinatorRequest: NonNullable<RootBrokerServer["coordinatorRequest"]> = async (runId, operation, input) => {
+    if (closing) throw new Error("repository connection is closing");
+    if (!COORDINATOR_OPERATIONS.includes(operation as any)) throw new Error("unsupported coordinator operation");
+    // child 经 Root Broker 转发的集成操作是懒加载触发点（D2）：按需拉起并持有引用。
+    const client = await requireClient();
+    const binding = await bindingResolver.resolve(runId);
+    const methods = {
       enqueue: client.enqueueIntegration,
       await_admission: client.awaitIntegrationAdmission,
       report_conflict: client.reportResolvingConflict,
@@ -152,90 +170,96 @@ export async function connectRuntimeCoordinator({ pi, cwd, broker, stateRoot, rp
       // The child wire input stays empty. coordinatorRequest adds the binding
       // resolved from the trusted run registration before this socket call.
       advance_auto_integration: client.advanceAutoIntegration,
-    });
-    // run-only 绑定解析保留 coordinator 权威优先；权威查询被无关 invalid record
-    // 阻断时退回本地 ledger 逐记录隔离（foreign v1 skip + 结构化诊断）。回退结果
-    // 仍过 resolver 的唯一性/身份校验；same-owner/unknown invalid 与 v2-invalid
-    // 在回退中抛错 fail-closed，不把查询失败解释为「没有 workspace」。
-    const ledgerInvalidSink = (diagnostic: unknown) => forwardLedgerInvalidRecord(diagnosticSink, diagnostic);
-    const bindingResolver = createTrustedRunBindingResolver(client, {
+    } as Record<string, (value: any) => Promise<unknown>>;
+    const method = methods[operation as string];
+    if (typeof method !== "function") throw new Error("unsupported coordinator operation");
+    return method({ ...input, ...binding });
+  };
+  const recordTerminalProof: NonNullable<RootBrokerServer["recordTerminalProof"]> = async (run, proof): Promise<TerminalProofDeliveryOutcome> => {
+    if (closing) throw new Error("repository connection is closing");
+    const proofId = rootBrokerTerminalProofId(proof);
+    const outcome = await classifyTerminalProofBinding({
+      // 绑定复查（利用类，D5）：直读 ledger（与 coordinator 权威同源），daemon
+      // 缺位不拉起；proof 结算（需要类）经 requireClient 触发拉起。
+      client: {
+        listOwned: async (input: { runId: string }) => scopedLedgerRecords(input.runId),
+        recordTerminalProof: async (input: any) => (await requireClient()).recordTerminalProof(input),
+      },
+      proofOutbox,
+      readLedger: () => scopedLedgerRecords(run.runId),
+      // 跨 owner scope 复查：scoped 查询为空时区分「run 真没有 workspace」与
+      // 「workspace 挂在别的 owner scope 下」（后者记债暴露，不静默）。无 owner
+      // 的复查只跳过明确 v1 legacy 并记诊断（T1 合同）；v2/未知 schema 仍抛错，
+      // 由模块内 debt 分支处置，不降级为 not-applicable。
+      readCrossScope: () => createManagedWorkspaceLedger({ stateRoot: canonicalStateRoot })
+        .list({ onInvalid: ledgerInvalidSink }).filter((record: any) => record.run?.runId === run.runId),
+      run,
+      proof,
+      proofId,
+      proofOwnerScope,
       rootSessionId: broker.rootSessionId,
-      readLedger: (runId: string) => createManagedWorkspaceLedger({ stateRoot: metadata.canonicalStateRoot })
-        .listScoped({ owner: proofOwnerScope, onInvalid: ledgerInvalidSink })
-        .filter((record: any) => record.run?.runId === runId),
-    });
-    let closing = false;
-    const coordinatorRequest: NonNullable<RootBrokerServer["coordinatorRequest"]> = async (runId, operation, input) => {
-      if (closing) throw new Error("repository connection is closing");
-      if (!COORDINATOR_OPERATIONS.includes(operation as any)) throw new Error("unsupported coordinator operation");
-      const binding = await bindingResolver.resolve(runId);
-      const method = operationMethods[operation as keyof typeof operationMethods];
-      return method({ ...input, ...binding });
-    };
-    const recordTerminalProof: NonNullable<RootBrokerServer["recordTerminalProof"]> = async (run, proof): Promise<TerminalProofDeliveryOutcome> => {
-      if (closing) throw new Error("repository connection is closing");
-      const proofId = rootBrokerTerminalProofId(proof);
-      const outcome = await classifyTerminalProofBinding({
-        client,
-        proofOutbox,
-        readLedger: () => createManagedWorkspaceLedger({ stateRoot: metadata.canonicalStateRoot })
-          .listScoped({ owner: proofOwnerScope, onInvalid: ledgerInvalidSink }).filter((record: any) => record.run?.runId === run.runId),
-        // 跨 owner scope 复查：scoped 查询为空时区分「run 真没有 workspace」与
-        // 「workspace 挂在别的 owner scope 下」（后者记债暴露，不静默）。无 owner
-        // 的复查只跳过明确 v1 legacy 并记诊断（T1 合同）；v2/未知 schema 仍抛错，
-        // 由上方 catch 转为 proof debt，不降级为 not-applicable。
-        readCrossScope: () => createManagedWorkspaceLedger({ stateRoot: metadata.canonicalStateRoot })
-          .list({ onInvalid: ledgerInvalidSink }).filter((record: any) => record.run?.runId === run.runId),
-        run,
-        proof,
+      buildTerminalProof: () => ({
+        state: "observed", conflict: false, runId: run.runId, rootSessionId: broker.rootSessionId,
+        asyncDir: run.asyncDir,
+        processInstance: typeof proof.runnerProcessInstanceId === "string" && proof.runnerProcessInstanceId ? proof.runnerProcessInstanceId : String(run.pid),
         proofId,
-        proofOwnerScope,
-        rootSessionId: broker.rootSessionId,
-        buildTerminalProof: () => ({
-          state: "observed", conflict: false, runId: run.runId, rootSessionId: broker.rootSessionId,
-          asyncDir: run.asyncDir,
-          processInstance: typeof proof.runnerProcessInstanceId === "string" && proof.runnerProcessInstanceId ? proof.runnerProcessInstanceId : String(run.pid),
-          proofId,
-        }),
-      });
-      createSubagentDispatchTrace(run.runId, diagnosticSink)(outcome.state === "delivered" ? "proof-delivered" : "proof-pending", {
-        runId: run.runId, proofId, repositoryId: identity.repositoryId, storageRepositoryId: identity.storageRepositoryId,
-      });
-      return outcome;
-    };
-    if (bindBrokerCallbacks) {
-      if (broker.coordinatorRequest || broker.recordTerminalProof) {
-        bindingResolver.dispose();
-        throw new Error("broker coordinator callbacks are already installed");
-      }
-      broker.coordinatorRequest = coordinatorRequest;
-      broker.recordTerminalProof = recordTerminalProof;
-    }
-    // Host 模式只关闭仓库资源；全局回调由 Host 在全部连接关闭后卸载。
-    return Object.freeze({ client, server, registry, ownsServer, identity, coordinatorRequest, recordTerminalProof, async close() {
-      closing = true;
-      await client.close();
-      if (ownsServer) {
-        await server.close();
-        await registry.release();
-      }
+      }),
+    });
+    createSubagentDispatchTrace(run.runId, diagnosticSink)(outcome.state === "delivered" ? "proof-delivered" : "proof-pending", {
+      runId: run.runId, proofId, repositoryId: identity.repositoryId, storageRepositoryId: identity.storageRepositoryId,
+    });
+    return outcome;
+  };
+  if (bindBrokerCallbacks) {
+    if (broker.coordinatorRequest || broker.recordTerminalProof) {
       bindingResolver.dispose();
-      if (bindBrokerCallbacks) {
-        if (broker.recordTerminalProof === recordTerminalProof) broker.recordTerminalProof = undefined;
-        if (broker.coordinatorRequest === coordinatorRequest) broker.coordinatorRequest = undefined;
-      }
-      createSubagentDispatchTrace(broker.rootSessionId, diagnosticSink)("repository-closed", { repositoryId: identity.repositoryId, storageRepositoryId: identity.storageRepositoryId });
-    } });
-  } catch (error) {
-    const errors: unknown[] = [error];
-    try { await client?.close(); } catch (cleanupError) { errors.push(cleanupError); }
-    if (ownsServer) {
-      try { await server.close(); } catch (cleanupError) { errors.push(cleanupError); }
-      try { await registry.release(); } catch (cleanupError) { errors.push(cleanupError); }
+      throw new Error("broker coordinator callbacks are already installed");
     }
-    if (errors.length > 1) throw new AggregateError(errors, "coordinator connection and cleanup failed", { cause: error });
-    throw error;
+    broker.coordinatorRequest = coordinatorRequest;
+    broker.recordTerminalProof = recordTerminalProof;
   }
+  // Host 模式只关闭仓库资源；全局回调由 Host 在全部连接关闭后卸载。
+  return Object.freeze({ lazy, requireClient, preferClient, registry, identity, coordinatorRequest, recordTerminalProof, async close() {
+    closing = true;
+    clearInterval(pumpHandle);
+    await lazy.dispose();
+    bindingResolver.dispose();
+    if (bindBrokerCallbacks) {
+      if (broker.recordTerminalProof === recordTerminalProof) broker.recordTerminalProof = undefined;
+      if (broker.coordinatorRequest === coordinatorRequest) broker.coordinatorRequest = undefined;
+    }
+    createSubagentDispatchTrace(broker.rootSessionId, diagnosticSink)("repository-closed", { repositoryId: identity.repositoryId, storageRepositoryId: identity.storageRepositoryId });
+  } });
+}
+
+/** D5 降级视图：daemon 缺位时用本地 ledger+queue 只读组装 plan facts 消费的
+ * coordinator 投影（同一 durable 数据源；只读方法，绝不拉起 daemon）。 */
+function localCoordinatorView(context: { identity: { repositoryId: string; storageRepositoryId: string }; workspaceService: any }, rootSessionId: string) {
+  const queue = createIntegrationQueue({ stateRoot: process.env.PI_CODING_WORKSPACE_DIR, repositoryId: context.identity.repositoryId, storageRepositoryId: context.identity.storageRepositoryId });
+  return Object.freeze({
+    async listOwned(input: { runId?: string } = {}) {
+      return context.workspaceService.listOwned({ ownerScope: { kind: "standalone-subagent", rootSessionId }, ...(input?.runId === undefined ? {} : { runId: input.runId }) });
+    },
+    async inspectIntegrationState(binding: any) {
+      const completion = context.workspaceService.inspectIntegrationCompletion(binding);
+      const item = queue.findByBinding(binding);
+      const receipt = completion.integrationReceipt;
+      return Object.freeze({
+        queueState: item?.state ?? "absent",
+        workspaceState: completion.workspaceState,
+        integrationReceipt: Boolean(receipt && item?.workspaceDispositionReceiptId === receipt.receiptId),
+        proofState: completion.proofState,
+        terminalProof: completion.terminalProof,
+        revision: item?.revision ?? 0,
+      });
+    },
+    async recoveryStatus() {
+      return [
+        ...queue.listRecoveryIntents().filter((intent: any) => intent.ownerScope?.rootSessionId === rootSessionId),
+        ...queue.listResumeIntents(rootSessionId),
+      ];
+    },
+  });
 }
 
 export function createRootBrokerUpstream({ rpc }: { rpc: any }) {
@@ -436,7 +460,7 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
     const resolveTerminalProof = (run: any) => projectManagedWorkspaceTerminalProof(run, run?.runId ? currentBroker.inspectExecutionProof(run.runId) : null);
     // 单 Git Host 保留旧 service 的全部 owner 入口；超级根不扩展旧 Goal owner 语义。
     if (fixedContext) return createCoordinatorDispositionFacade({ localService: fixedContext.workspaceService,
-      coordinatorClient: fixedContext.client, resolveTerminalProof });
+      resolveCoordinatorClient: async () => fixedContext.requireClient(), resolveTerminalProof });
     const localService = createManagedWorkspaceService({ stateRoot: process.env.PI_CODING_WORKSPACE_DIR,
       diagnosticSink, terminalProofProvider: ({ run }) => resolveTerminalProof(run) });
     const allocate = (operation: "ensureAllocated" | "reserve") => async (request: any) => {
@@ -454,7 +478,7 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
       },
       async resolveCoordinatorClient(entry: any) {
         if (broker !== currentBroker || entry.owner?.kind !== "standalone-subagent" || entry.owner.rootSessionId !== currentBroker.rootSessionId) throw repositoryError();
-        return (await selectReceipt(entry.run?.runId, entry.workspaceId)).context.client;
+        return (await selectReceipt(entry.run?.runId, entry.workspaceId)).context.requireClient();
       },
       resolveTerminalProof,
     });
@@ -497,7 +521,7 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
       if (visitedRepositories.has(context.identity.repositoryId)) continue;
       visitedRepositories.add(context.identity.repositoryId);
       let intents: unknown;
-      try { intents = await context.client.recoveryStatus(); } catch (error) {
+      try { intents = await (await context.requireClient()).recoveryStatus(); } catch (error) {
         managedResumeDiagnostic("managed-resume-lineage-intents-unavailable", { sourceRunId, repositoryId: context.identity.repositoryId, error, cause: (error as any)?.cause });
         continue;
       }
@@ -880,7 +904,10 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
         const ownerScope = { kind: "standalone-subagent", rootSessionId: ref.rootSessionId };
         try {
           const { record, context: coordinatorRuntime } = await selectReceipt(ref.runId, ref.workspaceId);
-          const coordinator = coordinatorRuntime.client;
+          // 利用类（D5）：plan facts inspect 是查询面，daemon 存在则用，缺位时降级
+          // 本地 ledger+queue 适配器（同一 durable 数据），绝不拉起 daemon。
+          const coordinator = await coordinatorRuntime.preferClient()
+            ?? localCoordinatorView(coordinatorRuntime, ref.rootSessionId);
           const remoteEntries = await coordinator.listOwned({ runId: ref.runId });
           const remote = Array.isArray(remoteEntries) && remoteEntries.length === 1 ? remoteEntries[0] : undefined;
           if (!record || !remote || record.workspaceId !== ref.workspaceId || remote.workspaceId !== ref.workspaceId
@@ -937,7 +964,10 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
             facts.integration = "blocked";
             const candidate = candidates.length === 1 && candidates[0]?.version === "integration-resume-intent.v1"
               ? parseIntegrationResumeIntentV1(candidates[0], { rootSessionId: ref.rootSessionId }) : undefined;
-            if (!candidate || candidate.delivery.state !== "pending" || candidate.state === "preserved"
+            // daemon 化后 intent 的正常前置态是 debt/delivered（durable 落盘后由 Host 泵
+            // 重放送达）；typed-resume 的门禁应以 intent 自身 pending 为主，delivery
+            // 仅排除显式失败（delivered 后仍未激活同样可 typed-resume 唤醒）。
+            if (!candidate || !["pending", "debt", "delivered"].includes(candidate.delivery.state) || candidate.state === "preserved"
                 || ["preserved", "cancelled", "blocked"].includes(integration.queueState)
                 || facts.workspaceState !== "active") {
               facts.recovery = "manual-integration";
@@ -966,8 +996,9 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
             ? null : "PLAN_FACT_WAKEUP_UNAVAILABLE";
           if (facts.wakeup === "unavailable" && facts.terminal !== "pending") facts.recovery = "unknown";
           return facts;
-        } catch {
+        } catch (error) {
           // 保留已核实的 terminal/workspace 字段；读取失败不降级为可重派或已完成。
+          try { diagnosticSink?.({ version: 1, phase: "plan-facts-inspect-failed", runId: ref.runId, workspaceId: ref.workspaceId, error: String((error as Error)?.message ?? error), code: (error as { code?: string })?.code }); } catch { /* 诊断失败不影响降级 */ }
           facts.recovery = "unknown";
           facts.wakeup = "unavailable";
           facts.blocker = "PLAN_EXECUTION_FACTS_UNAVAILABLE";
@@ -1023,7 +1054,7 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
         const { record: selected, context: coordinatorRuntime } = await selectReceipt(bindingRunId);
         let owned: any;
         try {
-          owned = await coordinatorRuntime.client.listOwned({ runId: bindingRunId });
+          owned = await (await coordinatorRuntime.requireClient()).listOwned({ runId: bindingRunId });
         } catch (error) {
           // coordinator run-only 枚举被无关 invalid record 阻断时，退回本地唯一
           // receipt 继续复核（唯一性与身份已由 selectReceipt 的直读+分区复核确
@@ -1046,7 +1077,7 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
           throw Object.assign(new Error("managed resume owner binding is invalid"), { code: "RESUME_BINDING_BLOCKED" });
         }
         const expectedAgent = managedCodingBinding(record, bindingOwner, broker).binding.agentProfile;
-        const intents = await coordinatorRuntime.client.recoveryStatus();
+        const intents = await (await coordinatorRuntime.requireClient()).recoveryStatus();
         const matches = Array.isArray(intents)
           ? intents.filter((entry: any) => entry?.version === "integration-resume-intent.v1" && entry.sourceRunId === bindingRunId)
           : [];
@@ -1066,7 +1097,7 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
         if (!brokerReady || !broker) throw Object.assign(new Error("managed resume coordinator is unavailable"), { code: "RESUME_BINDING_BLOCKED" });
         const intent = plan.intent;
         const { context: coordinatorRuntime } = await selectReceipt(intent.sourceRunId, intent.workspaceId);
-        return coordinatorRuntime.client.activateResume({
+        return (await coordinatorRuntime.requireClient()).activateResume({
           resumeIntentId: intent.resumeIntentId,
           workspaceId: intent.workspaceId,
           leaseId: intent.leaseId,

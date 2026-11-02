@@ -3086,6 +3086,20 @@ test("unbound supervisor target deactivates the three supervisor_request_* opera
 });
 
 // T1/T2：provider/child 受控；真实连接可包裹故障窗口，业务装配仍由生产 Host 执行。
+// 懒加载 daemon 归零自退后路径消失；带宽限轮询观察，替代旧 in-process server
+// 关闭即 socket 消失的即时断言。
+async function waitGone(target, label = "path should disappear", timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try { await stat(target); } catch (error) {
+      if (/ENOENT/.test(String(error?.message))) return;
+      throw error;
+    }
+    if (Date.now() > deadline) throw new Error(`${label}: still present after ${timeoutMs}ms: ${target}`);
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+}
+
 async function productionHostFixture(t, singleRepository, options = {}) {
   const { getPlanExecutionService } = await import("../packages/pi-subagents-enhanced/src/execution/index.ts");
   const { findRootBroker } = await import("../packages/pi-subagents-enhanced/src/subagent-dispatch/root-broker-registry.ts");
@@ -3115,19 +3129,20 @@ async function productionHostFixture(t, singleRepository, options = {}) {
   const sessionManager = SessionManager.inMemory(hostCwd);
   const rootSessionId = sessionManager.getSessionId();
   const context = { cwd: hostCwd, sessionManager };
-  const envKeys = ["PI_SUBAGENT_CHILD", "PI_SUBAGENT_FANOUT_CHILD", "PI_CODING_AGENT_DIR", "PI_CODING_WORKSPACE_DIR", "PI_SUBAGENT_DISPATCH_TRACE_FILE", "PI_SUBAGENT_ORCHESTRATOR_SESSION_ID", "PI_SUBAGENT_RUN_ID"];
+  const envKeys = ["PI_SUBAGENT_CHILD", "PI_SUBAGENT_FANOUT_CHILD", "PI_CODING_AGENT_DIR", "PI_CODING_WORKSPACE_DIR", "PI_SUBAGENT_DISPATCH_TRACE_FILE", "PI_SUBAGENT_ORCHESTRATOR_SESSION_ID", "PI_SUBAGENT_RUN_ID", "PI_COORDINATOR_IDLE_EXIT_GRACE_MS"];
   const savedEnv = Object.fromEntries(envKeys.map(key => [key, process.env[key]]));
   delete process.env.PI_SUBAGENT_CHILD;
   delete process.env.PI_SUBAGENT_FANOUT_CHILD;
   process.env.PI_CODING_AGENT_DIR = join(repoRoot, "pi");
   process.env.PI_CODING_WORKSPACE_DIR = stateRoot;
+  // 懒加载 daemon 的归零宽限调小，测试可在 Host 关闭后快速观察到自退。
+  process.env.PI_COORDINATOR_IDLE_EXIT_GRACE_MS = "300";
   process.env.PI_SUBAGENT_DISPATCH_TRACE_FILE = traceFile;
   let host;
   let broker;
   let execution;
   let serial = 0;
-  const handoffResolvers = new Set();
-  let disposing = false;
+  const handoffResolvers = new Set();  let disposing = false;
   const releaseHandoffs = () => { for (const release of handoffResolvers) release(); handoffResolvers.clear(); };
   let handoffStarted;
   const handoff = new Promise(resolve => { handoffStarted = resolve; });
@@ -3401,8 +3416,8 @@ test("T2 同 Host 双生产连接并行分配、交错集成与 proof、部分�
   const [a, b] = refs;
   const contextA = f.connections.find(entry => realpathSync(entry.identity.originRoot) === f.repository);
   const contextB = f.connections.find(entry => realpathSync(entry.identity.originRoot) === other);
-  assert.equal((await contextA.client.listOwned({ runId: b.runId }))[0].originRoot, other, "远端 listOwned 可跨分区，不能作为发现路由");
-  const foreignView = await contextA.client.inspectIntegrationState({ workspaceId: b.workspaceId, leaseId: workspaces[1].leaseId, runId: b.runId,
+  assert.equal((await (await contextA.requireClient()).listOwned({ runId: b.runId }))[0].originRoot, other, "远端 listOwned 可跨分区，不能作为发现路由");
+  const foreignView = await (await contextA.requireClient()).inspectIntegrationState({ workspaceId: b.workspaceId, leaseId: workspaces[1].leaseId, runId: b.runId,
     ownerScope: { kind: "standalone-subagent", rootSessionId: f.rootSessionId } });
   assert.equal(foreignView.queueState, "absent", "错误 client 能读到 B workspace 却查 A queue；Host 必须在查询前统一选路");
   assert.notEqual((await f.childCall(b, { action: "inspect_integration_state" })).queueState, "absent");
@@ -3421,10 +3436,10 @@ test("T2 同 Host 双生产连接并行分配、交错集成与 proof、部分�
   await f.finish(b.runId);
   assert.equal((await f.execution.inspect(b)).integration, "completed", "A 的 proof 在途时 B 仍可独立结算");
   let closesA = 0;
-  const closeA = contextA.server.close;
-  contextA.server.close = async () => {
+  const disposeA = contextA.lazy.dispose;
+  contextA.lazy.dispose = async () => {
     if (++closesA === 1) throw new Error("T2 injected A close failure");
-    return closeA();
+    return disposeA();
   };
   let closed = false;
   const closing = f.close().finally(() => { closed = true; });
@@ -3432,10 +3447,11 @@ test("T2 同 Host 双生产连接并行分配、交错集成与 proof、部分�
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(closed, false, "broker drain 等待 A 的在途 terminal proof");
   assert.equal(closesA, 0, "proof 排空前不得关闭任何仓库连接");
-  assert.ok(await contextB.client.ping());
+  assert.ok(await (await contextB.requireClient()).ping());
   holdProof();
   await closeFailed;
-  await assert.rejects(() => stat(contextB.registry.endpoint), /ENOENT/, "B 的成功关闭不因 A 失败回滚");
+  // 懒加载形态：B 关闭即释放引用，daemon 归零自退后 endpoint 消失。
+  await waitGone(contextB.registry.endpoint, "B 的成功关闭不因 A 失败回滚");
   assert.ok(await contextA.registry.read(), "A 保留 registry，允许既有 shutdown-debt 重试");
   assert.equal(broker.coordinatorRequest, callbacks.request, "单连接失败不卸载全局回调");
   await assert.rejects(() => callbacks.request(a.runId, "inspect_integration_state", {}), /repository binding/);
@@ -3501,7 +3517,7 @@ test("T2 双仓库中 typed resume 保持同 workspace、profile 与 proof 身�
   await f.close();
 });
 
-test("T2 B 连接建立失败只清理 B，重试同 identity flight 复用且不覆盖 A 回调", { timeout: 120_000 }, async (t) => {
+test("T2 B 仓库选择失败只清理 B，重试同 identity flight 复用且不覆盖 A 回调", { timeout: 120_000 }, async (t) => {
   let failB = true;
   const attempts = [];
   const f = await productionHostFixture(t, false, {
@@ -3509,8 +3525,8 @@ test("T2 B 连接建立失败只清理 B，重试同 identity flight 复用且�
       attempts.push(input.cwd);
       if (input.cwd.endsWith("/other") && failB) {
         failB = false;
-        // 已真实 listen 后，在 broker registry 验证边界注入失败；不写 receipt/proof。
-        return connectRuntimeCoordinator({ ...input, pi: { events: null } });
+        // 懒加载形态下仓库选择不再建连；失败边界改为选择阶段直接注入。
+        throw new Error("simulated repository selection failure");
       }
       return connectRuntimeCoordinator(input);
     },
@@ -3520,13 +3536,13 @@ test("T2 B 连接建立失败只清理 B，重试同 identity flight 复用且�
   const [first, failed] = await Promise.allSettled([f.start(f.repository, "healthy-A"), f.start(other, "failed-B")]);
   assert.equal(first.status, "fulfilled");
   assert.equal(failed.status, "rejected");
-  assert.match(failed.reason.message, /events identity is invalid/);
+  assert.match(failed.reason.message, /simulated repository selection failure/);
   const { resolveRepositoryIdentity } = await import("../packages/pi-subagents-enhanced/src/workspace/repository-identity.ts");
   const { createCoordinatorRegistry } = await import("../packages/pi-subagents-enhanced/src/workspace/coordinator-registry.ts");
   const identity = await resolveRepositoryIdentity(other);
   const registry = createCoordinatorRegistry({ commonDir: identity.commonDir, stateRoot: f.stateRoot });
-  await assert.rejects(() => stat(registry.endpoint), /ENOENT/, "失败的 B 连接关闭 socket");
-  await assert.rejects(() => stat(`${registry.metadataPath}.lock`), /ENOENT/, "失败的 B 连接释放 claim lock，metadata 仍供审计");
+  await assert.rejects(() => stat(registry.endpoint), /ENOENT/, "失败的 B 连接不产生 endpoint");
+  await assert.rejects(() => stat(`${registry.metadataPath}.lock`), /ENOENT/, "失败的 B 连接不残留锁文件");
   assert.equal(f.connections.length, 1);
   assert.equal((await f.childCall(first.value, { action: "inspect_integration_state" })).workspaceState, "active");
   const [retry, concurrent] = await Promise.all([f.start(other, "retry-B"), f.start(other, "concurrent-B")]);
@@ -3538,7 +3554,7 @@ test("T2 B 连接建立失败只清理 B，重试同 identity flight 复用且�
   await Promise.all([first.value, retry, concurrent].map(ref => f.finish(ref.runId)));
   await f.broker.awaitTerminalProofDeliveries();
   await f.close();
-  await assert.rejects(() => stat(registry.endpoint), /ENOENT/);
+  await waitGone(registry.endpoint);
 });
 
 for (const singleRepository of [true, false]) test(`T2 ${singleRepository ? "单仓库保留" : "超级根拒绝"}旧 Goal owner 的分配与绑定边界`, { timeout: 90_000 }, async (t) => {

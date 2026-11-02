@@ -9,7 +9,7 @@ import test from "node:test";
 import integrationQueueExtension, { createSubagentIntegrationTool } from "../packages/pi-subagents-enhanced/child-extensions/integration-queue.ts";
 import { connectRepositoryCoordinator } from "../packages/pi-subagents-enhanced/src/workspace/coordinator-client.ts";
 import { createCoordinatorServer } from "../packages/pi-subagents-enhanced/src/workspace/coordinator-server.ts";
-import { createCoordinatorRegistry } from "../packages/pi-subagents-enhanced/src/workspace/coordinator-registry.ts";
+import { canonicalWorkspaceStateRoot, createCoordinatorRegistry } from "../packages/pi-subagents-enhanced/src/workspace/coordinator-registry.ts";
 import { createManagedWorkspaceRequestV2 } from "../packages/pi-subagents-enhanced/src/workspace/contract.ts";
 import { createManagedWorkspaceService } from "../packages/pi-subagents-enhanced/src/workspace/service.ts";
 import { auditManagedWorkspaces } from "../packages/pi-subagents-enhanced/src/workspace/administration.ts";
@@ -19,6 +19,22 @@ import { startAndBindRootBroker } from "../packages/pi-subagents-enhanced/src/su
 import { createRunAuthorization } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/run-authorization.ts";
 
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+
+
+/** 测试内 in-process coordinator 的登记：用 daemon 形 metadata 描述本进程
+ * （pid+birthIdentity 真实，audit 视角 alive），取代已移除的 registry.claim。 */
+async function registerInProcessCoordinator(registry, repositoryId, storageRepositoryId, stateRoot) {
+  const { captureProcessBirthIdentity } = await import("../packages/pi-subagents-enhanced/src/subagent-dispatch/process-birth-identity.ts");
+  const metadata = {
+    protocol: "repository-workspace-coordinator.v1", kind: "daemon",
+    instanceId: `inproc-${process.pid}-${Date.now().toString(16)}`,
+    pid: process.pid, birthIdentity: await captureProcessBirthIdentity(process.pid),
+    repositoryId, storageRepositoryId: storageRepositoryId ?? repositoryId,
+    canonicalStateRoot: stateRoot, endpoint: registry.endpoint,
+  };
+  await registry.writeRaw(`${JSON.stringify(metadata)}\n`);
+  return registry.read();
+}
 
 test("trusted integration extension activates only its registered tool after session_start and reloads idempotently", async () => {
   const registered = [];
@@ -259,8 +275,7 @@ test("two real Hosts share public child integration while owner scope and termin
   const hostA = await spawnRootBroker(t, `root-a-${process.pid}-${Date.now()}`);
   const hostB = await spawnRootBroker(t, `root-b-${process.pid}-${Date.now()}`);
   const registry = createCoordinatorRegistry({ commonDir: path.resolve(originRoot, git(originRoot, "rev-parse", "--git-common-dir")), stateRoot });
-  const metadata = await registry.claim({ repositoryId });
-  t.after(() => registry.release());
+  const metadata = await registerInProcessCoordinator(registry, repositoryId, repositoryId, stateRoot);
   const coordinator = createCoordinatorServer({ endpoint: metadata.endpoint, repositoryId, instanceId: metadata.instanceId, stateRoot, idleGraceMs: 10_000 });
   await coordinator.listen();
   t.after(() => coordinator.close());
@@ -329,8 +344,11 @@ test("aliased state root keeps queue, records, and coordinator in one canonical 
   });
   await startAndBindRootBroker(pi, broker);
   runtime = await connectRuntimeCoordinator({ pi, cwd: originRoot, broker, stateRoot });
-  const metadata = await runtime.registry.read();
-  assert.equal(metadata.canonicalStateRoot, canonicalStateRoot);
+  assert.equal(runtime.registry.endpoint, runtime.registry.endpoint);
+  const canonicalByRegistry = canonicalWorkspaceStateRoot(stateRoot);
+  assert.equal(canonicalByRegistry, canonicalStateRoot);
+  const metadata0 = await (async () => { try { return await runtime.registry.read(); } catch { return undefined; } })();
+  assert.equal(metadata0, undefined, "懒加载：仓库选择后尚无登记");
 
   const service = createManagedWorkspaceService({ stateRoot });
   assert.equal(service.stateRoot, canonicalStateRoot);
@@ -347,7 +365,9 @@ test("aliased state root keeps queue, records, and coordinator in one canonical 
   git(active.path, "commit", "-m", "canonical");
   const candidateHead = git(active.path, "rev-parse", "HEAD");
   const binding = { workspaceId: active.workspaceId, leaseId: active.leaseId, runId, ownerScope: { kind: "standalone-subagent", rootSessionId } };
-  const tool = createSubagentIntegrationTool({ coordinator: runtime.client, resolveBinding: () => binding });
+  // 懒加载形态：首个需要类操作（集成入队）拉起 daemon 并持引用。
+  const coordinator = await runtime.requireClient();
+  const tool = createSubagentIntegrationTool({ coordinator, resolveBinding: () => binding });
   const invoke = async (input) => {
     const response = await tool.execute("call", input);
     assert.equal(response.isError, false, response.content[0].text);
@@ -359,7 +379,7 @@ test("aliased state root keeps queue, records, and coordinator in one canonical 
   const published = await invoke({ action: "publish", queue_item_id: queued.queueItemId, queue_lease_id: admission.queueLeaseId, candidate_head: candidateHead });
   assert.equal(published.state, "completed");
   const proof = { state: "observed", conflict: false, runId, rootSessionId, asyncDir, processInstance: `${runId}-runner`, proofId: "c".repeat(64) };
-  const settled = await runtime.client.recordTerminalProof({ workspaceId: active.workspaceId, ownerScope: binding.ownerScope, proof });
+  const settled = await coordinator.recordTerminalProof({ workspaceId: active.workspaceId, ownerScope: binding.ownerScope, proof });
   assert.equal(settled.receipt.state, "released");
 
   const audit = auditManagedWorkspaces({ stateRoot, originRoot });
@@ -372,6 +392,7 @@ test("aliased state root keeps queue, records, and coordinator in one canonical 
   assert.equal(audit.queue.items[0].workspaceId, active.workspaceId);
   assert.equal(audit.inventory.workspaces.length, 1);
   assert.equal(audit.inventory.workspaces[0].receipt.state, "released");
+  try { process.kill((await runtime.registry.read()).pid, "SIGKILL"); } catch { /* 已退出 */ }
 });
 
 test("audit keeps every repository queue partition visible when another partition has no queue directory", async () => {

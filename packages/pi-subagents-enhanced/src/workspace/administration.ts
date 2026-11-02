@@ -3,7 +3,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, realpathSync, readdirSync,
 import path from "node:path";
 
 import { inspectManagedGitWorkspace, listManagedGitRegistrations } from "./git-worktree.ts";
-import { canonicalWorkspaceStateRoot } from "./coordinator-registry.ts";
+import { canonicalWorkspaceStateRoot, classifyCoordinatorOwnerSync } from "./coordinator-registry.ts";
 import { createManagedWorkspaceLedger } from "./ledger.ts";
 import { createManagedWorkspaceService } from "./service.ts";
 
@@ -76,7 +76,23 @@ export function auditManagedWorkspaces({ stateRoot = process.env.PI_CODING_WORKS
         debts.push({ kind: "state-root-split-brain", status: "migration-debt", supersededStateRoot: value });
       }
       if (typeof metadata.pid === "number") {
-        try { process.kill(metadata.pid, 0); } catch { coordinator.status = "stale"; debts.push({ kind: "coordinator-singleton", status: "dead" }); }
+        // 同步四态判定（含 birthIdentity，防 pid 复用误判 observed）：daemon 形态看
+        // kind；非 daemon 的旧 claim 残留一律 legacy-registration 债，交由拉起器锁内清理。
+        const kind = typeof metadata.kind === "string" ? metadata.kind : "legacy";
+        if (kind !== "daemon") {
+          coordinator.status = "stale";
+          debts.push({ kind: "coordinator-legacy-registration", status: "pre-daemon" });
+        } else {
+          const state = classifyCoordinatorOwnerSync(metadata);
+          if (state === "alive") {
+            // observed
+          } else {
+            coordinator.status = "stale";
+            debts.push(state === "dead"
+              ? { kind: "coordinator-daemon-dead", status: "dead" }
+              : { kind: "coordinator-owner-undetermined", status: state });
+          }
+        }
       }
     }
   }
