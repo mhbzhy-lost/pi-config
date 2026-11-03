@@ -97,8 +97,10 @@ async function defaultCreateProxyFetch(proxy: string) {
 // openai provider 的模型流由 registerProvider 注入 fetch 覆盖；但它依赖的 OAuth
 // 登录/刷新都在 pi-ai 内部裸调 globalThis.fetch（auth/oauth/openai-chatgpt.js 的
 // requestToken），没有 fetch/dispatcher 注入点，也不吃 provider 覆盖。因此额外把一个
-// 主机白名单的 fetch 包装层装上全局：只有 auth.openai.com 走代理，其余请求原样放行。
-export const OAUTH_PROXY_HOSTS = ["auth.openai.com"];
+// 主机白名单的 fetch 包装层装上全局：OpenAI OAuth 与 Codex API 走代理，其余请求原样放行。
+// Codex 的真实请求通常通过 provider 注入的 fetch；把 chatgpt.com 同时纳入全局
+// 白名单，是为了让 network-recovery 的无会话副作用探活也复用同一代理链路。
+export const OAUTH_PROXY_HOSTS = ["auth.openai.com", "chatgpt.com"];
 const SCOPED_FETCH_KEY = Symbol.for("pi.openai-proxy.scopedFetch");
 
 function requestUrl(input: any): URL | undefined {
