@@ -18,6 +18,15 @@ export type PlanRunFacts = {
   blocker: string | null;
 };
 
+export type PlanLineageResolution = {
+  /** 血缘链解析出的当前 owner run；workspaceId/rootSessionId 与入参 ref 一致 */
+  run: PlanRunRef;
+  /** sourceRunId → … → 最终 runId 的完整链（含首尾） */
+  chain: string[];
+  /** true = ref.runId 已被血缘链上的后续 run 取代 */
+  superseded: boolean;
+};
+
 export interface PlanExecutionService {
   start(input: {
     dispatchKey: string;
@@ -34,6 +43,8 @@ export interface PlanExecutionService {
   }): Promise<PlanRunRef>;
   inspect(ref: PlanRunRef): Promise<PlanRunFacts>;
   subscribe(listener: (runId: string) => void): () => void;
+  // 可选血缘查询；旧实现不实现该方法时类型仍合法。
+  lineage?(ref: PlanRunRef): Promise<PlanLineageResolution | null>;
 }
 
 // Pi 可为不同扩展创建独立 API/Jiti 实例；服务与就绪订阅均按 root 共享。
