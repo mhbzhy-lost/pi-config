@@ -172,7 +172,7 @@ test('T3 多仓库 RPC 五工具形态不变，派发路径、checkpoint 与未�
   for (const [index, request] of dispatches.entries()) {
     assert.equal(request.cwd, state.binding.repositories[index].root);
     assert.deepEqual(request.writePaths, [index === 0 ? 'A.txt' : 'B.txt']);
-    assert.deepEqual(JSON.parse(request.task.split('\n').slice(1).join('\n')).task.writePaths, request.writePaths);
+    assert.deepEqual(JSON.parse(request.task.split('\n').slice(1, -1).join('\n')).task.writePaths, request.writePaths);
   }
   // 激活后的 recovery context 是合法生产消息；合成 provider 只识别最后 user，后续沿测试命令调用实际工具入口。
   const call = (name, args = {}) => h.probe(`goal-probe-call ${JSON.stringify({ name, arguments: args })}`, 'goal-test.call');

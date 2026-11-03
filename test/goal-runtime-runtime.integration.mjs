@@ -512,7 +512,7 @@ test('T3 scheduler 投影经生产 coding 入口生成同源 workspace policy，
     const dispatched = h.execution.calls[index].request;
     assert.deepEqual(request.policy, { publication: 'allowed', application: 'allowed', writePaths: dispatched.writePaths });
     assert.equal(request.originRoot, dispatched.cwd); assert.equal(request.requestedCwd, dispatched.cwd);
-    assert.deepEqual(JSON.parse(dispatched.task.split('\n').slice(1).join('\n')).task.writePaths, request.policy.writePaths);
+    assert.deepEqual(JSON.parse(dispatched.task.split('\n').slice(1, -1).join('\n')).task.writePaths, request.policy.writePaths);
   }
   assert.deepEqual(allocations[0].policy.writePaths, ['repoA/src/**']);
 });
@@ -668,7 +668,7 @@ test('T0/T3 真实 Git 发现 23 根，仅绑定两个参与仓库；投影派�
     const projection = resolveTaskRepository(decoded.tasks[index], binding.repositories);
     assert.equal(input.request.cwd, projection.root);
     assert.deepEqual(input.request.writePaths, projection.writePaths);
-    const prompt = JSON.parse(input.request.task.split('\n').slice(1).join('\n'));
+    const prompt = JSON.parse(input.request.task.split('\n').slice(1, -1).join('\n'));
     assert.deepEqual(prompt.task.writePaths, projection.writePaths);
     assert.deepEqual(prompt.task.acceptance, decoded.tasks[index].acceptance);
   }

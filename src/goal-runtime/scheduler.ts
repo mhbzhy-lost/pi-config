@@ -34,6 +34,10 @@ export type DispatchResult = {
 
 const CHECK_FAILED = "检查失败：提供针对性指导后调用 plan_retry";
 const CHECK_REVERIFY = "检查受阻或候选漂移：本批已结束，调用 plan_verify 重验";
+/** 替换门拒绝文案的统一补充：澄清被拒实例的内存态归属并给出两条处置路径，删除存盘文件不能解锁替换门。 */
+const REPLACEMENT_BLOCKED_GUIDANCE = "被拒实例持有于当前会话内存与 session 分支索引，删除存盘文件不影响本会话判定；"
+  + "处置路径：① /plan force-close 或 plan_force_close 核实闭合后重新 plan_execute；"
+  + "② 若 session 文件已删除，重启会话后旧 goal 随会话消失，可直接重新 plan_execute。";
 
 export class GoalSchedulerError extends Error {
   readonly code: string;
@@ -347,17 +351,17 @@ export function createGoalRuntime(input: CreateGoalRuntimeInput) {
       const baseline = read();
       const decoded = decodePlanContract(contract);
       if (hashPlanContract(decoded) !== binding.contractHash) reject("CONTRACT_HASH_MISMATCH", "契约 hash 与 binding 不一致");
-      if (baseline.status !== "cancelled") reject("GOAL_CANCELLED_REPLACEMENT_REQUIRED", "只能替换已取消计划");
+      if (baseline.status !== "cancelled") reject("GOAL_CANCELLED_REPLACEMENT_REQUIRED", "只能替换已取消计划" + ";" + REPLACEMENT_BLOCKED_GUIDANCE);
       for (const task of Object.values(baseline.tasks)) {
         if (!task.run) {
           if (task.dispatchKey || task.workspaceId || task.status === "running") {
-            reject("GOAL_CANCELLED_REPLACEMENT_REQUIRED", "取消计划仍有未绑定的启动 intent/workspace，禁止覆盖");
+            reject("GOAL_CANCELLED_REPLACEMENT_REQUIRED", "取消计划仍有未绑定的启动 intent/workspace，禁止覆盖" + ";" + REPLACEMENT_BLOCKED_GUIDANCE);
           }
           continue;
         }
         const fact = await execution.inspect(task.run);
         if (!sameRun(task.run, fact.run) || !closed(fact)) {
-          reject("GOAL_CANCELLED_REPLACEMENT_REQUIRED", "取消计划仍有未闭合运行或资源；须先经 typed 路径处置");
+          reject("GOAL_CANCELLED_REPLACEMENT_REQUIRED", "取消计划仍有未闭合运行或资源；须先经 typed 路径处置" + ";" + REPLACEMENT_BLOCKED_GUIDANCE);
         }
       }
       assertIdentity(read(), baseline);
@@ -445,6 +449,7 @@ export function createGoalRuntime(input: CreateGoalRuntimeInput) {
         evidence: state.receipts.filter(r => task.deps.some(id => state.contract.tasks.find(t => t.id === id)!.checkIds.includes(r.checkId))),
       }, null, 2),
       ...(guidance === undefined ? [] : ["本次修复指导：", guidance]),
+      "结束前必须在 worktree 内将全部交付物显式 git add 并 git commit；未提交的 run 终结后集成队列无法发布你的工作。",
     ].join("\n");
   }
 
