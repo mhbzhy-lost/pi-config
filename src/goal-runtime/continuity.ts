@@ -15,6 +15,13 @@ export type GoalContinuityRuntime = {
 
 function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
+/** auto-pause UI 投影的去重状态；模块级 WeakMap，不扩展 index.ts 的 GoalRuntimeSession 类型。 */
+const lastAutoPauseNotifiedReason = new WeakMap<GoalRuntimeSession, string | null>();
+/** input handler 的固定自动暂停原因；与 store.pauseReason 文案一致，并作为去重键。 */
+const AUTO_PAUSE_REASON = "收到用户新消息或 steer，自动续跑已暂停；使用 /plan resume 恢复";
+/** resume 提示只消费 status 投影中 next 判定与 guidance（即 describeGoalNextAction 输出）相关字段。 */
+type ResumeStatusProjection = { next?: { kind: string; reason?: string } | null; guidance?: string };
+
 /** 原合同与业务事实完整投影；不从摘要重建权威约束，也不把旧 passed 推断为当前通过。 */
 export function buildRecoveryContext(state: GoalState): string {
   return [
@@ -97,6 +104,22 @@ export function installGoalContinuity(pi: ExtensionAPI, runtime: GoalContinuityR
     session.blockedReason = errorText(error);
     session.context.ui.notify(`Goal 未完成：${session.blockedReason}`, "warning");
   }
+  /** 自动暂停成功后的一次性 info 投影；同一 pauseReason 只提示一次，control(active) 成功即重置。 */
+  function notifyAutoPause(session: GoalRuntimeSession, ctx: ExtensionContext, reason: string): void {
+    if (!runtime.isCurrent(session)) return;
+    if (lastAutoPauseNotifiedReason.get(session) === reason) return;
+    lastAutoPauseNotifiedReason.set(session, reason);
+    ctx.ui.notify("Goal 已因新用户消息自动暂停；/plan resume 恢复", "info");
+  }
+  /** resume 成功但无可推进事实（wait/blocked）时的一行 info 投影；actionable 不输出，既有 JSON 状态输出不变。 */
+  function notifyResumeNonActionable(session: GoalRuntimeSession, ctx: ExtensionContext): void {
+    if (!runtime.isCurrent(session)) return;
+    const projection = runtime.status(session) as ResumeStatusProjection | null;
+    const next = projection?.next;
+    if (!next || (next.kind !== "wait" && next.kind !== "blocked")) return;
+    const reason = projection.guidance ?? next.reason ?? "";
+    ctx.ui.notify(`已恢复；当前无可推进事实，事实变化后将自动续跑，无需重复 resume。${reason}`, "info");
+  }
   async function save(session: GoalRuntimeSession): Promise<void> {
     runtime.assertCurrent(session);
     session.store.assertWritable();
@@ -135,6 +158,8 @@ export function installGoalContinuity(pi: ExtensionAPI, runtime: GoalContinuityR
     session.pendingContinuation = false;
     session.goalTurn = false;
     session.lastWakeFingerprint = null;
+    // 恢复成功即重置 auto-pause 提示去重；取消同样清除，避免替换后的新计划吞掉首次 auto-pause 提示。
+    if (status !== "paused") lastAutoPauseNotifiedReason.delete(session);
     if (status === "active") await runtime.reconcile(session);
   }
 
@@ -151,7 +176,10 @@ export function installGoalContinuity(pi: ExtensionAPI, runtime: GoalContinuityR
         }
         if (command === "pause") await control(session, "paused", "用户通过 /plan pause 暂停");
         else if (command === "cancel") await control(session, "cancelled", "用户取消；既有 run/workspace 仍须经 typed 路径核实闭合");
-        else if (command === "resume") await control(session, "active", null);
+        else if (command === "resume") {
+          await control(session, "active", null);
+          notifyResumeNonActionable(session, ctx);
+        }
         else { ctx.ui.notify("用法：/plan pause | resume | cancel | status", "warning"); return; }
         runtime.assertCurrent(session, ctx);
         ctx.ui.notify(JSON.stringify(runtime.status(session), null, 2), "info");
@@ -166,7 +194,10 @@ export function installGoalContinuity(pi: ExtensionAPI, runtime: GoalContinuityR
     const session = await sessionFor(ctx);
     if (!session || session.store.read()?.status !== "active") return;
     session.suspended = true;
-    try { await control(session, "paused", "收到用户新消息或 steer，自动续跑已暂停；使用 /plan resume 恢复"); }
+    try {
+      await control(session, "paused", AUTO_PAUSE_REASON);
+      notifyAutoPause(session, ctx, AUTO_PAUSE_REASON);
+    }
     catch (error) { report(session, error); }
   });
   pi.on("session_before_compact", async (event, ctx) => {
