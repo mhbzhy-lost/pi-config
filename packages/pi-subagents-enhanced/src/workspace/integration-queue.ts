@@ -7,6 +7,7 @@ import { assertProcessBirthOutput } from "../subagent-dispatch/process-birth-ide
 import { createIntegrationResumeIntentV1, progressFingerprint } from "../subagent-dispatch/recovery-resume-contract.ts";
 
 export const INTEGRATION_QUEUE_RECORD_VERSION = "workspace-integration-queue-item.v1";
+export const INTEGRATION_RECEIPT_EVENT_VERSION = "integration-receipt-event.v1";
 const SHA = /^[a-f0-9]{64}$/;
 const COMMIT = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const id = (value: unknown, label: string) => { if (typeof value !== "string" || value.length === 0) throw new TypeError(`${label} is required`); return value; };
@@ -18,6 +19,31 @@ const RESUME_MAX_ATTEMPTS = 6;
 const RESUME_MAX_NO_PROGRESS = 2;
 
 export type ProcessAliveStatus = { state: "alive" | "dead" | "mismatch" | "undetermined"; reason?: "process-not-found" | "birth-identity-mismatch"; error?: unknown; errno?: string };
+
+/** 队列项终态回执事件：五个终态写入点在 ledger.withLock 临界区内追加的 durable 记录。 */
+export type IntegrationReceiptEvent = {
+  version: typeof INTEGRATION_RECEIPT_EVENT_VERSION;
+  /** 幂等键：`${queueItemId}:${state}` */
+  eventId: string;
+  queueItemId: string;
+  workspaceId: string;
+  leaseId: string;
+  /** rebind 后的最终 run；未绑定 child 的队列项为 null */
+  childRunId: string | null;
+  ownerScope: { kind: "standalone-subagent"; rootSessionId: string };
+  repositoryId: string;
+  state: "completed" | "preserved" | "cancelled";
+  attempt: number;
+  /** 终态写入后的 revision */
+  revision: number;
+  candidateHead?: string;
+  integrationIntentId?: string;
+  workspaceDispositionReceiptId?: string;
+  completedAt?: string;
+  preservedAt?: string;
+  cancelledAt?: string;
+  delivery: { state: "pending" | "delivered" | "debt"; attempts: number; reason?: string };
+};
 
 /**
  * Process liveness is security-sensitive: only ESRCH proves death. EPERM,
@@ -235,6 +261,45 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
     });
   }
 
+  // 终态回执事件（integration-receipt-event.v1）：五个终态写入点
+  // （preserveByBinding / completePrepared / transition〔含 cancelItem〕 /
+  // settleDispositionQueue）都在既有 ledger.withLock 临界区内追加；幂等键
+  // queueItemId+state，已存在则跳过；初始 delivery pending。存储与 resume
+  // intents 同形态：queue-receipt-events.json 索引 + 每事件一文件。
+  const receiptEventIndexFile = "queue-receipt-events.json";
+  const receiptEventFiles = () => ledger.read<string[]>(receiptEventIndexFile, []).filter((name) => ledger.exists(name));
+  const receiptEventLoad = (name: string) => ledger.read<any>(name, null);
+  const loadReceiptEventsUnlocked = () => receiptEventFiles().map(receiptEventLoad).filter(Boolean);
+  function listReceiptEvents(ownerRootSessionId?: string) {
+    const events = loadReceiptEventsUnlocked().map((entry) => structuredClone(entry));
+    return ownerRootSessionId === undefined ? events : events.filter((entry) => entry.ownerScope?.rootSessionId === ownerRootSessionId);
+  }
+  // 仅可在 ledger.withLock 临界区内调用；只追加事件，不改变任何既有终态写入行为。
+  function appendReceiptEventUnlocked(item: any, state: string) {
+    if (state !== "completed" && state !== "preserved" && state !== "cancelled") return null;
+    const eventId = `${item.queueItemId}:${state}`;
+    const existing = loadReceiptEventsUnlocked().find((entry) => entry.eventId === eventId);
+    if (existing) return structuredClone(existing);
+    const now = new Date().toISOString();
+    const settledAt = state === "completed" ? { completedAt: typeof item.completedAt === "string" ? item.completedAt : now }
+      : state === "preserved" ? { preservedAt: typeof item.preservedAt === "string" ? item.preservedAt : now }
+      : { cancelledAt: typeof item.cancelledAt === "string" ? item.cancelledAt : now };
+    const event: IntegrationReceiptEvent = { version: INTEGRATION_RECEIPT_EVENT_VERSION, eventId, queueItemId: item.queueItemId, workspaceId: item.workspaceId, leaseId: item.leaseId,
+      childRunId: typeof item.childRunId === "string" ? item.childRunId : null,
+      ownerScope: { kind: item.ownerScope?.kind, rootSessionId: item.ownerScope?.rootSessionId },
+      repositoryId: item.repositoryId, state, attempt: item.attempt, revision: item.revision,
+      ...(typeof item.candidateHead === "string" ? { candidateHead: item.candidateHead } : {}),
+      ...(typeof item.integrationIntentId === "string" ? { integrationIntentId: item.integrationIntentId } : {}),
+      ...(typeof item.workspaceDispositionReceiptId === "string" ? { workspaceDispositionReceiptId: item.workspaceDispositionReceiptId } : {}),
+      ...settledAt,
+      delivery: { state: "pending", attempts: 0 } };
+    const name = `receipt-event-${eventId}.json`;
+    ledger.write(name, event);
+    const names = receiptEventFiles();
+    if (!names.includes(name)) ledger.write(receiptEventIndexFile, [...names, name]);
+    return structuredClone(event);
+  }
+
   function mutateRecovery(input: any, action: string) {
     return ledger.withLock(() => {
       const current = recoveryLoad(`recovery-${input.recoveryIntentId}.json`);
@@ -302,7 +367,9 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
       const current = findByBinding(binding);
       if (!current || ["completed", "preserved", "cancelled"].includes(current.state)) return current;
       const next = { ...current, state: "preserved", revision: current.revision + 1, preservedAt: new Date().toISOString(), preserveReason: reason.slice(0, 160) };
-      save(`${current.queueItemId}.json`, next); return structuredClone(next);
+      save(`${current.queueItemId}.json`, next);
+      appendReceiptEventUnlocked(next, "preserved");
+      return structuredClone(next);
     });
   }
   function prepareCandidate(input: any) {
@@ -327,6 +394,7 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
       const next = { ...current, state: "completed", integrationIntentId: id(input.integrationIntentId, "integrationIntentId"),
         workspaceDispositionReceiptId: id(input.workspaceDispositionReceiptId, "workspaceDispositionReceiptId"), revision: current.revision + 1, completedAt: new Date().toISOString() };
       save(`${current.queueItemId}.json`, next);
+      appendReceiptEventUnlocked(next, "completed");
       // 队列项完成即关闭其 active resume intent；下一 waiting-head intent 由
       // coordinator 的 pump 在完成路径上升级并投递。
       const activeResume = loadResumeIntentsUnlocked().find((entry) => entry.queueItemId === current.queueItemId && RESUME_ACTIVE_STATES.includes(entry.state));
@@ -428,12 +496,17 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
       if (!current || current.workspaceId !== b.workspaceId || current.leaseId !== b.leaseId || current.childRunId !== b.runId
           || current.ownerScope?.rootSessionId !== b.rootSessionId || current.ownerScope?.kind !== "standalone-subagent"
           || (current.queueLeaseId ?? null) !== b.queueLeaseId || current.admissionGeneration !== b.admissionGeneration) throw new Error("settlement queue binding mismatch");
+      let settled = current;
       if (current.dispositionSettlementId !== prepared.settlementId) {
         if (current.revision !== b.queueRevision) throw new Error("settlement queue revision changed");
         const terminal = ["completed", "cancelled", "preserved"].includes(current.state);
-        save(`${current.queueItemId}.json`, { ...current, state: terminal ? current.state : prepared.operation === "preserve" ? "preserved" : "cancelled",
-          revision: current.revision + 1, dispositionSettlementId: prepared.settlementId, dispositionReceiptRef: `qsr-${prepared.settlementId}` });
+        settled = { ...current, state: terminal ? current.state : prepared.operation === "preserve" ? "preserved" : "cancelled",
+          revision: current.revision + 1, dispositionSettlementId: prepared.settlementId, dispositionReceiptRef: `qsr-${prepared.settlementId}` };
+        save(`${current.queueItemId}.json`, settled);
       } else if (current.dispositionReceiptRef !== `qsr-${prepared.settlementId}` || !["completed", "cancelled", "preserved"].includes(current.state)) throw new Error("settlement queue receipt mismatch");
+      // 终态回执事件：首写与重放都经过这里，queueItemId+state 幂等去重，
+      // 覆盖「队列项已写终态、事件尚未落盘」的崩溃窗口。
+      appendReceiptEventUnlocked(settled, settled.state);
       // 同一锁下写队列终态和匹配 handoff；单个文件写后崩溃仍由此分支幂等补齐。
       for (const intent of loadResumeIntentsUnlocked()) {
         if (intent.queueItemId === b.queueItemId && intent.workspaceId === b.workspaceId && intent.sourceRunId === b.runId
@@ -462,13 +535,13 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
       return structuredClone(next);
     });
   }
-  function transition(receipt: any, state: string) { return ledger.withLock(() => { const current = load(`${id(receipt.queueItemId, "queueItemId")}.json`); const allowed = state === "preserved" ? ["admitted", "rebasing", "resolving-conflict", "prepared", "blocked"] : ["admitted"]; if (!current || !allowed.includes(current.state) || current.queueLeaseId !== receipt.queueLeaseId || current.revision !== receipt.revision) throw new Error("queue lease or revision mismatch"); const next = { ...current, state, revision: current.revision + 1 }; save(`${current.queueItemId}.json`, next); return structuredClone(next); }); }
+  function transition(receipt: any, state: string) { return ledger.withLock(() => { const current = load(`${id(receipt.queueItemId, "queueItemId")}.json`); const allowed = state === "preserved" ? ["admitted", "rebasing", "resolving-conflict", "prepared", "blocked"] : ["admitted"]; if (!current || !allowed.includes(current.state) || current.queueLeaseId !== receipt.queueLeaseId || current.revision !== receipt.revision) throw new Error("queue lease or revision mismatch"); const next = { ...current, state, revision: current.revision + 1 }; save(`${current.queueItemId}.json`, next); appendReceiptEventUnlocked(next, state); return structuredClone(next); }); }
   function recoverClaims(instanceIdentity: any) { return ledger.withLock(() => { const recovered: any[] = []; for (const current of listQueue()) if (current.state === "admitted" && current.daemonClaim && current.daemonClaim.instanceId === instanceIdentity.instanceId) {
     const status = processAliveStatus(instanceIdentity.pid ?? current.daemonClaim.pid, instanceIdentity.birthIdentity ?? current.daemonClaim.birthIdentity);
     if (status.state === "undetermined") diagnose({ version: 1, phase: "integration-queue-owner-liveness-undetermined", state: status.state, error: status.error, cause: (status.error as any)?.cause, errno: status.errno, instanceId: instanceIdentity.instanceId });
     if (status.state === "dead" || status.state === "mismatch") { const next = { ...current, state: "queued", revision: current.revision + 1, daemonClaim: undefined, queueLeaseId: undefined, childAdmissionLeaseId: undefined }; save(`${current.queueItemId}.json`, next); recovered.push(next); }
   } return recovered; }); }
   return Object.freeze({ enqueueIntegration, claimNext, getItem, findByBinding, preserveByBinding, prepareCandidate, completePrepared, markResolvingConflict, completeItem, failItem, cancelItem, retryItem, recoverClaims, listQueue, recoveryIntent, listRecoveryIntents, mutateRecovery, markRecoveryDelivery, notificationDeliveryDebt,
-    requestChildResume, promoteRecoverableHead, markResumeDelivery, markResumeStarting, markResumeActivated, completeResumeIntent, failResumeIntent, listResumeIntents, rebindChildRunForRecovery, refreshAuthorizedWorkspaceHead,
+    requestChildResume, promoteRecoverableHead, markResumeDelivery, markResumeStarting, markResumeActivated, completeResumeIntent, failResumeIntent, listResumeIntents, rebindChildRunForRecovery, refreshAuthorizedWorkspaceHead, listReceiptEvents,
     recordDispositionIntent, advanceDispositionIntent, listDispositionIntents, verifyDispositionBinding, settleDispositionQueue });
 }
