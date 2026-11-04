@@ -58,6 +58,12 @@ test("ledger reserves one durable private record and replays the exact request i
   assert.equal(first.record.path, paths.worktreePath);
   assert.equal((await lstat(paths.recordPath)).mode & 0o777, 0o600);
   assert.equal(Object.hasOwn(JSON.parse(await readFile(paths.recordPath, "utf8")), "ownerToken"), true);
+  // schema v2 后补的补授权字段仅在真值时落盘：新代码触碰+回写的普通记录
+  // 不得携带 null 新键，否则严格 exactKeys 的旧版本进程无法读取。
+  ledger.mutate(input.workspaceId, record => record);
+  const persisted = JSON.parse(await readFile(paths.recordPath, "utf8"));
+  assert.equal("additionalAuthorizedWritePaths" in persisted, false, "null 补授权字段不得落盘污染旧 schema 读者");
+  assert.equal("additionalWritePathsAuthorization" in persisted, false);
   assert.equal(await lstat(join(f.originRoot, ".state")).catch(() => null), null, "ledger state must not be written to the target repository");
 
   assert.throws(

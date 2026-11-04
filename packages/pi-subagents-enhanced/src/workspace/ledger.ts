@@ -217,16 +217,31 @@ function writePrivateFile(file, value) {
   chmodSync(file, 0o600);
 }
 
+// 序列化收窄：schema v2 后补的两个补授权字段仅在真值时落盘。读取时
+// normalizeRecordSchemaFields 会给旧记录补 null（仅内存），若照原样回写会让
+// 每条被新代码触碰过的记录都携带新增键，破坏尚未重启的旧版本进程（严格
+// exactKeys）读取；null 字段剥离后新旧 schema 进程混跑互不污染，只有真正
+// 使用过 additionalWritePaths 的记录才携带新键。
+function persistableRecord(record) {
+  const keepPaths = record.additionalAuthorizedWritePaths != null;
+  const keepAuthorization = record.additionalWritePathsAuthorization != null;
+  if (keepPaths && keepAuthorization) return record;
+  const { additionalAuthorizedWritePaths, additionalWritePathsAuthorization, ...rest } = record;
+  return keepPaths ? { ...rest, additionalAuthorizedWritePaths }
+    : keepAuthorization ? { ...rest, additionalWritePathsAuthorization } : rest;
+}
+
 function atomicWrite(paths, record, fault) {
-  const temporary = path.join(paths.recordsDir, `.${record.workspaceId}.${process.pid}.${randomUUID()}.tmp`);
+  const persistable = persistableRecord(record);
+  const temporary = path.join(paths.recordsDir, `.${persistable.workspaceId}.${process.pid}.${randomUUID()}.tmp`);
   try {
-    fault?.({ operation: "record-write", phase: "before-write", workspaceId: record.workspaceId });
-    writePrivateFile(temporary, record);
+    fault?.({ operation: "record-write", phase: "before-write", workspaceId: persistable.workspaceId });
+    writePrivateFile(temporary, persistable);
     renameSync(temporary, paths.recordPath);
     chmodSync(paths.recordPath, 0o600);
     const directory = openSync(paths.recordsDir, constants.O_RDONLY);
     try { fsyncSync(directory); } finally { closeSync(directory); }
-    fault?.({ operation: "record-write", phase: "after-rename", workspaceId: record.workspaceId });
+    fault?.({ operation: "record-write", phase: "after-rename", workspaceId: persistable.workspaceId });
   } catch (cause) {
     rmSync(temporary, { force: true });
     throw cause?.code === "TEST_FAULT" ? cause : failure("MANAGED_WORKSPACE_WRITE", "managed workspace record write failed", cause);
