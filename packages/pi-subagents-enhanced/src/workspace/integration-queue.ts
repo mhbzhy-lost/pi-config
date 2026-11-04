@@ -136,7 +136,7 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
     return ownerRootSessionId === undefined ? intents : intents.filter((entry) => entry.ownerScope?.rootSessionId === ownerRootSessionId);
   }
   // child 在 integration 完成前退出的 durable 续轮意图：对 queue item/source run
-  // 幂等；resumed run 再次退出时前一 intent 标记 failed 并按 fingerprint 判定
+  // 幂等；resumed run 再次退出时前一 intent 标记 failed，保留成功激活证据并按 fingerprint 判定
   // 无进展；两次无进展或 attempt 超限即 fail closed preserve 并生成 legacy 人工债。
   function requestChildResume(input: any) {
     id(input?.queueItemId, "queueItemId"); id(input.sourceRunId, "sourceRunId"); id(input.sourceAsyncDir, "sourceAsyncDir"); id(input.sourceProofId, "sourceProofId");
@@ -148,7 +148,8 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
       if (previous?.state === "preserved") return structuredClone(previous);
       const active = existing.filter((entry) => RESUME_ACTIVE_STATES.includes(entry.state)).at(-1);
       if (active && active.sourceRunId === input.sourceRunId) return structuredClone(active);
-      if (active) saveResumeIntentUnlocked({ ...structuredClone(active), state: "failed", updatedAt: new Date().toISOString() });
+      // 旧 activated 状态也是激活证据；旧 failed/starting 不得据 resumedRun 补推。
+      if (active) saveResumeIntentUnlocked({ ...structuredClone(active), ...(active.state === "activated" ? { activationConfirmed: true } : {}), state: "failed", updatedAt: new Date().toISOString() });
       const attempt = (previous?.attempt ?? 0) + 1;
       const fingerprint = progressFingerprint(current);
       const noProgress = previous && previous.progressFingerprint === fingerprint ? (previous.noProgressCount ?? 0) + 1 : 0;
@@ -216,7 +217,7 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
       if (current.state !== "starting") throw new Error("resume intent is not starting");
       if (!current.resumedRun?.runId) throw new Error("resume intent has no resumed run");
       if (resumedRun?.runId !== undefined && current.resumedRun.runId !== resumedRun.runId) throw new Error("resume activation does not match the starting resumed run");
-      const next = { ...current, state: "activated", updatedAt: new Date().toISOString() };
+      const next = { ...current, state: "activated", activationConfirmed: true, updatedAt: new Date().toISOString() };
       saveResumeIntentUnlocked(next); return structuredClone(next);
     });
   }
@@ -256,7 +257,7 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
       if (!current) throw new Error("resume intent not found");
       if (current.state === "failed") return structuredClone(current);
       if (!RESUME_ACTIVE_STATES.includes(current.state)) throw new Error("resume intent is not active");
-      const next = { ...current, state: "failed", updatedAt: new Date().toISOString() };
+      const next = { ...current, ...(current.state === "activated" ? { activationConfirmed: true } : {}), state: "failed", updatedAt: new Date().toISOString() };
       saveResumeIntentUnlocked(next); return structuredClone(next);
     });
   }

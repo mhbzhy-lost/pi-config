@@ -317,7 +317,8 @@ export function createRootBrokerUpstream({ rpc }: { rpc: any }) {
 // 1. 过滤：只认 version === "integration-resume-intent.v1"、ownerScope.rootSessionId
 //    与 ref 一致、workspaceId === ref.workspaceId 的 intent；同 sourceRunId 取
 //    attempt 最大者。
-// 2. 起链：自 ref.runId 起，有效跳 = state ∈ {activated, completed} 且
+// 2. 起链：自 ref.runId 起，有效跳 = state ∈ {activated, completed}，或严格
+//    解码且 activationConfirmed=true 的 failed 历史边，且
 //    resumedRun.runId 为 string；环、深度 >16、workspaceId/leaseId 与首跳不一致
 //    → 链在此截断（无跳时无首跳约束）。
 // 3. 复核：链尾 runId 必须与 ledger record.run.runId 一致，record owner 身份与
@@ -340,7 +341,13 @@ export function resolvePlanExecutionLineage(intents: unknown, record: any, ref: 
   for (let hop = 0; hop < 16; hop++) {
     const intent = intentsBySource.get(current);
     if (!intent) break;
-    if (intent.state !== "activated" && intent.state !== "completed") break;
+    if (intent.state !== "activated" && intent.state !== "completed") {
+      if (intent.state !== "failed") break;
+      // resumedRun 在 starting 阶段就已写入，不能单独作为成功激活证据。
+      try {
+        if (parseIntegrationResumeIntentV1(intent, { rootSessionId: ref.rootSessionId }).activationConfirmed !== true) break;
+      } catch { break; }
+    }
     const next = typeof intent.resumedRun?.runId === "string" ? intent.resumedRun.runId : undefined;
     if (!next || seen.has(next)) break;
     if (lineageBinding && (intent.workspaceId !== lineageBinding.workspaceId || intent.leaseId !== lineageBinding.leaseId)) break;

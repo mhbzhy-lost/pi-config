@@ -15,6 +15,7 @@ const OWNER_KINDS = new Set(["standalone-subagent"]);
 const INTENT_KEYS = ["version", "resumeIntentId", "queueItemId", "workspaceId", "leaseId", "ownerScope", "sourceRunId", "sourceAsyncDir", "sourceProofId",
   "attempt", "generation", "queueRevision", "queueState", "conflictDigest", "progressFingerprint", "noProgressCount", "requiredAction", "state",
   "resumedRun", "delivery", "createdAt", "updatedAt"];
+const INTENT_KEYS_WITH_ACTIVATION = [...INTENT_KEYS, "activationConfirmed"];
 const RESUMED_RUN_KEYS = ["runId", "asyncDir", "sessionId", "pid", "agentProfile"];
 const ACTIVATION_KEYS = ["version", "resumeIntentId", "queueItemId", "workspaceId", "leaseId", "sourceRunId", "resumedRun", "ownerScope", "generation", "authorization"];
 const DELIVERY_REQUIRED_KEYS = ["state", "attempts"];
@@ -51,6 +52,8 @@ export interface IntegrationResumeIntentV1 {
   delivery: ResumeDelivery;
   createdAt: string;
   updatedAt: string;
+  /** 成功激活的持久证据；旧 intent 缺失该字段时保持既有 activated/completed 语义。 */
+  activationConfirmed?: true;
 }
 
 export function createManualIntegrationHandoff(input: { resumeIntentId: string; sourceRunId: string; workspaceId: string; queueItemId: string }) {
@@ -188,7 +191,9 @@ export function createIntegrationResumeIntentV1(input: {
 
 export function parseIntegrationResumeIntentV1(value: unknown, expected?: { rootSessionId?: string }): IntegrationResumeIntentV1 {
   if (!isObject(value)) throw new TypeError("resume intent must be an object");
-  exactKeys(value, INTENT_KEYS, "resume intent");
+  const hasActivation = Object.prototype.hasOwnProperty.call(value, "activationConfirmed");
+  exactKeys(value, hasActivation ? INTENT_KEYS_WITH_ACTIVATION : INTENT_KEYS, "resume intent");
+
   if (value.version !== INTEGRATION_RESUME_INTENT_VERSION) throw new TypeError("resume intent version is invalid");
   if (value.requiredAction !== "resume-child") throw new TypeError("resume intent requiredAction is invalid");
   if (typeof value.state !== "string" || !INTENT_STATES.has(value.state)) throw new TypeError("resume intent state is invalid");
@@ -217,7 +222,12 @@ export function parseIntegrationResumeIntentV1(value: unknown, expected?: { root
     delivery: parseDelivery(value.delivery),
     createdAt: timestamp(value.createdAt, "createdAt"),
     updatedAt: timestamp(value.updatedAt, "updatedAt"),
+    ...(hasActivation ? { activationConfirmed: true as const } : {}),
   };
+  if (hasActivation && (value.activationConfirmed !== true || !intent.resumedRun
+      || !["activated", "completed", "failed"].includes(intent.state))) {
+    throw new TypeError("resume intent activation evidence is invalid");
+  }
   if (expected?.rootSessionId !== undefined && intent.ownerScope.rootSessionId !== expected.rootSessionId) throw new TypeError("resume intent owner scope denied");
   return deepFreeze(intent);
 }

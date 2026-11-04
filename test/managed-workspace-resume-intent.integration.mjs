@@ -9,6 +9,9 @@ import test from "node:test";
 import { createManagedWorkspaceRequestV2 } from "../packages/pi-subagents-enhanced/src/workspace/contract.ts";
 import { createCoordinatorServer } from "../packages/pi-subagents-enhanced/src/workspace/coordinator-server.ts";
 import { connectRepositoryCoordinator } from "../packages/pi-subagents-enhanced/src/workspace/coordinator-client.ts";
+import { createIntegrationQueue } from "../packages/pi-subagents-enhanced/src/workspace/integration-queue.ts";
+import { parseIntegrationResumeIntentV1 } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/recovery-resume-contract.ts";
+import { resolvePlanExecutionLineage } from "../packages/pi-subagents-enhanced/extensions/subagent-runtime.ts";
 
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 
@@ -155,8 +158,11 @@ test("同一 source run 的重复 proof 幂等返回，不产生新 attempt", as
   assert.equal(queue.listResumeIntents().length, 1);
 });
 
-test("resumed child 再次退出时前一 intent 标记 failed 并递增 attempt", async (t) => {
+test("resumed child 再次退出时保留激活证据，旧引用沿 failed 历史解析到当前 owner", async (t) => {
   const f = await fixture(t);
+  await f.coordinator.listen();
+  const client = await connectRealClient(f, "root-a");
+  t.after(() => client.close());
   const queue = f.coordinator.internal.integrationQueue;
   const head = await allocateCandidate(f, "head", "root-a", "head.txt");
   const follower = await allocateCandidate(f, "follower", "root-a", "follower.txt");
@@ -175,11 +181,80 @@ test("resumed child 再次退出时前一 intent 标记 failed 并递增 attempt
   const started = queue.listResumeIntents().find((intent) => intent.resumeIntentId === first.resumeIntentId);
   assert.equal(started.state, "starting");
   assert.deepEqual(started.resumedRun, resumedRun);
+  assert.equal(started.activationConfirmed, undefined);
+  const activation = await client.activateResume({ resumeIntentId: first.resumeIntentId, workspaceId: follower.binding.workspaceId,
+    leaseId: follower.binding.leaseId, sourceRunId: follower.run.runId, resumedRun,
+    ownerScope: follower.binding.ownerScope, generation: first.generation, authorization: "root" });
+  assert.equal(activation.resumeIntent.state, "activated");
+  assert.equal(activation.resumeIntent.activationConfirmed, true);
+  const replay = await client.activateResume({ resumeIntentId: first.resumeIntentId, workspaceId: follower.binding.workspaceId,
+    leaseId: follower.binding.leaseId, sourceRunId: follower.run.runId, resumedRun,
+    ownerScope: follower.binding.ownerScope, generation: first.generation, authorization: "root" });
+  assert.equal(replay.resumeIntent.activationConfirmed, true);
 
   const second = queue.requestChildResume({ queueItemId: followerItem.queueItemId, sourceRunId: resumedRun.runId, sourceAsyncDir: resumedRun.asyncDir, sourceProofId: "3".repeat(64) });
   assert.equal(second.attempt, 2);
-  assert.equal(second.noProgressCount, 1);
-  assert.equal(queue.listResumeIntents().find((intent) => intent.resumeIntentId === first.resumeIntentId).state, "failed");
+  assert.equal(second.noProgressCount, 0, "成功重绑推进 queue revision，保持原 fingerprint 合同");
+  const historical = queue.listResumeIntents().find((intent) => intent.resumeIntentId === first.resumeIntentId);
+  assert.equal(historical.state, "failed");
+  assert.equal(historical.activationConfirmed, true);
+  const originalRef = { runId: follower.run.runId, workspaceId: follower.receipt.workspaceId, rootSessionId: "root-a" };
+  assert.deepEqual(resolvePlanExecutionLineage(queue.listResumeIntents(), activation.workspace, originalRef).chain,
+    [follower.run.runId, resumedRun.runId]);
+
+  queue.promoteRecoverableHead();
+  const finalRun = { ...resumedRun, runId: "run-follower-final", asyncDir: join(f.root, "async-final"), sessionId: "session-2" };
+  const finalActivation = await client.activateResume({ resumeIntentId: second.resumeIntentId, workspaceId: follower.binding.workspaceId,
+    leaseId: follower.binding.leaseId, sourceRunId: resumedRun.runId, resumedRun: finalRun,
+    ownerScope: follower.binding.ownerScope, generation: second.generation, authorization: "root" });
+  const failedSecond = queue.failResumeIntent(second.resumeIntentId);
+  assert.equal(failedSecond.activationConfirmed, true, "显式失败也保留成功激活事实");
+  // 重新打开持久 queue，验证旧 A 引用在 A→B failed、B→C failed 后仍到达 ledger C。
+  const restored = createIntegrationQueue({ stateRoot: f.stateRoot, repositoryId: f.repositoryId });
+  const persisted = restored.listResumeIntents().map(intent => parseIntegrationResumeIntentV1(intent, { rootSessionId: "root-a" }));
+  assert.deepEqual(resolvePlanExecutionLineage(persisted, finalActivation.workspace, originalRef), {
+    run: { ...originalRef, runId: finalRun.runId }, chain: [follower.run.runId, resumedRun.runId, finalRun.runId], superseded: true,
+  });
+  assert.ok(persisted.every(intent => intent.workspaceId === originalRef.workspaceId && intent.leaseId === follower.binding.leaseId
+    && intent.ownerScope.rootSessionId === originalRef.rootSessionId));
+  assert.equal(resolvePlanExecutionLineage(persisted, activation.workspace, originalRef), null, "ledger 尾身份必须一致");
+  for (const overrides of [
+    { leaseId: "f".repeat(64) },
+    { workspaceId: "foreign-workspace" },
+    { ownerScope: { kind: "standalone-subagent", rootSessionId: "foreign-root" } },
+    { activationConfirmed: false },
+  ]) {
+    for (const index of [0, 1]) {
+      const mismatched = persisted.map((intent, position) => position === index ? { ...intent, ...overrides } : intent);
+      assert.equal(resolvePlanExecutionLineage(mismatched, finalActivation.workspace, originalRef), null,
+        "起链与每跳的身份及激活证据门禁不因 failed 历史放宽");
+    }
+  }
+  const { activationConfirmed, ...legacyFailed } = historical;
+  assert.equal(parseIntegrationResumeIntentV1(legacyFailed).activationConfirmed, undefined, "旧 failed 可解码但不得推断已激活");
+  for (const state of ["activated", "completed"]) {
+    const legacy = parseIntegrationResumeIntentV1({ ...legacyFailed, state });
+    assert.equal(legacy.activationConfirmed, undefined);
+    assert.equal(resolvePlanExecutionLineage([legacy, persisted[1]], finalActivation.workspace, originalRef).run.runId, finalRun.runId,
+      "旧 activated/completed 记录保持合法消费语义");
+  }
+  assert.equal(resolvePlanExecutionLineage([legacyFailed, persisted[1]], finalActivation.workspace, originalRef), null);
+  assert.throws(() => parseIntegrationResumeIntentV1({ ...historical, activationConfirmed: false }), TypeError);
+  assert.throws(() => parseIntegrationResumeIntentV1({ ...historical, resumedRun: null }), TypeError);
+  assert.throws(() => parseIntegrationResumeIntentV1({ ...historical, state: "starting" }), TypeError);
+  assert.throws(() => parseIntegrationResumeIntentV1({ ...historical, unknown: true }), TypeError);
+
+  // starting 已写 resumedRun 但从未成功激活，失败记录不能成为下一条历史边。
+  const third = restored.requestChildResume({ queueItemId: followerItem.queueItemId, sourceRunId: finalRun.runId,
+    sourceAsyncDir: finalRun.asyncDir, sourceProofId: "4".repeat(64) });
+  restored.promoteRecoverableHead();
+  const unactivatedRun = { ...finalRun, runId: "run-never-activated" };
+  restored.markResumeStarting(third.resumeIntentId, unactivatedRun);
+  const failedStarting = restored.failResumeIntent(third.resumeIntentId);
+  assert.equal(parseIntegrationResumeIntentV1(failedStarting).activationConfirmed, undefined);
+  const resolution = resolvePlanExecutionLineage(restored.listResumeIntents(), finalActivation.workspace, originalRef);
+  assert.equal(resolution.run.runId, finalRun.runId);
+  assert.equal(resolution.chain.includes(unactivatedRun.runId), false);
 });
 
 test("进展 fingerprint 变化重置 noProgressCount", async (t) => {
