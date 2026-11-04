@@ -372,7 +372,8 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
   async function handle(request: any) {
     if (request.request.method === "queue.audit") {
       const audit = auditManagedWorkspaces({ stateRoot: declaredStateRoot });
-      return { ...audit, recoveryIntents: integrationQueue?.listRecoveryIntents() ?? [], notificationDeliveryDebt: integrationQueue?.notificationDeliveryDebt() ?? [] };
+      // 回执事件全量聚合（含 delivered/debt）供运维审计（计划 T4）；pending 拉取走 queue.receipt-events。
+      return { ...audit, recoveryIntents: integrationQueue?.listRecoveryIntents() ?? [], notificationDeliveryDebt: integrationQueue?.notificationDeliveryDebt() ?? [], receiptEvents: integrationQueue?.listReceiptEvents() ?? [] };
     }
     if (request.request.method === "record_terminal_proof" && workspaceService && integrationQueue && proofOutbox) {
       const params = request.request.params ?? {};
@@ -456,6 +457,20 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
       case "inspect_auto_integration": return inspectAutoIntegration(binding);
       case "advance_auto_integration": return advanceAutoIntegration(input, binding);
       case "preserveIntegrationDebt": return preserveIntegrationDebt(binding, input.reason);
+      case "queue.receipt-events": {
+        // 回执事件只读拉取（计划 T4）：按注册 owner scope 过滤且仅返回 pending。
+        // 独立方法，不改 recovery.status 的扁平数组返回形状（四个调用方按数组判别）。
+        if (!integrationQueue) throw new Error("coordinator integration queue is unavailable");
+        return integrationQueue.listPendingReceiptEvents(binding.ownerScope.rootSessionId);
+      }
+      case "queue.receipt-event-delivered": {
+        // D7：Host 泵 notifyExecutionFacts 成功后回写 delivered、childRunId 缺位回写
+        // debt（终态）；注册风格与 recovery.resume-delivered 一致——root 授权 +
+        // owner scope 匹配；回写幂等（重放收敛、attempts 递增），未知 eventId 报错。
+        if (!integrationQueue) throw new Error("coordinator integration queue is unavailable");
+        if (input.authorization !== "root" || binding.ownerScope.rootSessionId !== input.ownerScope?.rootSessionId) throw new Error("root authorization required for receipt event delivery");
+        return integrationQueue.markReceiptEventDelivery({ eventIds: input.eventIds, state: input.state, ...(typeof input.reason === "string" ? { reason: input.reason } : {}), ownerRootSessionId: binding.ownerScope.rootSessionId });
+      }
       case "recovery.status": return [
         ...(integrationQueue?.listRecoveryIntents().filter((intent: any) => intent.ownerScope?.rootSessionId === binding.ownerScope.rootSessionId) ?? []),
         ...(integrationQueue?.listResumeIntents(binding.ownerScope.rootSessionId) ?? []),

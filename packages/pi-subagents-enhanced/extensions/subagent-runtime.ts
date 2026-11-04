@@ -149,7 +149,45 @@ export async function connectRuntimeCoordinator({ pi, cwd, broker, stateRoot, rp
     }
     pumpBusy = false;
   };
-  const pumpHandle: NodeJS.Timeout | undefined = setInterval(() => { void pumpResumeHandoffs(); }, 5_000);
+  // D7 回执事件泵（计划 T4）：与 pumpResumeHandoffs 共用同一 5s 定时器，同
+  // closing/busy/!lazy.hasClient() 门控（独立 busy 位，互不饿死），daemon 缺位空转。
+  // 判定经模块级纯函数 resolveReceiptEventPumpPlan 分组，接线保持薄层：toDebt
+  // （childRunId=null）回写 debt 终态；toNotify 先 broker.notifyExecutionFacts
+  // （重复通知幂等无害）再回写 delivered；回写 RPC 失败保持 pending，下一轮重试
+  // （at-least-once）。
+  let receiptPumpBusy = false;
+  const pumpReceiptEvents = async () => {
+    if (closing || receiptPumpBusy || !lazy.hasClient()) return;
+    receiptPumpBusy = true;
+    try {
+      const client = await lazy.preferClient();
+      if (!client) return;
+      let events: unknown;
+      try { events = await client.receiptEvents(); } catch { return; }
+      const plan = resolveReceiptEventPumpPlan(events);
+      for (const debt of plan.toDebt) {
+        try {
+          await client.receiptEventDelivered({ eventIds: [debt.eventId], state: "debt", reason: debt.reason, authorization: "root", ownerScope: debt.ownerScope });
+          diagnosticSink?.({ version: 1, phase: "receipt-event-debt-recorded", eventId: debt.eventId });
+        } catch (error) {
+          diagnosticSink?.({ version: 1, phase: "receipt-event-debt-record-failed", error, cause: (error as { cause?: unknown })?.cause, eventId: debt.eventId });
+        }
+      }
+      for (const notify of plan.toNotify) {
+        try {
+          broker.notifyExecutionFacts(notify.childRunId);
+          await client.receiptEventDelivered({ eventIds: [notify.eventId], state: "delivered", authorization: "root", ownerScope: notify.ownerScope, reason: "host execution facts notified" });
+          diagnosticSink?.({ version: 1, phase: "receipt-event-pumped", eventId: notify.eventId, childRunId: notify.childRunId });
+        } catch (error) {
+          // 回写失败保持 pending：下一轮重试（重复 notify 幂等无害，at-least-once）。
+          diagnosticSink?.({ version: 1, phase: "receipt-event-pump-failed", error, cause: (error as { cause?: unknown })?.cause, eventId: notify.eventId, childRunId: notify.childRunId });
+        }
+      }
+    } finally {
+      receiptPumpBusy = false;
+    }
+  };
+  const pumpHandle: NodeJS.Timeout | undefined = setInterval(() => { void pumpResumeHandoffs(); void pumpReceiptEvents(); }, 5_000);
   pumpHandle.unref?.();
   const coordinatorRequest: NonNullable<RootBrokerServer["coordinatorRequest"]> = async (runId, operation, input) => {
     if (closing) throw new Error("repository connection is closing");
@@ -317,6 +355,35 @@ export function resolvePlanExecutionLineage(intents: unknown, record: any, ref: 
   if (record.owner?.kind !== "standalone-subagent" || record.owner.rootSessionId !== ref.rootSessionId) return null;
   if (lineageBinding && (record.workspaceId !== lineageBinding.workspaceId || record.leaseId !== lineageBinding.leaseId)) return null;
   return { run: { ...ref, runId: current }, chain: [...chain], superseded: current !== ref.runId };
+}
+
+// 回执事件泵判定纯函数（计划 T4）：输入为 coordinator queue.receipt-events 返回的
+// pending 回执事件数组，输出处置分组——childRunId === null 归入 toDebt（回写
+// debt + reason "child-run-unavailable"，终态不再重试）；childRunId 为有效 string
+// 归入 toNotify（broker.notifyExecutionFacts 成功后回写 delivered，其 eventId 即
+// deliveredIds 成员；回写 RPC 失败保持 pending 由下一轮重放，重复 notify 幂等无害，
+// at-least-once）。身份字段不完整的条目无法安全回写，跳过（durable 存储的权威
+// 读侧不产生此类条目）。
+export function resolveReceiptEventPumpPlan(events: unknown): {
+  toNotify: Array<{ eventId: string; childRunId: string; ownerScope: { kind: "standalone-subagent"; rootSessionId: string } }>;
+  toDebt: Array<{ eventId: string; reason: "child-run-unavailable"; ownerScope: { kind: "standalone-subagent"; rootSessionId: string } }>;
+  deliveredIds: string[];
+} {
+  const toNotify: Array<{ eventId: string; childRunId: string; ownerScope: { kind: "standalone-subagent"; rootSessionId: string } }> = [];
+  const toDebt: Array<{ eventId: string; reason: "child-run-unavailable"; ownerScope: { kind: "standalone-subagent"; rootSessionId: string } }> = [];
+  for (const event of Array.isArray(events) ? events : []) {
+    const entry = event as { eventId?: unknown; childRunId?: unknown; ownerScope?: { kind?: unknown; rootSessionId?: unknown } } | null;
+    if (typeof entry?.eventId !== "string" || !entry.eventId) continue;
+    if (entry.ownerScope?.kind !== "standalone-subagent" || typeof entry.ownerScope?.rootSessionId !== "string" || !entry.ownerScope.rootSessionId) continue;
+    const ownerScope = { kind: "standalone-subagent" as const, rootSessionId: entry.ownerScope.rootSessionId };
+    if (entry.childRunId === null) {
+      toDebt.push({ eventId: entry.eventId, reason: "child-run-unavailable", ownerScope });
+      continue;
+    }
+    if (typeof entry.childRunId !== "string" || !entry.childRunId) continue;
+    toNotify.push({ eventId: entry.eventId, childRunId: entry.childRunId, ownerScope });
+  }
+  return { toNotify, toDebt, deliveredIds: toNotify.map((entry) => entry.eventId) };
 }
 
 export function projectManagedWorkspaceTerminalProof(

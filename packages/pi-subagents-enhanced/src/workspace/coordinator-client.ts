@@ -38,6 +38,8 @@ import type { CoordinatorMetadata } from "./coordinator-registry.ts";export type
   recoveryRetry: (input: any) => Promise<any>;
   resumeDebt: (input: any) => Promise<any>;
   resumeDelivered: (input: any) => Promise<any>;
+  receiptEvents: (input?: any) => Promise<any>;
+  receiptEventDelivered: (input: any) => Promise<any>;
   activateResume: (input: any) => Promise<any>;
   recoveryDiscard: (input: any) => Promise<any>;
   recoveryRelease: (input: any) => Promise<any>;
@@ -105,6 +107,8 @@ export async function connectRepositoryCoordinator(identity: any, brokerRegistra
     recoveryRetry: (input: any) => workspace("recovery.retry", input),
     resumeDebt: (input: any) => workspace("recovery.resume-debt", input),
     resumeDelivered: (input: any) => workspace("recovery.resume-delivered", input),
+    receiptEvents: (input: any = {}) => workspace("queue.receipt-events", input),
+    receiptEventDelivered: (input: any) => workspace("queue.receipt-event-delivered", input),
     activateResume: (input: any) => workspace("recovery.activate-resume", input),
     recoveryDiscard: (input: any) => workspace("recovery.discard", input),
     recoveryRelease: (input: any) => workspace("recovery.release", input),
@@ -120,7 +124,9 @@ export async function connectRepositoryCoordinator(identity: any, brokerRegistra
  * - awaitIntegrationAdmission：已 admitted 则早退；
  * - recordTerminalProof：proofOutbox 按 proofId 去重；
  * - prepare/advance/inspectAutoIntegration：durable 状态重放收敛（reconcile 依赖同性质）；
- * - activateResume：服务端 durable 序列显式重放收敛。
+ * - activateResume：服务端 durable 序列显式重放收敛；
+ * - receiptEvents/receiptEventDelivered：回执事件只读拉取与 durable delivery 幂等回写
+ *   （重放只递增 attempts，与 resumeDelivered 同性质）。
  * 其余（处置三件套、recovery 变更、queue 人工突变）服务端 settlementId 随机或
  * 状态迁移未知结局，断线后一律向上抛，由调用方读后确认，不得泛化重放。
  */
@@ -128,7 +134,7 @@ export const COORDINATOR_CLIENT_REPLAYABLE_METHODS: ReadonlySet<string> = new Se
   "ping", "reserve", "ensureAllocated", "bindRun", "listOwned", "statusOwned", "reconcile", "audit",
   "enqueueIntegration", "awaitIntegrationAdmission", "inspectIntegrationState",
   "prepareAutoIntegration", "inspectAutoIntegration", "advanceAutoIntegration",
-  "recordTerminalProof", "activateResume", "resumeDelivered", "recoveryStatus", "recoveryAudit",
+  "recordTerminalProof", "activateResume", "resumeDelivered", "receiptEvents", "receiptEventDelivered", "recoveryStatus", "recoveryAudit",
 ]);
 
 function isTransportFailure(error: unknown): boolean {

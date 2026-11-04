@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { createIntegrationQueue, INTEGRATION_RECEIPT_EVENT_VERSION } from "../packages/pi-subagents-enhanced/src/workspace/integration-queue.ts";
+import { createCoordinatorServer } from "../packages/pi-subagents-enhanced/src/workspace/coordinator-server.ts";
+import { connectRepositoryCoordinator } from "../packages/pi-subagents-enhanced/src/workspace/coordinator-client.ts";
+import { resolveReceiptEventPumpPlan } from "../packages/pi-subagents-enhanced/extensions/subagent-runtime.ts";
 
 const repositoryId = "a".repeat(64);
 const sha = (tag) => createHash("sha256").update(tag).digest("hex");
@@ -194,3 +197,125 @@ test("settleDispositionQueue 落终态回执事件，重放幂等不产生第二
   assert.equal(all[1].state, "preserved");
   assert.ok(all[1].preservedAt);
 }));
+
+// ———— 计划 T4 步骤 4：queue.receipt-events / queue.receipt-event-delivered RPC 与 D7 泵判定 ————
+
+test("queue.receipt-events 按 owner 过滤且只返回 pending；回写后不再返回；recovery.status 保持扁平数组形状", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "receipt-events-rpc-"));
+  const stateRoot = path.join(root, "state");
+  // 免认证 mock：与 managed-workspace-resume-intent 集成测试同形态。
+  const challengeBroker = async (registry) => ({ nonce: "n", repositoryId: registry.repositoryId, coordinatorInstanceId: "i", rootSessionId: registry.rootSessionId, brokerProcessIdentity: "b".repeat(64) });
+  const coordinator = createCoordinatorServer({ endpoint: path.join(root, "coordinator.sock"), repositoryId, stateRoot, idleGraceMs: 10_000, challengeBroker });
+  t.after(async () => { await coordinator.close(); await rm(root, { recursive: true, force: true }); });
+  await coordinator.listen();
+  const client = await connectRepositoryCoordinator({ repositoryId }, { protocol: "pi-root-subagent-broker-registry.v1", rootSessionId: "root-a", endpoint: "broker.sock", pid: process.pid, processBirthIdentity: "b".repeat(64) }, {
+    metadata: { protocol: "repository-workspace-coordinator.v1", repositoryId, storageRepositoryId: repositoryId, endpoint: path.join(root, "coordinator.sock"), instanceId: coordinator.instanceId, pid: process.pid, birthIdentity: "c".repeat(64), canonicalStateRoot: stateRoot },
+  });
+  t.after(() => client.close());
+  const queue = coordinator.internal.integrationQueue;
+
+  const seedCancelled = (workspaceId, owner, childRunId) => {
+    queue.enqueueIntegration({
+      requestId: `req-${workspaceId}`, repositoryId, workspaceId, leaseId: sha(`lease-${workspaceId}`),
+      ownerScope: { kind: "standalone-subagent", rootSessionId: owner }, ...(childRunId === undefined ? {} : { childRunId }),
+      strategy: "rebase-ff", targetRef: "refs/heads/main", authorizedWorkspaceHead: "b".repeat(64), observedTargetHead: null,
+    });
+    const claim = queue.claimNext(daemon);
+    assert.equal(claim.workspaceId, workspaceId);
+    return queue.cancelItem(claim, { authorized: true });
+  };
+
+  // root-a 两个 pending（childRunId=null 与有 child 各一）；root-b 一个 pending；
+  // root-a/root-b 各预置一个已回写终态（delivered/debt），验证只返回 pending。
+  const aNull = seedCancelled("ws-a-null", "root-a");
+  const aRun = seedCancelled("ws-a-run", "root-a", "run-a-2");
+  const bNull = seedCancelled("ws-b-null", "root-b");
+  const aSettled = seedCancelled("ws-a-settled", "root-a", "run-a-3");
+  const bSettled = seedCancelled("ws-b-settled", "root-b", "run-b-3");
+  queue.markReceiptEventDelivery({ eventIds: [`${aSettled.queueItemId}:cancelled`], state: "delivered", reason: "host execution facts notified" });
+  queue.markReceiptEventDelivery({ eventIds: [`${bSettled.queueItemId}:cancelled`], state: "debt", reason: "child-run-unavailable" });
+  const aNullEventId = `${aNull.queueItemId}:cancelled`;
+  const aRunEventId = `${aRun.queueItemId}:cancelled`;
+  const bNullEventId = `${bNull.queueItemId}:cancelled`;
+
+  // 按 owner 过滤且只含 pending：root-a 的拉取不含 root-b 事件与 delivered/debt。
+  let pending = await client.receiptEvents();
+  assert.deepEqual(pending.map((event) => event.eventId).sort(), [aNullEventId, aRunEventId].sort());
+  for (const event of pending) {
+    assert.equal(event.delivery.state, "pending");
+    assert.equal(event.ownerScope.rootSessionId, "root-a");
+  }
+
+  // recovery.status 形状不变：扁平数组（recovery intents + resume intents），回执事件不出现在其中。
+  queue.enqueueIntegration({
+    requestId: "req-ws-a-resume", repositoryId, workspaceId: "ws-a-resume", leaseId: sha("lease-ws-a-resume"),
+    ownerScope: { kind: "standalone-subagent", rootSessionId: "root-a" }, childRunId: "run-a-9", strategy: "rebase-ff",
+    targetRef: "refs/heads/main", authorizedWorkspaceHead: "b".repeat(64), observedTargetHead: null,
+  });
+  const resumable = queue.listQueue().find((entry) => entry.workspaceId === "ws-a-resume");
+  queue.requestChildResume({ queueItemId: resumable.queueItemId, sourceRunId: "run-a-9", sourceAsyncDir: "/var/tmp/async-a9", sourceProofId: "p".repeat(64) });
+  const status = await client.recoveryStatus();
+  assert.ok(Array.isArray(status), "recovery.status 仍为扁平数组");
+  assert.ok(status.length > 0, "recovery intents（resume intent）仍在扁平数组中返回");
+  assert.ok(status.some((entry) => entry.version === "integration-resume-intent.v1"));
+  assert.ok(status.every((entry) => entry.version !== INTEGRATION_RECEIPT_EVENT_VERSION), "回执事件不得进入 recovery.status");
+
+  // 回写授权与未知/越权 eventId fail-closed；失败后事件保持 pending（下轮重试语义）。
+  const rootScope = { kind: "standalone-subagent", rootSessionId: "root-a" };
+  await assert.rejects(() => client.receiptEventDelivered({ eventIds: ["missing-event-id:cancelled"], state: "delivered", authorization: "root", ownerScope: rootScope }), /receipt event not found/);
+  await assert.rejects(() => client.receiptEventDelivered({ eventIds: [bNullEventId], state: "delivered", authorization: "root", ownerScope: rootScope }), /owner scope denied/);
+  await assert.rejects(() => client.receiptEventDelivered({ eventIds: [aRunEventId], state: "delivered", ownerScope: rootScope }), /root authorization required/);
+  assert.deepEqual((await client.receiptEvents()).map((event) => event.eventId).sort(), [aNullEventId, aRunEventId].sort(), "回写失败保持 pending");
+
+  // 回写 delivered 后不再返回；attempts 递增且重放幂等收敛。
+  const delivered = await client.receiptEventDelivered({ eventIds: [aRunEventId], state: "delivered", authorization: "root", ownerScope: rootScope, reason: "host execution facts notified" });
+  assert.equal(delivered.length, 1);
+  assert.equal(delivered[0].delivery.state, "delivered");
+  assert.equal(delivered[0].delivery.attempts, 1);
+  assert.equal(delivered[0].delivery.reason, "host execution facts notified");
+  assert.deepEqual((await client.receiptEvents()).map((event) => event.eventId), [aNullEventId], "delivered 事件不再返回");
+  const replay = await client.receiptEventDelivered({ eventIds: [aRunEventId], state: "delivered", authorization: "root", ownerScope: rootScope, reason: "host execution facts notified" });
+  assert.equal(replay[0].delivery.state, "delivered");
+  assert.equal(replay[0].delivery.attempts, 2, "重放只递增 attempts，状态幂等收敛");
+
+  // childRunId=null 置 debt 终态后不再返回。
+  const debt = await client.receiptEventDelivered({ eventIds: [aNullEventId], state: "debt", reason: "child-run-unavailable", authorization: "root", ownerScope: rootScope });
+  assert.equal(debt[0].delivery.state, "debt");
+  assert.equal(debt[0].delivery.reason, "child-run-unavailable");
+  assert.deepEqual(await client.receiptEvents(), [], "root-a 无剩余 pending");
+
+  // queue.audit 聚合返回全部回执事件（含 delivered/debt 与其它 owner）。
+  const audit = await client.audit();
+  assert.ok(Array.isArray(audit.receiptEvents));
+  assert.deepEqual(audit.receiptEvents.map((event) => event.eventId).sort(),
+    [aNullEventId, aRunEventId, `${aSettled.queueItemId}:cancelled`, bNullEventId, `${bSettled.queueItemId}:cancelled`].sort());
+  const audited = new Map(audit.receiptEvents.map((event) => [event.eventId, event]));
+  assert.equal(audited.get(aRunEventId).delivery.state, "delivered");
+  assert.equal(audited.get(aNullEventId).delivery.state, "debt");
+  assert.equal(audited.get(bNullEventId).delivery.state, "pending");
+});
+
+test("泵判定纯函数 resolveReceiptEventPumpPlan：childRunId=null 归入 toDebt，有效 childRunId 归入 toNotify 且 deliveredIds 含之", () => {
+  const base = {
+    version: INTEGRATION_RECEIPT_EVENT_VERSION, queueItemId: "q-1", workspaceId: "ws-1", leaseId: "lease-1",
+    ownerScope: { kind: "standalone-subagent", rootSessionId: "root-a" }, repositoryId,
+    state: "cancelled", attempt: 1, revision: 1, delivery: { state: "pending", attempts: 0 },
+  };
+  const events = [
+    { ...base, eventId: "q-1:cancelled", childRunId: null },
+    { ...base, eventId: "q-2:completed", childRunId: "run-2" },
+    { ...base, eventId: "q-3:preserved" },
+    { ...base, eventId: "q-4:cancelled", childRunId: "run-4", ownerScope: { kind: "other", rootSessionId: "root-x" } },
+    { ...base, eventId: "", childRunId: "run-5" },
+  ];
+  const plan = resolveReceiptEventPumpPlan(events);
+  assert.deepEqual(plan.toDebt.map((entry) => [entry.eventId, entry.reason]), [["q-1:cancelled", "child-run-unavailable"]]);
+  assert.deepEqual(plan.toDebt[0].ownerScope, { kind: "standalone-subagent", rootSessionId: "root-a" });
+  assert.deepEqual(plan.toNotify.map((entry) => [entry.eventId, entry.childRunId]), [["q-2:completed", "run-2"]]);
+  assert.deepEqual(plan.toNotify[0].ownerScope, { kind: "standalone-subagent", rootSessionId: "root-a" });
+  // notify 成功后回写 delivered 的目标集合：恰为 toNotify 的 eventId。
+  assert.deepEqual(plan.deliveredIds, ["q-2:completed"]);
+  // 非数组输入不抛错，返回空分组。
+  assert.deepEqual(resolveReceiptEventPumpPlan(undefined), { toNotify: [], toDebt: [], deliveredIds: [] });
+  assert.deepEqual(resolveReceiptEventPumpPlan("not-an-array"), { toNotify: [], toDebt: [], deliveredIds: [] });
+});

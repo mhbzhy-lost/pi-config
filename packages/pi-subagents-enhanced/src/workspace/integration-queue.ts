@@ -274,6 +274,33 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
     const events = loadReceiptEventsUnlocked().map((entry) => structuredClone(entry));
     return ownerRootSessionId === undefined ? events : events.filter((entry) => entry.ownerScope?.rootSessionId === ownerRootSessionId);
   }
+  // 按 owner 过滤且只含 pending 的回执事件读取（计划 T4，queue.receipt-events 消费）：
+  // delivered 已完成 at-least-once 送达、debt 为 child-run 不可用终态，均不再返回。
+  function listPendingReceiptEvents(ownerRootSessionId?: string) {
+    return listReceiptEvents(ownerRootSessionId).filter((entry) => entry.delivery?.state === "pending");
+  }
+  // 回执事件 delivery 回写（计划 T4，queue.receipt-event-delivered 消费）：Host 泵
+  // notifyExecutionFacts 成功后回写 delivered、childRunId 缺位回写 debt（终态）。
+  // 幂等重放收敛：state 覆写、attempts 每次递增；未知 eventId 或 owner 不匹配
+  // fail-closed 报错，绝不静默跳过。
+  function markReceiptEventDelivery(input: { eventIds: unknown; state: unknown; reason?: unknown; ownerRootSessionId?: string }) {
+    const eventIds = Array.isArray(input?.eventIds) ? input.eventIds : [];
+    if (eventIds.length === 0 || eventIds.some((eventId) => typeof eventId !== "string" || eventId.length === 0)) throw new TypeError("receipt event ids are required");
+    if (input.state !== "delivered" && input.state !== "debt") throw new TypeError("receipt event delivery state is invalid");
+    const reason = typeof input.reason === "string" && input.reason ? input.reason.slice(0, 256) : undefined;
+    return ledger.withLock(() => {
+      const updated: IntegrationReceiptEvent[] = [];
+      for (const eventId of eventIds as string[]) {
+        const current = loadReceiptEventsUnlocked().find((entry) => entry.eventId === eventId);
+        if (!current) throw new Error(`receipt event not found: ${eventId}`);
+        if (input.ownerRootSessionId !== undefined && current.ownerScope?.rootSessionId !== input.ownerRootSessionId) throw new Error("receipt event owner scope denied");
+        const next: IntegrationReceiptEvent = { ...current, delivery: { state: input.state, ...(reason !== undefined ? { reason } : {}), attempts: (current.delivery?.attempts ?? 0) + 1 } };
+        ledger.write(`receipt-event-${eventId}.json`, next);
+        updated.push(structuredClone(next));
+      }
+      return updated;
+    });
+  }
   // 仅可在 ledger.withLock 临界区内调用；只追加事件，不改变任何既有终态写入行为。
   function appendReceiptEventUnlocked(item: any, state: string) {
     if (state !== "completed" && state !== "preserved" && state !== "cancelled") return null;
@@ -542,6 +569,6 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
     if (status.state === "dead" || status.state === "mismatch") { const next = { ...current, state: "queued", revision: current.revision + 1, daemonClaim: undefined, queueLeaseId: undefined, childAdmissionLeaseId: undefined }; save(`${current.queueItemId}.json`, next); recovered.push(next); }
   } return recovered; }); }
   return Object.freeze({ enqueueIntegration, claimNext, getItem, findByBinding, preserveByBinding, prepareCandidate, completePrepared, markResolvingConflict, completeItem, failItem, cancelItem, retryItem, recoverClaims, listQueue, recoveryIntent, listRecoveryIntents, mutateRecovery, markRecoveryDelivery, notificationDeliveryDebt,
-    requestChildResume, promoteRecoverableHead, markResumeDelivery, markResumeStarting, markResumeActivated, completeResumeIntent, failResumeIntent, listResumeIntents, rebindChildRunForRecovery, refreshAuthorizedWorkspaceHead, listReceiptEvents,
+    requestChildResume, promoteRecoverableHead, markResumeDelivery, markResumeStarting, markResumeActivated, completeResumeIntent, failResumeIntent, listResumeIntents, rebindChildRunForRecovery, refreshAuthorizedWorkspaceHead, listReceiptEvents, listPendingReceiptEvents, markReceiptEventDelivery,
     recordDispositionIntent, advanceDispositionIntent, listDispositionIntents, verifyDispositionBinding, settleDispositionQueue });
 }
