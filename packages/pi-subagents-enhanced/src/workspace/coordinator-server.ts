@@ -333,6 +333,33 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
     }
     return results;
   }
+  /**
+   * 启动孤儿项对账：workspace 已 release 终态但队列项仍 queued 的组合是永久
+   * 孤儿（工作树已删、无任何合法认领方），会阻塞整个 durable FIFO。按队列项
+   * 自身记录的 binding（与 reconcileIntegrations 同权限模型）转 preserved 终态
+   * 并写回执事件；其余非终态项留给正常集成/恢复路径，不抢占活跃 claim。
+   * 纯 ledger 读写，可在启动恢复内联完成。
+   */
+  function reconcileReleasedOrphanQueueItems() {
+    if (!integrationQueue || !workspaceService) return [];
+    const results = [];
+    for (const item of integrationQueue.listQueue()) {
+      if (item.state !== "queued") continue;
+      try {
+        const entry = workspaceService.readOwned({ workspaceId: item.workspaceId, ownerScope: item.ownerScope });
+        if (entry?.state !== "released") continue;
+        const preserved = integrationQueue.preserveByBinding(
+          { workspaceId: item.workspaceId, leaseId: item.leaseId, runId: item.childRunId, ownerScope: item.ownerScope },
+          "workspace released: orphan queue item unblocked at coordinator startup",
+        );
+        if (preserved?.state === "preserved") results.push({ queueItemId: item.queueItemId, workspaceId: item.workspaceId, state: preserved.state });
+        else diagnose({ version: 1, phase: "coordinator-orphan-reconcile-skip", queueItemId: item.queueItemId, workspaceId: item.workspaceId, observedState: preserved?.state ?? null });
+      } catch (error) {
+        diagnose({ version: 1, phase: "coordinator-orphan-reconcile-item-failed", error, cause: (error as any)?.cause, queueItemId: item.queueItemId, workspaceId: item.workspaceId });
+      }
+    }
+    return results;
+  }
   // FIFO 队首升级 + 主 Agent 接管提示：只升级队首的 waiting-head intent。
   // 已结束 child 不自动 resume；检查与 durable intent 保留，交由主 Agent 接管 worktree。
   // receipt 与 delivery 状态均以 coordinator durable 存储为权威，重复触发幂等。
@@ -676,6 +703,9 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
     await replayTerminalProofs();
     dispositionSettlement?.replay();
     await pumpResumeIntents();
+    // durable FIFO 孤儿项对账：released 终态 workspace 遗留的 queued 项直接
+    // preserve 解除阻塞，避免无人可认领的历史项永久卡死队列。
+    reconcileReleasedOrphanQueueItems();
     startupReady = true;
   }
   // 计划契约：startupReady 供拉起器/宿主等待（Promise 形式），与 isStartupReady 同源。
