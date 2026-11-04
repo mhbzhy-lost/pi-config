@@ -16,8 +16,6 @@ Git 管理的信息必须脱敏。
 
 ## Git Commit 规范
 
-本条不是提交授权：仅在明确授权范围内提交。
-
 提交、修改提交信息和起草 PR 标题时遵守以下规范：
 
 - 格式为 `type(scope): 中文祈使句`，`scope` 可选；type 仅允许英文小写 `feat`、`fix`、`refactor`、`perf`、`test`、`docs`、`style`、`chore`、`build`、`ci`、`revert`。
