@@ -276,7 +276,7 @@ DAG 用于描述各子任务之间的依赖关系，当某个子任务的前置�
 2. 每次回执以 `state`、`next`、`facts`、`blockedReason` 和证据引用决定下一步。`plan_status` 无参数，只读诊断，不刷新 run、不写 checkpoint、不改 revision；不能靠反复 status 等待或推进。`wait` 等订阅的事实通知，收到通知后按最新 next 继续。
 3. 有新决策、来源证据或交接下一步时用 `plan_checkpoint` 记录 `decisions`、`source_refs`、`next_action` 与可选 `task_id`。它不能设置 accepted/passed/completed，也不把模型自报变成证明；checkpoint 只保存有证据的决策，不复制或重写 raw 回执。
 4. `verify` 用 `plan_verify` 运行契约内检查，可选 `check_ids`，不传自造 command/passed/evidence。任务级批次属于一个已交付任务；最终批次须在所有任务 accepted、child 与集成及资源闭合后覆盖全部 `terminalCheckIds`。核对真实输出、exit、`resultRef`、contract hash 与当前候选；failed 先归因再修复，stale/blocked 先处理漂移或环境再重验，不能拼接历史通过替代最终完整批次。
-5. `retry` 先读失败检查或权威失败 attempt 的事实，按 `repairTaskIds` 与 runtime 准入选择任务；用当前 `revision` 作为 `expected_revision`，提供非空针对性 `message` 和 `task_id`。由 runtime 决定 resume 或新 attempt，不换模型、不改原合同、不对未知启动结果盲重派。revision 冲突时重新诊断事实和版本，不机械重复旧请求；若本次读取后又写 checkpoint，应使用写后回执的新 revision。
+5. `retry` 先读失败检查或权威失败 attempt 的事实，按 `repairTaskIds` 与 runtime 准入选择任务；用当前 `revision` 作为 `expected_revision`，提供非空针对性 `message` 和 `task_id`。由 runtime 决定 resume 或新 attempt，不换模型、不改原合同、不对未知启动结果盲重派。revision 冲突时重新诊断事实和版本，不机械重复旧请求；若本次读取后又写 checkpoint，应使用写后回执的新 revision。`plan_retry` 的准入是**计划级事实**（失败 check 的 `repairTaskIds`、或 runtime 已登记的权威失败 attempt）；child 因偶发 provider/transport 故障死亡时，第一响应是「主管恢复规则」的 `subagent_run_resume`，不是 retry——偶发故障不需要计划级重试事实，且 retry 准入依赖的失败事实链在崩溃窗口可能尚未闭合，用它恢复偶发死亡会被 `RETRY_NOT_ADMITTED` 拒绝。
 6. 用户新消息或 steer 可令执行自动暂停；暂停不等于失败或完成。恢复、取消按已有 `/plan pause|resume|cancel` 控制面进行，不从自然语言猜测恢复授权。契约变化或不可读时先处理 live run，再取消旧执行并重新授权新版本；不修改已绑定契约来绕过失败。
 7. `plan_force_close` 只用于已取消计划，`force_confirm` 必须精确等于当前 `planId`。它沿 resume 血缘核实最终 run 的 terminal proof、集成回执、workspace released、无 recovery/blocker；任一不成立即拒绝，全部成立才持久化重绑与 checkpoint。它不停止 child、不释放资源、不把 cancelled 改为 completed。核实失败时报告具体事实；人工断言闭合只能由用户通过 `/plan force-close` 明确确认，agent 不冒充用户确认或删存盘/session 解锁。
 
@@ -293,6 +293,7 @@ DAG 用于描述各子任务之间的依赖关系，当某个子任务的前置�
 | active + wait | 等待已订阅的运行/集成事实通知，不 sleep/poll，不以 checkpoint 造进展 |
 | active + verify | `plan_verify` 取得当前候选真实回执，按结果重算下一步 |
 | active + retry | 按失败证据提供针对性指导，以当前 revision 调用 `plan_retry` |
+| child runtime-failed（偶发 provider/transport 故障） | 无论是否在 Goal 计划内，按「主管恢复规则」优先 `subagent_run_resume` 原 run；`plan_retry` 不是偶发死亡的第一响应，仅确定性失败或 verify 失败 check 才走 retry |
 | blocked 或 next=blocked | 用 `plan_status` 及引用的 `subagent_run_status`、`managed_workspace_status` 定点诊断；处理真实阻塞，需要决策时上报，不伪造 accepted |
 | paused | 保留未完成；核对暂停原因，由用户经 `/plan resume` 恢复；契约漂移须取消后重新授权，不靠 `plan_execute` 解暂停 |
 | cancelled | 不再推进旧计划；取消不停止 child 或清理资源，先按 typed 路径核实闭合；已授权的新计划只有通过替换门后才能 `plan_execute` |
