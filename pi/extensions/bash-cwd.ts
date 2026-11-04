@@ -1,5 +1,8 @@
 import { createBashToolDefinition, SettingsManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { fileURLToPath } from "node:url";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
+
+const PI_BIN_DIR = fileURLToPath(new URL("../bin", import.meta.url));
 import { createBashCwdExtension } from "../../src/bash-cwd/index.ts";
 import { createBashAsyncActivityPublisher, createBashAsyncCompleteRenderer, createBashAsyncExtension } from "../../src/bash-async/index.ts";
 
@@ -12,6 +15,14 @@ function getBashOptions(ctx?: { cwd: string; isProjectTrusted?: () => boolean })
   return {
     commandPrefix: settings.getShellCommandPrefix(),
     shellPath: settings.getShellPath(),
+    // Only Pi's shell-tool children see these adapters; the user's global PATH is unchanged.
+    spawnHook: (spawnContext) => ({
+      ...spawnContext,
+      env: {
+        ...spawnContext.env,
+        PATH: `${PI_BIN_DIR}:${spawnContext.env.PATH ?? ""}`,
+      },
+    }),
   };
 }
 

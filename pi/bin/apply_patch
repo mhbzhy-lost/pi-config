@@ -1,0 +1,22 @@
+#!/usr/bin/env node
+// Pi-only shell adapter for the native apply_patch implementation.
+import { applyPatch } from "../../src/apply-patch/index.ts";
+
+let patch = "";
+process.stdin.setEncoding("utf8");
+for await (const chunk of process.stdin) patch += chunk;
+
+if (!patch.trim()) {
+  console.error("Usage: apply_patch <<'PATCH'\n*** Begin Patch\n...\n*** End Patch\nPATCH");
+  process.exit(2);
+}
+
+try {
+  const result = await applyPatch(patch, process.cwd());
+  for (const path of result.added) console.log(`A ${path}`);
+  for (const path of result.modified) console.log(`M ${path}`);
+  for (const path of result.deleted) console.log(`D ${path}`);
+} catch (error) {
+  console.error(`apply_patch: ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(1);
+}
