@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { PlanRunFacts, PlanRunRef } from "../src/execution/index.ts";
+import type { PlanLineageResolution, PlanRunFacts, PlanRunRef } from "../src/execution/index.ts";
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import path from "node:path";
@@ -268,6 +268,55 @@ export function createRootBrokerUpstream({ rpc }: { rpc: any }) {
     stop: (...args: any[]) => rpc.stop(...args),
     dispose: (...args: any[]) => rpc.dispose(...args),
   });
+}
+
+// 执行服务血缘链解析纯函数（计划 T2）：输入为闭包收集的 recovery intents 数组
+// （未预过滤，过滤在本函数内确定性完成）、workspace ledger readOwned(ref.workspaceId)
+// 的 record 与入参 ref，输出 PlanLineageResolution 或 null。superseded 判定只依据
+// 持久 resume intent 链 + workspace ledger 复核，绝不读 blocker 文案或内存缓存；
+// 任何身份不一致、链证据不可信或复核失败一律 fail-closed（截断或返回 null）。
+// 行为规格（全部 fail-closed）：
+// 1. 过滤：只认 version === "integration-resume-intent.v1"、ownerScope.rootSessionId
+//    与 ref 一致、workspaceId === ref.workspaceId 的 intent；同 sourceRunId 取
+//    attempt 最大者。
+// 2. 起链：自 ref.runId 起，有效跳 = state ∈ {activated, completed} 且
+//    resumedRun.runId 为 string；环、深度 >16、workspaceId/leaseId 与首跳不一致
+//    → 链在此截断（无跳时无首跳约束）。
+// 3. 复核：链尾 runId 必须与 ledger record.run.runId 一致，record owner 身份与
+//    ref 一致，且有跳时 record workspace/lease 匹配首跳；不满足返回 null。
+// 4. 无任何有效跳且复核通过 → { run: ref, chain: [ref.runId], superseded: false }。
+export function resolvePlanExecutionLineage(intents: unknown, record: any, ref: PlanRunRef): PlanLineageResolution | null {
+  const intentsBySource = new Map<string, any>();
+  for (const entry of Array.isArray(intents) ? intents : []) {
+    if (entry?.version !== "integration-resume-intent.v1" || typeof entry.sourceRunId !== "string") continue;
+    if (entry.ownerScope?.rootSessionId !== ref.rootSessionId) continue;
+    if (entry.workspaceId !== ref.workspaceId) continue;
+    const prior = intentsBySource.get(entry.sourceRunId);
+    if (!prior || (entry.attempt ?? 0) >= (prior.attempt ?? 0)) intentsBySource.set(entry.sourceRunId, entry);
+  }
+  const chain = [ref.runId];
+  const seen = new Set(chain);
+  let current = ref.runId;
+  // 首跳（首个有效跳）的 workspace/lease 绑定；后续跳与 ledger 复核都以此为锚。
+  let lineageBinding: { workspaceId: unknown; leaseId: unknown } | undefined;
+  for (let hop = 0; hop < 16; hop++) {
+    const intent = intentsBySource.get(current);
+    if (!intent) break;
+    if (intent.state !== "activated" && intent.state !== "completed") break;
+    const next = typeof intent.resumedRun?.runId === "string" ? intent.resumedRun.runId : undefined;
+    if (!next || seen.has(next)) break;
+    if (lineageBinding && (intent.workspaceId !== lineageBinding.workspaceId || intent.leaseId !== lineageBinding.leaseId)) break;
+    chain.push(next);
+    seen.add(next);
+    current = next;
+    lineageBinding ??= { workspaceId: intent.workspaceId, leaseId: intent.leaseId };
+  }
+  if (!record || typeof record !== "object") return null;
+  if (record.workspaceId !== ref.workspaceId) return null;
+  if (record.run?.runId !== current) return null;
+  if (record.owner?.kind !== "standalone-subagent" || record.owner.rootSessionId !== ref.rootSessionId) return null;
+  if (lineageBinding && (record.workspaceId !== lineageBinding.workspaceId || record.leaseId !== lineageBinding.leaseId)) return null;
+  return { run: { ...ref, runId: current }, chain: [...chain], superseded: current !== ref.runId };
 }
 
 export function projectManagedWorkspaceTerminalProof(
@@ -567,6 +616,66 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
       // 该 run 已被再次续跑改绑（owned receipts 为空）：沿链继续。
     }
     return { chain, sourceAsyncDir, lineageWorkspaceId: lineageBinding?.workspaceId, ownedByRoot };
+  };
+  // 执行服务血缘解析（计划 T2，lineage(ref) 的收集与复核闭包）：intents 收集复用
+  // 上方 resolveManagedResumeLineageOwner 的同一证据面（本 root session 拥有的
+  // workspace records → repositories → recoveryStatus()）；ledger 复核用
+  // readOwned(ref.workspaceId) 直读（不传 runId：superseded 旧 run 与 ledger 当前
+  // run 必然不同，runId 限定查会误判）。核心链解析提为模块级纯函数
+  // resolvePlanExecutionLineage，闭包只负责收集与复核后调用。装配不可用、枚举/
+  // 读取不可达、复核失败一律返回 null（fail-closed），不降级、不使用 blocker 文案
+  // 或内存缓存。诊断事件沿用 managedResumeDiagnostic 通道（plan-lineage-* 前缀）。
+  const resolvePlanLineage = async (ref: PlanRunRef): Promise<PlanLineageResolution | null> => {
+    if (!broker || !workspaceService) return null;
+    const currentBroker = broker;
+    if (ref.rootSessionId !== currentBroker.rootSessionId) return null;
+    let ownedByRoot: any[];
+    try { ownedByRoot = ownedReceipts(); } catch (error) {
+      // 枚举失败不猜 lineage：intents 不可达，按规则返回 null。
+      managedResumeDiagnostic("plan-lineage-enumeration-failed", { runId: ref.runId, workspaceId: ref.workspaceId, error, cause: (error as any)?.cause });
+      return null;
+    }
+    const visitedRepositories = new Set<string>();
+    const collected: any[] = [];
+    let queriedRepositories = 0;
+    for (const ownedReceipt of ownedByRoot) {
+      let context: RepositoryContext;
+      try { ({ context } = await selectReceipt(ownedReceipt.run?.runId, ownedReceipt.workspaceId)); }
+      catch (error) {
+        managedResumeDiagnostic("plan-lineage-repository-unavailable", { runId: ref.runId, workspaceId: ownedReceipt?.workspaceId, error, cause: (error as any)?.cause });
+        continue;
+      }
+      if (visitedRepositories.has(context.identity.repositoryId)) continue;
+      visitedRepositories.add(context.identity.repositoryId);
+      let intents: unknown;
+      try { intents = await (await context.requireClient()).recoveryStatus(); } catch (error) {
+        managedResumeDiagnostic("plan-lineage-intents-unavailable", { runId: ref.runId, repositoryId: context.identity.repositoryId, error, cause: (error as any)?.cause });
+        continue;
+      }
+      if (!Array.isArray(intents)) continue;
+      queriedRepositories += 1;
+      collected.push(...intents);
+    }
+    if (ownedByRoot.length > 0 && queriedRepositories === 0) {
+      // 有 workspace 但一个 repository 的 intents 都不可达：证据不完整，按不可达
+      // 返回 null，不把零证据当作「无任何跳」。
+      managedResumeDiagnostic("plan-lineage-intents-unreachable", { runId: ref.runId, workspaceId: ref.workspaceId, repositories: visitedRepositories.size });
+      return null;
+    }
+    let record: any;
+    try {
+      record = workspaceService.readOwned({ workspaceId: ref.workspaceId, ownerScope: { kind: "standalone-subagent", rootSessionId: currentBroker.rootSessionId } });
+    } catch (error) {
+      managedResumeDiagnostic("plan-lineage-record-read-failed", { runId: ref.runId, workspaceId: ref.workspaceId, error, cause: (error as any)?.cause });
+      return null;
+    }
+    const resolution = resolvePlanExecutionLineage(collected, record, ref);
+    if (!resolution) {
+      managedResumeDiagnostic("plan-lineage-unresolved", { runId: ref.runId, workspaceId: ref.workspaceId });
+      return null;
+    }
+    managedResumeDiagnostic("plan-lineage-resolved", { runId: ref.runId, workspaceId: ref.workspaceId, currentRunId: resolution.run.runId, chain: resolution.chain, superseded: resolution.superseded });
+    return resolution;
   };
   // 归一化不可行时的 fail-closed 判定（缺陷修复规格 B）：复活目标 descriptor 将重放
   // broker 绑定装配（extensionBindings 含 pi-config.root/1，或 requiredExtensions 含
@@ -1004,6 +1113,12 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
           facts.blocker = "PLAN_EXECUTION_FACTS_UNAVAILABLE";
           return facts;
         }
+      },
+      // 执行服务血缘查询（计划 T2）：与 inspect 同界（仅本 root session 装配可用
+      // 时实现），核心解析在 resolvePlanLineage 闭包 + 模块级纯函数
+      // resolvePlanExecutionLineage 内完成。
+      lineage(ref: PlanRunRef): Promise<PlanLineageResolution | null> {
+        return resolvePlanLineage(ref);
       },
     },
     managedCodingResume: {

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { bindPlanExecutionService, getPlanExecutionService, type PlanExecutionService, type PlanRunRef, type PlanRunFacts } from "../execution/index.ts";
+import { bindPlanExecutionService, getPlanExecutionService, type PlanExecutionService, type PlanLineageResolution, type PlanRunRef, type PlanRunFacts } from "../execution/index.ts";
 import { execFileSync } from "node:child_process";
 import { closeSync, constants, fstatSync, lstatSync, openSync, realpathSync, writeSync } from "node:fs";
 import path from "node:path";
@@ -2034,6 +2034,7 @@ type TypedSubagentExtensionOptions = {
     inspect(ref: PlanRunRef): Promise<PlanRunFacts>;
     subscribe(listener: (runId: string) => void): () => void;
     notify(runId: string): void;
+    lineage?(ref: PlanRunRef): Promise<PlanLineageResolution | null>;
   };
   resolveCanonicalOrigin?: (input: { requestedCwd: string; ctx: any }) => string | Promise<string>;
   inspectWorkspaceSource?: typeof defaultWorkspaceSource;
@@ -2292,6 +2293,18 @@ export function createTypedSubagentExtension(
         }
         return disposeSubscription;
       },
+      // 血缘查询（计划 T2）：宿主提供 lineage 时挂载为 service 成员；旧实现
+      // 不提供时保持 undefined（类型仍合法），不新建全局 registry。只读查询，
+      // 不写 knownRuns/dispatches 账本；解析失败/不可达由宿主实现返回 null。
+      ...(planExecution.lineage ? {
+        async lineage(ref: PlanRunRef): Promise<PlanLineageResolution | null> {
+          assertCurrent();
+          if (ref.rootSessionId !== rootSessionId) throw new Error("PLAN_EXECUTION_SESSION_MISMATCH");
+          const resolution = await planExecution.lineage(ref);
+          assertCurrent();
+          return resolution;
+        },
+      } : {}),
     });
     unbindExecution = bindPlanExecutionService(pi, rootSessionId, service);
   };
