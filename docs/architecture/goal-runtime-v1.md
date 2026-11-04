@@ -1,6 +1,6 @@
 # Goal Runtime v1：契约、执行与会话恢复
 
-**范围：** §1–§8 保留 v1 契约层的历史设计与验证记录；§9 说明 Host 门禁、continuity、用户控制与恢复边界；§10 记录 v2 多仓库扩展。
+**范围：** §1–§8 保留 v1 契约层的历史设计与验证记录；§9 说明 Host 门禁、continuity、用户控制与恢复边界；§10 记录 v2 多仓库扩展；§11 记录运维语义、异常处置与集成回执通道的运维实践。
 **职责：** contract 模块不读业务状态、不调度、不执行检查、不写 session、不注册工具。运行进度权威是 Pi session custom entry，检查执行与证据归 verification，package 运行事实由 `pi-subagents-enhanced/execution` 提供。
 **状态：** §7–§8 的“测试待授权”仅为 T1 历史记录；当前受控联合回归与真实 smoke 的边界见 §10。
 
@@ -332,3 +332,60 @@ compact、reload 或新 Host 的恢复顺序保持 v1：session store 先从当�
 | linked worktree、别名、嵌套仓库、同 common-dir 候选、跨仓库单任务 | 不支持，绑定阶段拒绝 |
 
 该章节描述的是 v1 状态、存储与恢复边界的多仓库路由扩展，不引入第二套 Goal 状态机、proof 账本或恢复协议。真实 provider smoke、双仓库并行与新 PID 的生产证据仍属于后续 T5；本节的受控测试不替代真实 smoke。
+
+## 11. 运维语义与异常处置
+
+本节记录 2026-11-04 可用性缺陷修复（resume 血缘重绑、回执事件通道、resume 交互反馈、force-close）合入后的运维语义，来源为 `docs/investigations/2026-11-04-goal-runtime-usability-defects.md` 实测报告与调研核实结论。字段名、函数名与命令名均对应 main 已合入实现。
+
+### 11.1 集成队列运维四条澄清
+
+以下四条是对实测误判的澄清，均已调研核实为设计语义而非故障：
+
+1. **集成队列发布目标 = 本地 origin 仓 main，不推 GitHub。** 发布走 rebase-ff + fast-forward 本地 main（origin root 即本地仓库镜像）；排查「发布去哪了」先看本地 main 与本地 main reflog，不要只看远端。
+2. **rebase 后原提交对象不可达 ≠ 代码丢失。** rebase 发布后 child worktree 的原提交对象变为不可达并被清理（`git cat-file` 查无），这不等于代码丢失；权威判断以队列台账的 `candidateHead` 字段与本地 main reflog（如 `merge 81dc5f3…: Fast-forward`）为准。
+3. **父侧 `managed_workspace_dispose(integrate)` 返回 `CHILD_OWNS_INTEGRATION` 是护栏，不是故障。** publication=allowed 的 coding 托管工作区集成由子代理集成队列自主拥有：父层不能对其执行 integrate，宿主不自动重放集成；子代理自行发布并释放。已 released 的工作区无需额外处置。
+4. **child 必须在 run 终结前在自己 worktree 内提交。** 未提交交付物的 run 终结后，集成队列项停留 resumable 状态，经 resume 泵送走 handoff 人工接管路径（`subagent-integration-handoff`），不会自动发布；派发 prompt 末尾已含「结束前必须显式 git add 并 git commit」的收尾指引。
+
+### 11.2 resume 血缘与替换门
+
+工具路径复活（resume）后，旧 run 被血缘链上的后续 run 取代，goal 引擎按 resume intent 链把 `task.run` 重绑至最终 run：
+
+- **血缘解析：** `PlanExecutionService` 增加可选成员 `lineage?(ref)`，返回 `PlanLineageResolution`（`run`/`chain`/`superseded`）。实现在 extensions/subagent-runtime.ts：闭包 `resolvePlanLineage` 负责从本 root session 拥有的 workspace record 收集 `integration-resume-intent.v1` intents 并经 workspace ledger 复核；链解析核心为模块级导出纯函数 `resolvePlanExecutionLineage(intents, record, ref)`（逐跳校验 `state ∈ {activated, completed}` 且有 `resumedRun.runId`，workspaceId/leaseId 与首跳不一致、环、深度超限即截断）。诊断事件走 `managedResumeDiagnostic` 通道，`plan-lineage-*` 前缀。
+- **重绑与审计：** scheduler 侧 `refreshRuns`/`replaceCancelled`/`retryTask`/`forceCloseTasks` 在 inspect 前经 `resolveLineageRun` 解析；`superseded === true` 时把 `task.run` 重绑为最终 run，旧 runId 追加进 `TaskState.supersededRunIds`（去重）作为审计字段。`supersededRunIds` 已纳入 session-state 严格解码字段集，旧快照无该字段解码为 undefined，天然兼容。
+- **fail-closed 边界：** 血缘返回 null（装配不可用、intents 不可达、ledger 复核失败、解析异常）或 `superseded === false` 时维持现状 blocked 语义，不放宽、不降级为「找不到就当没发生」；`sameRun` 身份守卫不放宽，重绑只由持久血缘证据授权，绝不允许基于 blocker 文案或内存缓存的判定。
+- **替换门：** cancelled 计划的 `replaceCancelled` 门在逐任务 inspect 前先按血缘重绑再核验最终 run，因此「旧 run 已被 resume 复活取代」不再触发 `GOAL_CANCELLED_REPLACEMENT_REQUIRED` 死锁；官方 terminal proof、completed integration receipt、workspace released、recovery none、blocker null 等其余门条件不变。
+
+### 11.3 force-close 双入口
+
+仅 `status === "cancelled"` 的实例允许强制闭合（其余状态拒绝 `GOAL_NOT_CANCELLED`）；两入口写同一 `forceCloseTasks`，经 `exclusive("force-close")` 串行：
+
+| 入口 | 模式 | 边界 |
+| --- | --- | --- |
+| typed 工具 `plan_force_close`（agent 可用） | `verified` 核实型 | 参数 `{ force_confirm }` 必须精确等于当前 planId（否则拒绝 `FORCE_CLOSE_CONFIRM_MISMATCH`）；逐任务按血缘重绑后 `inspect(最终 run)` 必须满足 closed 判定，任一任务不满足即整体拒绝 `FORCE_CLOSE_VERIFICATION_FAILED` 并逐任务列出原因，绝不部分写入 |
+| `/plan force-close` 子命令（人工） | `manual` 盲闭合 | `ctx.ui.confirm("将对已取消计划执行人工强制闭合（跳过自动核实，不可回滚）。继续？")` 确认后执行，拒绝即中止、无任何写入；把每个有 run 任务的 `run`/`dispatchKey`/`workspaceId` 置空，非 accepted/blocked 任务置 `blocked` 且 `blocker = "FORCE_CLOSED_BY_ADMIN"` |
+
+两种模式均经既有持久化路径写入并在 checkpoint 留痕（`decisions` 记录 mode、`closedAt`、planId 与逐任务处置结果，`nextAction` 指引重新 `plan_execute`）；manual 模式保留 `terminalProofRef`/`integrationReceiptRef` 原值，历史 session 条目只增不删。核实不通过时，错误信息建议改走 `/plan force-close` 人工路径。
+
+### 11.4 集成回执事件通道
+
+队列终态事实不再依赖轮询心跳，走 durable 事件 + Host 泵送：
+
+1. **锁内落盘：** `completePrepared`/`transition`/`cancelItem`/`settleDispositionQueue`/`preserveByBinding` 五个终态写入点在既有 `ledger.withLock` 临界区内追加 `integration-receipt-event.v1` 事件（`queue-receipt-events.json` 索引 + 每事件一文件，与 resume intents 存储形态并列）；幂等键 `queueItemId + state`，已存在即跳过；初始 `delivery: { state: "pending", attempts: 0 }`。
+2. **读取 RPC：** `queue.receipt-events` 按 `ownerScope.rootSessionId` 过滤且只返回 `delivery.state === "pending"` 的事件；`queue.receipt-event-delivered`（入参 `{ eventIds, state: "delivered" | "debt", reason? }`）回写投递状态并递增 `attempts`，未知 eventId 报错；该回写方法在 coordinator-client 重放白名单内，幂等。`queue.audit` 聚合返回全部事件（含 delivered/debt）供运维审计；`recovery.status` 返回形状保持扁平 intents 数组不受影响。
+3. **Host 5s 泵：** `pumpReceiptEvents` 与 `pumpResumeHandoffs` 共用同一 5s 定时器，同 `closing`/`pumpBusy`/client 就绪门控，daemon 缺位空转；事件分组判定为模块级导出纯函数 `resolveReceiptEventPumpPlan(events)`：`childRunId === null` 归入 toDebt（回写 `debt` + `reason: "child-run-unavailable"`，终态不再重试）；`childRunId` 有效归入 toNotify，经 `broker.notifyExecutionFacts(childRunId)` 唤醒 goal 引擎事实刷新后回写 `delivered`。
+4. **at-least-once：** 回写 RPC 失败时事件保持 `pending`，下一轮泵重试；重复 `notifyExecutionFacts` 幂等无害。goal 侧零改动，subscribe listener 全量 reconcile、`inspect` 权威拉取事实。
+
+### 11.5 resume 交互与 auto-pause 护栏
+
+- **resume 非 actionable 提示：** `/plan resume` 成功但 `runtime.status(session).next.kind ∈ {wait, blocked}` 时，输出一行 `ctx.ui.notify`（info 级），文案含人类可读原因（guidance 或 next.reason）并说明「事实变化后将自动续跑，无需重复 resume」；actionable kind（advance/retry/verify）不输出，既有 JSON 状态输出保留。notify 仅 UI 投影，不进入 transcript、不改写 agent 实际收到的消息。
+- **auto-pause 是设计护栏：** 来自 interactive/RPC 的新用户消息或 steer 自动暂停续跑（pauseReason 固定文案），引擎**不解析自然语言授权**——消息里的「继续/批准」等措辞不构成 resume 或放宽门禁，恢复只能走 `/plan resume`。
+- **同 pauseReason 去重：** 自动暂停提示经模块级 `WeakMap` 记录上次已提示的 pauseReason，同一原因只提示一次；`control(active)` 成功（resume/取消）即重置，替换后的新计划不会吞掉首次 auto-pause 提示。
+
+### 11.6 派发与集成实践
+
+以下四条为 2026-11-04 本轮实操实证的新运维事实，派发合同编写时必须遵守：
+
+1. **writePaths 在派发时锁定进队列项 policy，执行中的事后授权无法扩展它。** coding 派发的 `writePaths` 经 `standaloneWorkspacePolicy` 写入 workspace record 的 `request.policy.writePaths`，集成 admission 据此对全部变更文件做越界校验（越界即 `MANAGED_WORKSPACE_WRITE_PATHS` 拒绝）。派发合同必须预判任务全部可能改动的文件——包括既有测试断言的同步修改与 tsconfig 等配置——遗漏任何一处都会在集成 admission 被越界拒绝，且无法在执行中途补救。
+2. **child 终结前必须删除依赖物化自举产物。** 派发后在 worktree 内物化的 symlink、克隆的 node_modules 等自举产物属于未跟踪路径，会使 worktree 不满足 clean 校验并阻塞集成 admission；终结前删除这些产物，`git status --porcelain` 必须为空。
+3. **child 终结前必须提交全部交付物并确认 porcelain 为空。** 未提交的改动不属于任何 candidate commit，run 终结后集成队列无从发布；提交后同样确认 `git status --porcelain` 为空再结束 run。
+4. **coordinator daemon 重启会幂等 replay 全部 pending terminal proofs。** daemon 被 kill 后由下次业务连接按需拉起，startup recovery（`replayTerminalProofs`）幂等重放 outbox 中全部 pending terminal proofs，从而触发受影响队列项的连锁 admission→publish；重启后观察队列动作时不要把 replay 产生的发布误判为新写入，也不需要人工重放证明。
