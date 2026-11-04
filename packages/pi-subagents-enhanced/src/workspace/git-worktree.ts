@@ -433,10 +433,15 @@ function continuingIdentity(record: ManagedWorkspaceRecord) {
   return { workspacePath: record.path, headCommit: git(record.path, ["rev-parse", "--verify", "HEAD^{commit}"]) };
 }
 
+/** 队列与记录共同持有的父侧补授权并集：writePaths 准入/rebase/发布断言
+ *  统一从记录取并集，队列项字段仅在 claim 入参侧并入。 */
+const recordAdditionalWritePaths = (record: ManagedWorkspaceRecord) =>
+  Array.isArray((record as any).additionalAuthorizedWritePaths) ? (record as any).additionalAuthorizedWritePaths as string[] : [];
+
 function rebaseCandidateFacts(record: ManagedWorkspaceRecord, targetHead: string, state: "completed" | "resolving-conflict") {
   const head = managedGit(record.path, ["rev-parse", "--verify", "HEAD^{commit}"]);
   const changedFiles = parseChangedPaths(managedGit(record.path, ["diff", "-l0", "--name-status", "-z", "--find-renames", `${targetHead}..${head}`]));
-  assertManagedWorkspaceWritePaths(changedFiles, record.request.policy.writePaths);
+  assertManagedWorkspaceWritePaths(changedFiles, [...record.request.policy.writePaths, ...recordAdditionalWritePaths(record)]);
   if (state === "completed") {
     const identity = inspectIdentity(record);
     if (identity.headCommit !== head || !gitSucceeds(record.path, ["merge-base", "--is-ancestor", targetHead, head])) {
@@ -653,7 +658,7 @@ export function fastForwardManagedGitWorkspace(input: {
   if (source.headCommit !== candidateHead || !source.clean || sequencerActive(record.path) || !gitSucceeds(record.path, ["merge-base", "--is-ancestor", targetHead, candidateHead])) {
     throw failure("MANAGED_WORKSPACE_INTEGRATE", "sealed candidate is not a clean target descendant at workspace HEAD");
   }
-  assertManagedWorkspaceWritePaths(parseChangedPaths(gitRaw(record.path, ["diff", "-l0", "--name-status", "-z", "--find-renames", "--find-copies-harder", `${targetHead}..${candidateHead}`])), record.request.policy.writePaths);
+  assertManagedWorkspaceWritePaths(parseChangedPaths(gitRaw(record.path, ["diff", "-l0", "--name-status", "-z", "--find-renames", "--find-copies-harder", `${targetHead}..${candidateHead}`])), [...record.request.policy.writePaths, ...recordAdditionalWritePaths(record)]);
   const root = primaryOrigin(record);
   const unlock = operationLock(root);
   try {
@@ -699,7 +704,7 @@ export function publishWorkspaceSnapshot(input: {
     }
     rejectUnsafeTree(identity.workspacePath, tree);
     const changedFiles = treeChangedFiles(identity.workspacePath, baseCommit, tree);
-    assertManagedWorkspaceWritePaths(changedFiles, policy.writePaths);
+    assertManagedWorkspaceWritePaths(changedFiles, [...policy.writePaths, ...recordAdditionalWritePaths(record)]);
     const refName = `refs/pi/workspaces/${record.request.workspaceId}/published`;
     const current = refValue(root, refName);
     const expected = input.expectedRef === undefined ? current : input.expectedRef;
@@ -723,7 +728,7 @@ export function applyPublishedArtifact(input: { record: ManagedWorkspaceRecord; 
     if (input.expectedOriginHead && head !== input.expectedOriginHead) throw failure("MANAGED_WORKSPACE_ORIGIN_DRIFT", "origin HEAD changed");
     if (!gitSucceeds(root, ["merge-base", "--is-ancestor", artifact.baseCommit, head])) throw failure("MANAGED_WORKSPACE_ORIGIN_DRIFT", "origin is unrelated to published base");
     const changedFiles = treeChangedFiles(root, artifact.baseCommit, artifact.publishedTree);
-    assertManagedWorkspaceWritePaths(changedFiles, input.record.request.policy.writePaths);
+    assertManagedWorkspaceWritePaths(changedFiles, [...input.record.request.policy.writePaths, ...recordAdditionalWritePaths(input.record)]);
     rejectUnsafeTree(root, artifact.publishedTree);
     const patch = execFileSync("git", ["diff", "--binary", artifact.baseCommit, artifact.publishedTree], { cwd: root, encoding: "buffer", env: { ...process.env, GIT_CONFIG_PARAMETERS: "'core.hooksPath=/dev/null'" } });
     try { execFileSync("git", ["apply", "--index", "--whitespace=nowarn"], { cwd: root, input: patch, stdio: ["pipe", "ignore", "pipe"], env: { ...process.env, GIT_CONFIG_PARAMETERS: "'core.hooksPath=/dev/null'" } }); }

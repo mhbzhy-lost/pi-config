@@ -303,9 +303,12 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
     if (facts.inspection.headCommit !== input.authorizedWorkspaceHead || !facts.inspection.clean || !facts.inspection.descendant || !facts.inspection.hasCommits) {
       throw failure("MANAGED_WORKSPACE_INTEGRATE", "workspace admission requires the authorized clean committed HEAD");
     }
-    // 准入判定标准不变，仅 allowlist 并入队列项上持久记录的父侧补授权
-    // （additionalAuthorizedWritePaths；正常 child 路径无此字段，行为不变）。
-    const additionalPaths = Array.isArray(input.additionalAuthorizedWritePaths) ? input.additionalAuthorizedWritePaths : [];
+    // 准入判定标准不变，仅 allowlist 并入已持久化的父侧补授权：队列项字段
+    // （claim 路径）与 workspace 记录字段（status dry-run/重放路径）取并集。
+    const additionalPaths = [
+      ...(Array.isArray(input.additionalAuthorizedWritePaths) ? input.additionalAuthorizedWritePaths : []),
+      ...(Array.isArray(lease.record.additionalAuthorizedWritePaths) ? lease.record.additionalAuthorizedWritePaths : []),
+    ];
     assertManagedWorkspaceWritePaths(facts.inspection.changedFiles, [...lease.record.request.policy.writePaths, ...additionalPaths]);
     return { targetHead: facts.targetHead };
   }
@@ -460,7 +463,18 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
           integrationAdmissionFacts({ workspaceId: lease.workspaceId, leaseId: lease.leaseId,
             targetRef: lease.record.request.originRef, authorizedWorkspaceHead: inspection.headCommit }, integrationBinding(lease));
           allowedDispositions.unshift("integrate");
-        } catch (error) { blockedReasons.push(error?.code ?? "integration-admission-rejected"); }
+        } catch (error) {
+          // writePaths 越界是唯一不锁死 integrate 的准入失败：它可能是派发合同
+          // 声明不全，父会话可在 dispose(integrate) 携带 additionalWritePaths
+          // 显式补授权；执行时准入仍会带补授权完整复验，不携带则照旧拒绝。
+          // 其余准入失败（后代/漂移/合同）保持不开放 integrate。
+          if (error?.code === "MANAGED_WORKSPACE_WRITE_PATHS") {
+            allowedDispositions.unshift("integrate");
+            blockedReasons.push(error.code);
+          } else {
+            blockedReasons.push(error?.code ?? "integration-admission-rejected");
+          }
+        }
       }
     }
     const snapshotHash = managedWorkspaceSnapshotHash(inspection, proof);
@@ -633,6 +647,12 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
             || record.actionChallenge?.tokenHash !== challenge.tokenHash) throw failure("MANAGED_WORKSPACE_CAS", "workspace changed before integration authorization");
         record.actionChallenge.used = true;
         record.terminalProof = structuredClone(snapshot.terminalProof);
+        // 补授权随一次性授权同一 CAS 消费：授权事实写入 workspace 记录，
+        // 供后续 admission/rebase/发布断言取并集，也供事后审计。
+        if (additionalPaths.length > 0) {
+          record.additionalAuthorizedWritePaths = [...new Set([...(record.additionalAuthorizedWritePaths ?? []), ...additionalPaths])];
+          record.additionalWritePathsAuthorization = { rootSessionId: lease.record.request.owner.rootSessionId, authorizedAt: new Date().toISOString(), paths: [...additionalPaths] };
+        }
         return record;
       });
       // 正常路径仍由 child 发布；父侧只消费已终止 run 的一次性授权，实际集成与

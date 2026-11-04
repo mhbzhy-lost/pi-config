@@ -27,6 +27,7 @@ import {
   isPreparedWorkspaceDisposition,
   dispositionBindingMatches,
 } from "./disposition-contract.ts";
+import { invalidManagedWritePathReason } from "./git-worktree.ts";
 
 const RECORD_SCHEMA_V2 = "managed-workspace-ledger.v2";
 const LEGACY_RECORD_SCHEMA_V1 = "managed-workspace-ledger.v1";
@@ -38,6 +39,7 @@ const RECORD_V2_KEYS = [
   "path", "dispatchCwd", "branchRef", "state", "run", "disposition", "cleanupDebt",
   "actionChallenge", "pendingAction", "integrationIntent", "integrationReceipt", "integrationHistory", "createdAt", "updatedAt", "revision",
   "publishedArtifact", "v2Action", "application", "recoveryChallenge", "recoveryPlan", "terminalProof",
+  "additionalAuthorizedWritePaths", "additionalWritePathsAuthorization",
 ];
 
 class ManagedWorkspaceError extends Error {
@@ -356,7 +358,29 @@ function validateIntegrationHistory(value) {
     && typeof entry.closedAt === "string" && !Number.isNaN(Date.parse(entry.closedAt)));
 }
 
+// schema v2 后补的两个可选字段：旧记录缺省按 null 归一，不放宽其它校验。
+function normalizeRecordSchemaFields(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  if (!("additionalAuthorizedWritePaths" in value)) value.additionalAuthorizedWritePaths = null;
+  if (!("additionalWritePathsAuthorization" in value)) value.additionalWritePathsAuthorization = null;
+  return value;
+}
+
+function validateAdditionalAuthorizedWritePaths(value) {
+  return value === null || (Array.isArray(value) && value.length > 0 && value.length <= 64
+    && value.every((entry) => invalidManagedWritePathReason(entry) === null));
+}
+
+function validateAdditionalWritePathsAuthorization(value) {
+  return value === null || (typeof value === "object" && !Array.isArray(value) && exactKeys(value, ["rootSessionId", "authorizedAt", "paths"])
+    && typeof value.rootSessionId === "string" && value.rootSessionId.length > 0
+    && typeof value.authorizedAt === "string" && !Number.isNaN(Date.parse(value.authorizedAt))
+    && Array.isArray(value.paths) && value.paths.length > 0 && value.paths.length <= 64
+    && value.paths.every((entry) => invalidManagedWritePathReason(entry) === null));
+}
+
 function validateRecordEnvelope(value, filenameWorkspaceId?: string) {
+  value = normalizeRecordSchemaFields(value);
   if (!exactKeys(value, RECORD_V2_KEYS) || value.schemaVersion !== RECORD_SCHEMA_V2 || !STATES.has(value.state)
       || !SHA256.test(value.requestHash) || !OWNER_TOKEN.test(value.ownerToken) || !SHA256.test(value.leaseId)
       || createHash("sha256").update(value.ownerToken).digest("hex") !== value.leaseId
@@ -368,6 +392,8 @@ function validateRecordEnvelope(value, filenameWorkspaceId?: string) {
       || (filenameWorkspaceId !== undefined && value.workspaceId !== filenameWorkspaceId)
       || (value.publishedArtifact !== null && (typeof value.publishedArtifact !== "object" || Array.isArray(value.publishedArtifact)))
       || (value.v2Action !== null && (typeof value.v2Action !== "object" || Array.isArray(value.v2Action)))
+      || !validateAdditionalAuthorizedWritePaths(value.additionalAuthorizedWritePaths)
+      || !validateAdditionalWritePathsAuthorization(value.additionalWritePathsAuthorization)
       || !validateRecoveryChallenge(value.recoveryChallenge)
       || (value.recoveryPlan !== null && !SHA256.test(value.recoveryPlan))) {
     throw failure("MANAGED_WORKSPACE_SCHEMA", "managed workspace record schema is invalid");

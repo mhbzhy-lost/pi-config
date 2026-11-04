@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -517,4 +517,87 @@ test("非后代 HEAD 拒绝刷新授权头（fail closed）", async (t) => {
   assert.equal(item.authorizedWorkspaceHead, committedHead, "非后代 HEAD 不得刷新授权头");
   // admission 保持失败（fail closed，人工处置）。
   await assert.rejects(async () => f.coordinator.internal.awaitIntegrationAdmission(item.queueItemId, binding), /authorized clean committed HEAD|admission/i);
+});
+
+test("released orphan queue items are reconciled to preserved at coordinator startup", async (t) => {
+  // 事故现场重现：workspace 经 discard 释放（直接 service 路径不结算队列项），
+  // 其队列项永远无人认领，会阻塞整个 durable FIFO；启动对账必须把这类孤儿项
+  // 转 preserved 终态并写回执事件，且不误动仍 active 的队列项。
+  const f = await fixture(t);
+  const orphan = await allocateCandidate(f, "orphan-ws", "root-a", "orphan.txt");
+  const orphanItem = enqueue(f, orphan);
+  const active = await allocateCandidate(f, "active-ws", "root-b", "active.txt");
+  const activeItem = enqueue(f, active);
+
+  const service = f.coordinator.internal.workspaceService;
+  const proof = { state: "observed", conflict: false, runId: orphan.run.runId, rootSessionId: "root-a",
+    asyncDir: orphan.run.asyncDir, processInstance: "process-orphan", proofId: "1".repeat(64) };
+  const issued = service.issueDisposition({ workspaceId: orphan.receipt.workspaceId, terminalProof: proof });
+  const discarded = service.dispose({ workspaceId: orphan.receipt.workspaceId, terminalProof: proof, disposition: "discard", actionToken: issued.actionToken });
+  assert.equal(discarded.state, "released");
+  assert.equal(f.coordinator.internal.integrationQueue.getItem(orphanItem.queueItemId).state, "queued", "直接 service 释放不结算队列项——孤儿现场成立");
+
+  const restarted = createCoordinatorServer({ endpoint: join(f.root, "restart-reconcile.sock"), repositoryId: f.repositoryId, stateRoot: f.stateRoot,
+    challengeBroker: async (registry, challenge) => ({ ...challenge, rootSessionId: registry.rootSessionId, brokerProcessIdentity: "b".repeat(64) }) });
+  t.after(() => restarted.close());
+  await restarted.listen();
+
+  const queue = restarted.internal.integrationQueue;
+  const preserved = queue.getItem(orphanItem.queueItemId);
+  assert.equal(preserved.state, "preserved", "released 孤儿项在启动对账转 preserved");
+  assert.ok(preserved.preserveReason.includes("released"), "preserve 原因留痕");
+  assert.equal(queue.getItem(activeItem.queueItemId).state, "queued", "active workspace 的队列项不被误动");
+  const events = queue.listReceiptEvents().filter((event) => event.queueItemId === orphanItem.queueItemId);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].state, "preserved");
+  // FIFO 队首已推进到 active 项。
+  const queuedHeads = queue.listQueue().filter((entry) => entry.state === "queued");
+  assert.deepEqual(queuedHeads.map((entry) => entry.queueItemId), [activeItem.queueItemId]);
+});
+
+test("parent fallback integrate admits additional authorized write paths and persists the authorization", async (t) => {
+  // B1 式现场：派发合同只声明 src/**，child 提交含声明外的 docs 文件。
+  // 默认准入 fail-closed；父会话审查后显式补授权 integrate 放行并持久留痕；
+  // 非 integrate 携带补授权与非法文法都必须拒绝。
+  const f = await fixture(t);
+  await f.coordinator.listen();
+  const candidate = await allocateCandidate(f, "write-paths-ws", "root-c", "inside.txt");
+  await mkdir(join(candidate.receipt.path, "docs"), { recursive: true });
+  await writeFile(join(candidate.receipt.path, "docs", "extra.md"), "配套文档\n");
+  git(candidate.receipt.path, "add", ".");
+  git(candidate.receipt.path, "commit", "-m", "add out-of-scope doc");
+
+  const client = await connectRealClient(f, "root-c");
+  t.after(() => client.close());
+  const tools = Object.fromEntries(createWorkspaceOperationTools({ service: client, resolveRootSessionId: () => "root-c" }).map((tool) => [tool.name, tool]));
+  const call = (name, input) => tools[name].execute("write-paths-call", input, undefined, undefined, {});
+
+  const proof = { state: "observed", conflict: false, runId: candidate.run.runId, rootSessionId: "root-c",
+    asyncDir: candidate.run.asyncDir, processInstance: "process-write-paths", proofId: "2".repeat(64) };
+  f.coordinator.internal.workspaceService.recordTerminalProof({ ...candidate.binding, proof });
+
+  const blocked = await call("managed_workspace_status", { workspace_id: candidate.receipt.workspaceId });
+  assert.ok(blocked.details.integrate_blocked_reasons.includes("MANAGED_WORKSPACE_WRITE_PATHS"), "准入失败原因暴露给父会话");
+  // writePaths 越界是唯一不锁死 integrate 的准入失败：token 含 integrate，
+  // 供父会话审查后携带 additionalWritePaths 补授权。
+  assert.equal(blocked.details.allowed_dispositions.includes("integrate"), true, "补授权通道保持 integrate 可授权");
+
+  // 非 integrate 携带补授权：工具层拒绝，token 未被消费。
+  const wrongDisposition = await call("managed_workspace_dispose", { workspace_id: candidate.receipt.workspaceId, disposition: "discard", action_token: blocked.details.action_token, additionalWritePaths: ["docs/**"] });
+  assert.equal(wrongDisposition.details.code, "MANAGED_WORKSPACE_WRITE_PATHS");
+  // 非法文法：入口校验拒绝。
+  const badGrammar = await call("managed_workspace_dispose", { workspace_id: candidate.receipt.workspaceId, disposition: "integrate", action_token: blocked.details.action_token, additionalWritePaths: ["../escape"] });
+  assert.equal(badGrammar.details.code, "INVALID_WORKSPACE_TOOL_INPUT");
+
+  const integrated = await call("managed_workspace_dispose", { workspace_id: candidate.receipt.workspaceId, disposition: "integrate", action_token: blocked.details.action_token, additionalWritePaths: ["docs/**"] });
+  assert.equal(integrated.isError, false, integrated.content?.[0]?.text);
+  assert.equal(integrated.details.state, "released");
+
+  const item = f.coordinator.internal.integrationQueue.findByBinding(candidate.binding);
+  assert.equal(item.state, "completed");
+  assert.deepEqual(item.additionalAuthorizedWritePaths, ["docs/**"], "补授权持久写入队列项");
+  assert.equal(item.additionalWritePathsAuthorization.rootSessionId, "root-c", "授权会话身份留痕");
+  assert.ok(item.additionalWritePathsAuthorization.authorizedAt, "授权时间留痕");
+  assert.equal(git(f.originRoot, "status", "--porcelain"), "");
+  assert.equal(await readFile(join(f.originRoot, "docs", "extra.md"), "utf8"), "配套文档\n", "越界文件随补授权集成进目标分支");
 });
