@@ -588,6 +588,10 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
     }
   }
   const server = net.createServer((socket) => { clients.add(socket); let buffer = "";
+    // 客户端连接 socket 必须监听 error：对端提前断开（如拉起器 startup.ping
+    // 超时自毁后 daemon 才完成恢复并写回响应）会产生 EPIPE/ECONNRESET，未监听
+    // 会以未捕获异常击穿整个 daemon。仅记录诊断，注册清理由既有 close 路径接管。
+    socket.on("error", (error) => { diagnose({ phase: "coordinator-client-socket-error", code: (error as { code?: string })?.code, message: String((error as Error)?.message ?? error) }); });
     socket.setEncoding("utf8"); socket.on("data", async (chunk) => { buffer += chunk; let index;
       while ((index = buffer.indexOf("\n")) >= 0) { const line = buffer.slice(0, index); buffer = buffer.slice(index + 1); if (!line) continue;
         let requestId = "unknown"; let handling = false;
