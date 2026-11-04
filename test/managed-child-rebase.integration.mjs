@@ -5,10 +5,27 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, wr
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+// fixture 必须完全隔离：剥除可能继承的 Git 环境变量（GIT_DIR/GIT_WORK_TREE/
+// GIT_INDEX_FILE/GIT_CONFIG_* 等），防止宿主环境把 fixture 的 git 操作指向
+// 真实仓库。曾发生 GIT_DIR 污染使 hook fixture 写入真实仓库 .git/hooks 的事故。
+const fixtureGitEnv = () => {
+  const env = { ...process.env };
+  for (const name of Object.keys(env)) {
+    if (name.startsWith("GIT_") && name !== "GIT_CONFIG_NOSYSTEM") delete env[name];
+  }
+  env.GIT_CONFIG_NOSYSTEM = "1";
+  return env;
+};
+const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", env: fixtureGitEnv(), stdio: ["ignore", "pipe", "pipe"] }).trim();
 const repo = (objectFormat = "sha1") => {
   const root = mkdtempSync(path.join(tmpdir(), "managed-child-rebase-"));
   git(root, "init", "-q", `--object-format=${objectFormat}`); git(root, "config", "user.email", "test@example.invalid"); git(root, "config", "user.name", "Test");
+  // fixture 容器断言：git 目录必须位于临时根内；环境污染时 fail fast，
+  // 绝不把任何 fixture 写到真实仓库（root 先 realpath 归一化，/var/folders 符号链接）。
+  const rootReal = realpathSync(root);
+  const common = git(root, "rev-parse", "--git-common-dir");
+  const commonAbs = realpathSync(path.isAbsolute(common) ? common : path.resolve(rootReal, common));
+  assert.equal(path.relative(rootReal, commonAbs).startsWith(".."), false, `fixture git common dir 逃逸临时根: ${commonAbs}`);
   writeFileSync(path.join(root, "tracked.txt"), "base\n"); git(root, "add", "."); git(root, "commit", "-qm", "base");
   return root;
 };
