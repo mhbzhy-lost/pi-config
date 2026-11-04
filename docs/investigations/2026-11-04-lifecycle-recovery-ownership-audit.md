@@ -29,6 +29,8 @@
 | 13 | 死 daemon 的 admitted claim（`recoverClaims`） | **写了没接线**：函数已导出，全仓零调用方 | ❌ 孤儿恢复函数 |
 | 14 | `reconcileIntegrations`（队列全量对账推进） | **写了没接线**：函数已导出，全仓零调用方（当日另建窄版 810883c） | ❌ 孤儿恢复函数 |
 | 15 | resume attempts 耗尽/no-progress | recovery intent `requiredAction:"preserve"` → 交回主 agent → 依赖 #9 证明链 | △ 半出口：绕回同一条断链 |
+| 17 | queue audit 未排除 `receipt-event-*` 文件（T7 候选实测，源码与主仓字节相同） | 主仓真实 bug：A2 引入的回执事件文件未被 `administration.ts` 文件枚举排除，audit 输出被污染 | ❌ Phase A 顺带修复 |
+| 18 | handoff daemon crash 的 metadata 登记竞态（T7 候选实测） | diag 快照证明 400ms 内 metadata 被删后重建；与 #7/#8 同层，即 1.4 上 handoff 测试挂起的根因 | ❌ Phase A 覆盖 |
 | 16 | `SUPERVISOR_STEER_NOT_ALLOWED`（yugang 实证，运行中 run 被拒） | **无**：门禁三条件（非 running/非 steerable/epoch 不匹配）坍缩为一个错误码，不带 reason/hint；归因诊断只写内部 trace 不进工具回执；0.80 下 epoch 检查为死代码，实际触发是 status 二次读取的瞬时误判（2026-11-01 事故同类），双源救助不覆盖未注册 broker 的 generic run | ❌ 实证（INV-EXIT 违规；修复=拒绝时携带触发条件与 runtime 事实 + 重试指引，归 Phase B） |
 
 统计：当日暴露无出口语义 **8 处**（#7–#14），已产品化出口 5 处（#1–#6），模范出口仅 1 处（#2）。
