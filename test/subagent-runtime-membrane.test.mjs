@@ -1471,7 +1471,7 @@ test("requires a safe generic title before RPC", async () => {
   assert.deepEqual(rpc.calls, []);
 });
 
-test("maps approved control actions to RPC and requires a resume instruction", async () => {
+test("maps approved control actions to RPC and requires a resume instruction", async (t) => {
   const pi = createPi();
   const rpc = createRpc();
   createTypedSubagentExtension(pi, { rpc, cleanupStore: {} });
@@ -1495,6 +1495,45 @@ test("maps approved control actions to RPC and requires a resume instruction", a
     assert.equal(rejected.details.code, "INVALID_RESUME_MESSAGE");
   }
   assert.equal(rpc.calls.length, callCount, "invalid resume calls must not reach RPC");
+
+  // 复用生产装配：无 writePaths/worktree 的 generic 派发也继承全局 required
+  // extensions；descriptor 仅在受控 upstream RPC 边界按正式字段保存，不启动 provider。
+  const f = await productionHostFixture(t, false);
+  const started = await execute(toolByName(f.host, "subagent_start"), { agent: "executor", task: "只读检查，不修改文件" }, f.context);
+  assert.equal(started.isError, false, JSON.stringify(started));
+  const sourceRunId = started.details.runId;
+  assert.equal(f.receipt({ runId: sourceRunId }), undefined);
+  assert.equal(f.broker.inspectExecutionProof(sourceRunId), null, "generic owner receipt 不构成 coding 权限");
+  assert.equal((await f.broker.readOwnerReceipt(sourceRunId)).runId, sourceRunId);
+  const descriptorPath = join(f.runners.get(sourceRunId).asyncDir, "recovery-descriptor.json");
+  const descriptor = JSON.parse(await readFile(descriptorPath, "utf8"));
+  assert.ok(descriptor.requiredExtensions.some(entry => entry.id === "integration-queue"));
+  assert.ok(descriptor.requiredExtensions.some(entry => entry.id === "root-session-owner"));
+  assert.equal(descriptor.extensionBindings, undefined);
+  await f.finish(sourceRunId);
+  await f.broker.awaitTerminalProofDeliveries();
+  const before = f.runners.size;
+
+  // 有真实 root namespace 或 owner 读取不可用时，不能把无 workspace 当作放行依据。
+  await writeFile(descriptorPath, JSON.stringify({ ...descriptor, extensionBindings: { "pi-config.root/1": { rootSessionId: f.rootSessionId } } }));
+  const rootBound = await execute(toolByName(f.host, "subagent_run_resume"), { id: sourceRunId, message: "继续只读检查" }, f.context);
+  assert.equal(rootBound.details.code, "RESUME_BINDING_BLOCKED");
+  assert.equal(f.runners.size, before);
+  await writeFile(descriptorPath, JSON.stringify(descriptor));
+  const readOwner = f.broker.readOwnerReceipt;
+  f.broker.readOwnerReceipt = async () => { throw Object.assign(new Error("测试：authority 暂不可用"), { code: "authority_store_unavailable" }); };
+  try {
+    const unknown = await execute(toolByName(f.host, "subagent_run_resume"), { id: sourceRunId, message: "继续只读检查" }, f.context);
+    assert.equal(unknown.details.code, "RESUME_BINDING_BLOCKED");
+    assert.equal(f.runners.size, before);
+  } finally { f.broker.readOwnerReceipt = readOwner; }
+
+  const resumed = await execute(toolByName(f.host, "subagent_run_resume"), { id: sourceRunId, message: "继续只读检查" }, f.context);
+  assert.equal(resumed.isError, false, JSON.stringify(resumed));
+  assert.equal(f.runners.size, before + 1, "合法 readonly resume 到达 upstream RPC");
+  assert.equal(f.receipt({ runId: resumed.details.runId }), undefined);
+  assert.equal(f.broker.inspectExecutionProof(resumed.details.runId), null);
+  assert.equal(f.connections.length, 0, "readonly resume 无需进入 managed repository lineage");
 });
 
 test("subagent_worktree status exposes action token and blocked reasons", async () => {
@@ -3107,6 +3146,8 @@ async function productionHostFixture(t, singleRepository, options = {}) {
   const { createSubagentIntegrationTool } = await import("../packages/pi-subagents-enhanced/child-extensions/integration-queue.ts");
   // 使用上游正式 finalizer 从真实进程 close 生成 sidecar，不拼 terminal proof。
   const terminal = await import(pathToFileURL(join(enhancedPackageRoot, "node_modules/pi-subagents/src/runs/background/process-terminal.js")).href);
+  const { resolveRequiredChildExtensions } = await import(pathToFileURL(join(enhancedPackageRoot, "node_modules/pi-subagents/src/shared/required-child-extensions.js")).href);
+  const { createRunFanoutBudget } = await import(pathToFileURL(join(enhancedPackageRoot, "node_modules/pi-subagents/src/runs/shared/run-fanout-budget.js")).href);
   const root = realpathSync(await mkdtemp(join(tmpdir(), "host-t1-")));
   const repository = join(root, "repository");
   const stateRoot = join(root, "state");
@@ -3129,12 +3170,13 @@ async function productionHostFixture(t, singleRepository, options = {}) {
   const sessionManager = SessionManager.inMemory(hostCwd);
   const rootSessionId = sessionManager.getSessionId();
   const context = { cwd: hostCwd, sessionManager };
-  const envKeys = ["PI_SUBAGENT_CHILD", "PI_SUBAGENT_FANOUT_CHILD", "PI_CODING_AGENT_DIR", "PI_CODING_WORKSPACE_DIR", "PI_SUBAGENT_DISPATCH_TRACE_FILE", "PI_SUBAGENT_ORCHESTRATOR_SESSION_ID", "PI_SUBAGENT_RUN_ID", "PI_COORDINATOR_IDLE_EXIT_GRACE_MS"];
+  const envKeys = ["PI_SUBAGENT_CHILD", "PI_SUBAGENT_FANOUT_CHILD", "PI_CODING_AGENT_DIR", "PI_CODING_WORKSPACE_DIR", "PI_SUBAGENT_DISPATCH_TRACE_FILE", "PI_SUBAGENT_ORCHESTRATOR_SESSION_ID", "PI_SUBAGENT_RUN_ID", "PI_COORDINATOR_IDLE_EXIT_GRACE_MS", "PI_SUBAGENTS_TEMP_ROOT"];
   const savedEnv = Object.fromEntries(envKeys.map(key => [key, process.env[key]]));
   delete process.env.PI_SUBAGENT_CHILD;
   delete process.env.PI_SUBAGENT_FANOUT_CHILD;
   process.env.PI_CODING_AGENT_DIR = join(repoRoot, "pi");
   process.env.PI_CODING_WORKSPACE_DIR = stateRoot;
+  process.env.PI_SUBAGENTS_TEMP_ROOT = root;
   // 懒加载 daemon 的归零宽限调小，测试可在 Host 关闭后快速观察到自退。
   process.env.PI_COORDINATOR_IDLE_EXIT_GRACE_MS = "300";
   process.env.PI_SUBAGENT_DISPATCH_TRACE_FILE = traceFile;
@@ -3147,11 +3189,25 @@ async function productionHostFixture(t, singleRepository, options = {}) {
   let handoffStarted;
   const handoff = new Promise(resolve => { handoffStarted = resolve; });
   const runners = new Map();
+  const budgetDirectories = [];
   const connections = [];
-  const launch = async () => {
+  const launch = async (leaf) => {
     const runId = `t1-child-${++serial}`;
-    const asyncDir = join(root, runId);
-    await mkdir(asyncDir);
+    const asyncDir = join(root, "async-subagent-runs", runId);
+    await mkdir(asyncDir, { recursive: true });
+    if (leaf) {
+      const runFanoutBudget = createRunFanoutBudget(runId, 10);
+      budgetDirectories.push(runFanoutBudget.directory);
+      // 对齐上游 async-execution 的 descriptor 字段与本次生产派发绑定；
+      // required extensions 来自生产 session_start 的全局注册，而非手工补名单。
+      await writeFile(join(asyncDir, "recovery-descriptor.json"), JSON.stringify({
+        version: 1, sourceRunId: runId, agent: leaf.agent, cwd: leaf.cwd ?? hostCwd,
+        systemPromptMode: "append", outputMode: "inline", inheritProjectContext: true,
+        inheritSkills: true, share: false, maxSubagentDepth: 0, runFanoutBudget,
+        requiredExtensions: resolveRequiredChildExtensions(rootSessionId),
+        ...(leaf.extensionBindings ? { extensionBindings: leaf.extensionBindings } : {}),
+      }));
+    }
     const child = spawn(process.execPath, ["-e", "process.stdin.resume()"], { stdio: ["pipe", "ignore", "pipe"] });
     await once(child, "spawn");
     const runnerProcessInstanceId = randomUUID();
@@ -3186,12 +3242,12 @@ async function productionHostFixture(t, singleRepository, options = {}) {
     };
     const rpc = createRpc({
       renew() {},
-      async ping() { return { version: 1, methods: ["spawn", "resume", "status", "stop"], session: { sessionId: rootSessionId, cwd: hostCwd }, capabilities: { asyncSpawn: true, processTerminalProof: true, launchResolvedExtensions: true, runtimeAcknowledgedExtensions: true } }; },
+      async ping() { return { version: 1, methods: ["ping", "spawn", "resume", "status", "stop"], session: { sessionId: rootSessionId, sessionFile: rootSessionId, cwd: hostCwd }, capabilities: { asyncSpawn: true, processTerminalProof: true, launchResolvedExtensions: true, runtimeAcknowledgedExtensions: true } }; },
       async spawn(params) {
         assert.equal(params.cwd, hostCwd, "workflow 使用 Host cwd");
-        const run = await launch();
         const workflowKey = JSON.parse(params.script.match(/runs\.run\(("[^"]+")/)[1]);
         const leaf = JSON.parse(params.script.match(/runs\.run\([^,]+, (.*)\);$/s)[1]);
+        const run = await launch(leaf);
         assert.notEqual(leaf.cwd, hostCwd, "child 使用受管工作区 cwd");
         host.events.emit("subagent:async-started", { ...run, id: run.runId, workflowKey, parentWorkflowRunId: `workflow-${run.runId}` });
         return { details: { runId: `workflow-${run.runId}`, asyncDir: join(root, `workflow-${run.runId}`) } };
@@ -3233,8 +3289,10 @@ async function productionHostFixture(t, singleRepository, options = {}) {
       await close();
     } finally {
       for (const key of envKeys) if (savedEnv[key] === undefined) delete process.env[key]; else process.env[key] = savedEnv[key];
-      if (t.passed) await rm(root, { recursive: true, force: true });
-      else t.diagnostic(`保留 T1 现场 ${root}`);
+      if (t.passed) {
+        await rm(root, { recursive: true, force: true });
+        for (const directory of budgetDirectories) await rm(directory, { recursive: true, force: true });
+      } else t.diagnostic(`保留 T1 现场 ${root}`);
     }
   });
   await boot();
@@ -3355,10 +3413,33 @@ test("T1 production Host 从持久回执选择 typed resume 的同一子仓库",
   await f.handoff;
   const facts = await f.execution.inspect(source);
   assert.equal(facts.recovery, "typed-resume", JSON.stringify(facts));
-  const resumed = await f.execution.resume({ previous: source, dispatchKey: "resume-child", message: "继续完成集成", ctx: f.context, async onBound() {} });
+  let resumed = await f.execution.resume({ previous: source, dispatchKey: "resume-child", message: "继续完成集成", ctx: f.context, async onBound() {} });
   assert.notEqual(resumed.runId, source.runId);
   assert.equal(resumed.workspaceId, source.workspaceId);
   assert.equal(f.receipt(resumed).originRoot, f.repository);
+  f.releaseHandoff();
+  // 旧祖先的直接 receipt 已不存在，仍须沿持久 intent 归一化，并核验当前 owner。
+  await f.finish(resumed.runId);
+  await f.broker.awaitTerminalProofDeliveries();
+  const prior = resumed;
+  assert.equal(f.receipt(source), undefined);
+  const readOwner = f.broker.readOwnerReceipt;
+  f.broker.readOwnerReceipt = async function (runId) {
+    if (runId === prior.runId) throw Object.assign(new Error("测试：当前 owner 暂不可用"), { code: "authority_store_unavailable" });
+    return readOwner.call(this, runId);
+  };
+  const before = f.runners.size;
+  try {
+    const denied = await execute(toolByName(f.host, "subagent_run_resume"), { id: source.runId, message: "从祖先恢复集成" }, f.context);
+    assert.equal(denied.details.code, "RESUME_BINDING_BLOCKED");
+    assert.equal(f.runners.size, before, "owner 不可达不得触发 upstream resume");
+  } finally { f.broker.readOwnerReceipt = readOwner; }
+  const ancestor = await execute(toolByName(f.host, "subagent_run_resume"), { id: source.runId, message: "从祖先恢复集成" }, f.context);
+  assert.equal(ancestor.isError, false, JSON.stringify(ancestor));
+  resumed = { ...source, runId: ancestor.details.runId };
+  assert.notEqual(resumed.runId, prior.runId);
+  assert.equal(f.receipt(resumed).workspaceId, source.workspaceId);
+  assert.equal(f.receipt(resumed).leaseId, workspace.leaseId);
   f.releaseHandoff();
   const admitted = await f.childCall(resumed, { action: "await_admission", queue_item_id: queued.queueItemId });
   await f.childCall(resumed, { action: "publish", queue_item_id: queued.queueItemId, queue_lease_id: admitted.queueLeaseId, candidate_head: f.git(workspace.path, "rev-parse", "HEAD") });

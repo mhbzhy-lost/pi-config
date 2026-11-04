@@ -31,13 +31,10 @@ export function readResumeTargetDescriptor(asyncDir: string): ResumeTargetDescri
 }
 
 /**
- * 判定 descriptor 复活时是否会重放 Root Broker 绑定装配：
- * - extensionBindings 含 `pi-config.root/1` 命名空间（child 装载期要求解析
- *   broker 身份，见 child-extensions/integration-queue.ts 的装载期分支）；
- * - 或 requiredExtensions 含 integration-queue.ts / root-session-owner.ts
- *   （二者均以 broker 身份可用为启用前提）。
- * 命中任一即表示：宿主若不为当次新 run 写入 owner receipt（processBirth 匹配），
- * required 扩展装载必然在 5s 轮询超时后失败。
+ * 判定 descriptor 是否携带 Root Broker 身份绑定。
+ * requiredExtensions 由 Host 全局注册，generic child 同样继承；无 root binding
+ * 时这些扩展依法禁用，扩展名称只能用于诊断，不能证明 managed coding 身份。
+ * root 命名空间一旦存在（包括无效绑定）就必须进入 managed 门禁，不静默放行。
  */
 export function descriptorBrokerBindingReplay(descriptor: any): { replays: boolean; rootBinding: boolean; brokerRequiredExtension: boolean } {
   const bindings = descriptor?.extensionBindings;
@@ -46,7 +43,7 @@ export function descriptorBrokerBindingReplay(descriptor: any): { replays: boole
   const required = Array.isArray(descriptor?.requiredExtensions) ? descriptor.requiredExtensions : [];
   const brokerRequiredExtension = required.some((entry: any) => typeof entry?.path === "string"
     && /(?:^|[/\\])(?:integration-queue|root-session-owner)\.ts$/.test(entry.path));
-  return { replays: rootBinding || brokerRequiredExtension, rootBinding, brokerRequiredExtension };
+  return { replays: rootBinding, rootBinding, brokerRequiredExtension };
 }
 
 function sanitizeTempScopeSegment(value: string): string {

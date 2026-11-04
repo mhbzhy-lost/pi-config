@@ -757,25 +757,27 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
     managedResumeDiagnostic("plan-lineage-resolved", { runId: ref.runId, workspaceId: ref.workspaceId, currentRunId: resolution.run.runId, chain: resolution.chain, superseded: resolution.superseded });
     return resolution;
   };
-  // 归一化不可行时的 fail-closed 判定（缺陷修复规格 B）：复活目标 descriptor 将重放
-  // broker 绑定装配（extensionBindings 含 pi-config.root/1，或 requiredExtensions 含
-  // integration-queue.ts / root-session-owner.ts）即快速失败 RESUME_BINDING_BLOCKED；
-  // 无 broker 绑定装配的非托管目标保持既有静默放行（含跨 scope 复查）。
-  const blockOrPassUnresolvableLineageResume = (sourceRunId: string, lineage: Awaited<ReturnType<typeof resolveManagedResumeLineageOwner>>, note?: string) => {
+  // 归一化不可行时仍保留 managed 身份与未知身份的阻塞；全局 requiredExtensions
+  // 不构成身份。generic owner receipt 也会持久化，不能仅以 owned 判为 coding。
+  const blockOrPassUnresolvableLineageResume = (sourceRunId: string, lineage: Awaited<ReturnType<typeof resolveManagedResumeLineageOwner>>, ownerState: string, note?: string) => {
     const asyncDir = lineage.sourceAsyncDir ?? path.join(resolveAsyncRunsRootDir(), sourceRunId);
     const descriptorRead = readResumeTargetDescriptor(asyncDir);
     const replay = descriptorRead.status === "read" ? descriptorBrokerBindingReplay(descriptorRead.descriptor)
       : { replays: false, rootBinding: false, brokerRequiredExtension: false };
     const currentOwnerRunId = lineage.lineageWorkspaceId !== undefined
       ? lineage.ownedByRoot.find((record: any) => record.workspaceId === lineage.lineageWorkspaceId)?.run?.runId : undefined;
-    if (replay.replays) {
+    const codingBinding = broker?.inspectExecutionProof(sourceRunId);
+    const ownerKnown = ownerState === "owned" || ownerState === "unowned";
+    if (replay.replays || codingBinding || lineage.lineageWorkspaceId !== undefined || !ownerKnown
+        || (ownerState === "owned" && descriptorRead.status !== "read")) {
       managedResumeDiagnostic("managed-resume-binding-blocked", {
         sourceRunId, chain: lineage.chain, asyncDir, descriptorStatus: descriptorRead.status,
         descriptorRootBinding: replay.rootBinding, descriptorBrokerRequiredExtension: replay.brokerRequiredExtension,
+        codingBinding: Boolean(codingBinding), ownerState,
         lineageWorkspaceId: lineage.lineageWorkspaceId, currentOwnerRunId, note,
       });
       throw Object.assign(new Error(
-        `managed resume broker binding blocked: run ${sourceRunId} 不是其 workspace lineage 的当前 owner run（归一化解析未达成${note ? `，${note}` : ""}），且其 recovery descriptor 将重放 Root Broker 绑定装配（${replay.rootBinding ? "extensionBindings 含 pi-config.root/1" : "requiredExtensions 含 broker 绑定扩展"}）；静默放行会使复活 child 在装载期 5s 轮询后以「child broker binding身份未就绪」必然失败。`
+        `managed resume broker binding blocked: run ${sourceRunId} 的 workspace lineage 归一化未达成${note ? `（${note}）` : ""}；存在 Root Broker/workspace 绑定事实或无法确认非托管身份，不能绕过 owner、lease 与 proof 门禁。`
         + (currentOwnerRunId ? `请改用当前 owner run id（${currentOwnerRunId}）重新发起 resume，或放弃续跑改为 fresh 派发新 run。` : "请改用该 lineage 当前 owner run id 重新发起 resume（可经 subagent status 或 workspace 记录查询），或放弃续跑改为 fresh 派发新 run。")
         + (lineage.chain.length > 1 ? `lineage 链：${lineage.chain.join(" -> ")}。` : ""),
       ), { code: "RESUME_BINDING_BLOCKED" });
@@ -1224,6 +1226,14 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
         let bindingOwner = owner;
         let bindingOwnerState = ownerState;
         if (localOwned.length === 0) {
+          // 合法 generic descriptor 不携带 root binding；Broker coding 事实与直接
+          // workspace receipt 均缺位且 owner 查询已成功时，保留 upstream resume。
+          // 不按 agent 名称/cwd 分类，也不把 owner 读取失败当作「无 managed 身份」。
+          const descriptorRead = readResumeTargetDescriptor(path.join(resolveAsyncRunsRootDir(), sourceRunId));
+          if (descriptorRead.status === "read" && !descriptorBrokerBindingReplay(descriptorRead.descriptor).replays
+              && !broker.inspectExecutionProof(sourceRunId) && (ownerState === "owned" || ownerState === "unowned")) {
+            return blockOrPassUnresolvableLineageResume(sourceRunId, { chain: [sourceRunId], ownedByRoot: [] }, ownerState);
+          }
           const lineage = await resolveManagedResumeLineageOwner(sourceRunId);
           if (lineage.resolvedRunId) {
             try {
@@ -1240,10 +1250,10 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
               managedResumeDiagnostic("managed-resume-lineage-owner-unavailable", {
                 sourceRunId, resolvedRunId: lineage.resolvedRunId, chain: lineage.chain, error, cause: (error as any)?.cause,
               });
-              return blockOrPassUnresolvableLineageResume(sourceRunId, lineage, "归一化命中的 owner run 无当前 authority receipt");
+              return blockOrPassUnresolvableLineageResume(sourceRunId, lineage, ownerState, "归一化命中的 owner run 无当前 authority receipt");
             }
           } else {
-            return blockOrPassUnresolvableLineageResume(sourceRunId, lineage);
+            return blockOrPassUnresolvableLineageResume(sourceRunId, lineage, ownerState);
           }
         }
         const { record: selected, context: coordinatorRuntime } = await selectReceipt(bindingRunId);
