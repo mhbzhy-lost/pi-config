@@ -98,6 +98,8 @@ export type TaskState = {
   terminalProofRef: string | null;
   integrationReceiptRef: string | null;
   blocker: string | null;
+  /** 按 resume 血缘重绑时被取代的旧 runId（追加去重的审计线索）；旧快照无此字段时为 undefined。 */
+  supersededRunIds?: string[];
 };
 
 /** 业务状态快照（session custom entry 内容）。 */

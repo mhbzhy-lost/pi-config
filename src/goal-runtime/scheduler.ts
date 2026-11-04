@@ -4,7 +4,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import type { ExtensionToolContext } from "@earendil-works/pi-coding-agent";
-import type { PlanExecutionService, PlanRunFacts, PlanRunRef } from "pi-subagents-enhanced/execution";
+import type { PlanExecutionService, PlanLineageResolution, PlanRunFacts, PlanRunRef } from "pi-subagents-enhanced/execution";
 import {
   decodePlanContract, hashPlanContract, readPlanContract,
   type CaptureSubject, type CheckReceipt, type GoalCheckpoint, type GoalState,
@@ -58,6 +58,30 @@ function sameRun(a: PlanRunRef | null, b: PlanRunRef | null): boolean {
 function factFor(task: TaskState, facts: RunFacts): PlanRunFacts | undefined {
   const fact = task.run && facts[task.run.runId];
   return fact && sameRun(task.run, fact.run) ? fact : undefined;
+}
+/**
+ * 可选血缘解析：服务未实现 lineage、解析抛错或不可达时一律返回 null（fail-closed，维持现状 blocked）。
+ * scheduler 无独立日志通道；异常吞掉后不解读 blocker 文案，重绑只由返回的持久血缘证据授权。
+ */
+async function resolveLineageRun(execution: PlanExecutionService, ref: PlanRunRef): Promise<PlanLineageResolution | null> {
+  if (typeof execution.lineage !== "function") return null;
+  try {
+    return await execution.lineage(ref);
+  } catch {
+    return null;
+  }
+}
+/**
+ * 按 resume 血缘把 task.run 重绑至最终 run：attempt/dispatchKey/workspaceId 不变，
+ * 旧 runId 追加进 supersededRunIds（去重）作为审计线索。
+ */
+function rebindTaskRun(state: GoalState, taskId: string, run: PlanRunRef): GoalState {
+  const task = state.tasks[taskId]!;
+  const previousRunIds = task.supersededRunIds ?? [];
+  const supersededRunIds = task.run && !previousRunIds.includes(task.run.runId)
+    ? [...previousRunIds, task.run.runId]
+    : previousRunIds;
+  return { ...state, tasks: { ...state.tasks, [taskId]: { ...task, run, supersededRunIds } } };
 }
 function provedTerminal(fact: PlanRunFacts): boolean {
   return (fact.terminal === "succeeded" || fact.terminal === "failed") && !!fact.terminalProofRef;
@@ -359,8 +383,13 @@ export function createGoalRuntime(input: CreateGoalRuntimeInput) {
           }
           continue;
         }
-        const fact = await execution.inspect(task.run);
-        if (!sameRun(task.run, fact.run) || !closed(fact)) {
+        // 前置血缘重绑（仅内存态，本函数不持久化——计划即将被整体替换）：
+        // 旧 run 被 resume 血缘取代时按最终 run 判闭合；解析失败/未取代时仍按原 run 判。
+        let run = task.run;
+        const resolution = await resolveLineageRun(execution, run);
+        if (resolution?.superseded) run = resolution.run;
+        const fact = await execution.inspect(run);
+        if (!sameRun(run, fact.run) || !closed(fact)) {
           reject("GOAL_CANCELLED_REPLACEMENT_REQUIRED", "取消计划仍有未闭合运行或资源；须先经 typed 路径处置" + ";" + REPLACEMENT_BLOCKED_GUIDANCE);
         }
       }
@@ -389,6 +418,22 @@ export function createGoalRuntime(input: CreateGoalRuntimeInput) {
         try {
           const fact = await execution.inspect(previous.run);
           if (!sameRun(previous.run, fact.run)) reject("RUN_IDENTITY_MISMATCH", "adapter facts 与请求 run 身份不符");
+          // 血缘重绑：仅降级 facts（terminal unknown 且存在 blocker）触发；解析失败、未取代或服务缺失时维持现状 blocked。
+          if (fact.terminal === "unknown" && fact.blocker !== null) {
+            const resolution = await resolveLineageRun(execution, previous.run);
+            if (resolution?.superseded) {
+              // 经既有 change()/assertTask 串行化路径持久化重绑；本轮 previous 基线同步为最终 run，
+              // 否则 apply 的 previous.run 身份守卫会跳过本轮投影（首轮审阅 S5）。
+              const rebound = await change(baseline, current => {
+                assertTask(current, baseline, task.id);
+                return rebindTaskRun(current, task.id, resolution.run);
+              });
+              const reboundTask = rebound.tasks[task.id]!;
+              const finalFact = await execution.inspect(reboundTask.run!);
+              if (!sameRun(reboundTask.run!, finalFact.run)) reject("RUN_IDENTITY_MISMATCH", "adapter facts 与请求 run 身份不符");
+              return { taskId: task.id, previous: reboundTask, fact: finalFact };
+            }
+          }
           return { taskId: task.id, previous, fact };
         } catch {
           return { taskId: task.id, previous, fact: undefined };
@@ -579,19 +624,30 @@ export function createGoalRuntime(input: CreateGoalRuntimeInput) {
       if (!task) reject("UNKNOWN_TASK", "不得新增或替换原合同中的任务");
       await assertContract(baseline);
       // 不在准入期间 refresh 写 revision；只取当前 attempt 的权威事实并重核版本。
-      const previous = baseline.tasks[taskId]!;
-      if (!previous.run) reject("UNKNOWN_DISPATCH", "原 attempt 无权威绑定，禁止 retry");
-      const fact = await execution.inspect(previous.run);
-      if (!sameRun(fact.run, previous.run)) reject("RUN_IDENTITY_MISMATCH", "原 attempt 的 facts 身份不符");
-      if (read().revision !== expectedRevision) reject("REVISION_CONFLICT", "准入期间 revision 已变化");
+      let run = baseline.tasks[taskId]!.run;
+      if (!run) reject("UNKNOWN_DISPATCH", "原 attempt 无权威绑定，禁止 retry");
+      // 前置血缘重绑：旧 run 已被 resume 血缘取代时，先经 change() 持久化重绑至最终 run 再取权威事实。
+      let revision = expectedRevision;
+      const resolution = await resolveLineageRun(execution, run);
+      if (resolution?.superseded) {
+        run = (await change(baseline, current => {
+          assertTask(current, baseline, taskId);
+          return rebindTaskRun(current, taskId, resolution.run);
+        })).tasks[taskId]!.run!;
+        // 本函数自身的一次已知写入计入准入版本；其余外部变化仍按 REVISION_CONFLICT 拒绝。
+        revision += 1;
+      }
+      const fact = await execution.inspect(run);
+      if (!sameRun(fact.run, run)) reject("RUN_IDENTITY_MISMATCH", "原 attempt 的 facts 身份不符");
+      if (read().revision !== revision) reject("REVISION_CONFLICT", "准入期间 revision 已变化");
       assertTask(read(), baseline, taskId);
-      facts[previous.run.runId] = fact;
-      const route = retryRoute(baseline, task, facts);
+      facts[run.runId] = fact;
+      const route = retryRoute({ ...baseline, tasks: { ...baseline.tasks, [taskId]: { ...baseline.tasks[taskId]!, run } } }, task, facts);
       if (!route) reject("RETRY_NOT_ADMITTED", "既无失败 check 的合法修复路径，也无可合法恢复的权威失败 attempt");
       if (Object.values(baseline.tasks).some(t => t.status === "verifying")) reject("VERIFICATION_ACTIVE", "验证期间不得启动修复任务");
       if (!fits(baseline, task, resourceUsage(baseline, facts, taskId), maxConcurrentTasks)) reject("RESOURCE_CAPACITY", "修复所需计划资源容量不足");
       store.assertWritable();
-      return dispatch(taskId, ctx, route, message, expectedRevision);
+      return dispatch(taskId, ctx, route, message, revision);
     });
   }
 

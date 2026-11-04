@@ -326,6 +326,7 @@ const TASK_KEYS = [
   "terminalProofRef",
   "integrationReceiptRef",
   "blocker",
+  "supersededRunIds",
 ] as const;
 const RUN_KEYS = ["runId", "workspaceId", "rootSessionId"] as const;
 const RECEIPT_KEYS = [
@@ -452,7 +453,7 @@ function decodeCheckpoint(value: unknown, keypath: string): GoalCheckpoint {
 
 function decodeTaskState(value: unknown, keypath: string): TaskState {
   const record = plainObject(value, keypath);
-  exactKeys(record, TASK_KEYS, keypath);
+  exactKeys(record, TASK_KEYS, keypath, ["supersededRunIds"]);
   let run: TaskState["run"] = null;
   if (record.run !== null) {
     const runRecord = plainObject(record.run, `${keypath}.run`);
@@ -463,7 +464,7 @@ function decodeTaskState(value: unknown, keypath: string): TaskState {
       rootSessionId: text(runRecord.rootSessionId, `${keypath}.run.rootSessionId`, MAX_ID_BYTES),
     };
   }
-  return {
+  const task: TaskState = {
     status: enumText(record.status, `${keypath}.status`, TASK_STATUSES),
     attempt: integer(record.attempt, `${keypath}.attempt`, 0),
     dispatchKey: nullableText(record.dispatchKey, `${keypath}.dispatchKey`),
@@ -473,6 +474,11 @@ function decodeTaskState(value: unknown, keypath: string): TaskState {
     integrationReceiptRef: nullableText(record.integrationReceiptRef, `${keypath}.integrationReceiptRef`),
     blocker: nullableText(record.blocker, `${keypath}.blocker`),
   };
+  // 可选审计字段：旧快照无此键时解码为 undefined（不报未知字段），存在时必须是 string[]。
+  if (record.supersededRunIds !== undefined) {
+    task.supersededRunIds = stringList(record.supersededRunIds, `${keypath}.supersededRunIds`);
+  }
+  return task;
 }
 
 /**
