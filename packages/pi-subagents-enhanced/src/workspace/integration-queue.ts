@@ -271,9 +271,39 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
   const receiptEventFiles = () => ledger.read<string[]>(receiptEventIndexFile, []).filter((name) => ledger.exists(name));
   const receiptEventLoad = (name: string) => ledger.read<any>(name, null);
   const loadReceiptEventsUnlocked = () => receiptEventFiles().map(receiptEventLoad).filter(Boolean);
+  const terminalReceiptStates = ["completed", "preserved", "cancelled"] as const;
+  const receiptEventName = (queueItemId: string, state: string) => `receipt-event-${queueItemId}:${state}.json`;
+  function assertReceiptEventMatchesItem(event: any, item: any, state: IntegrationReceiptEvent["state"]) {
+    if (!event || event.version !== INTEGRATION_RECEIPT_EVENT_VERSION || event.eventId !== `${item.queueItemId}:${state}`
+        || event.queueItemId !== item.queueItemId || event.workspaceId !== item.workspaceId || event.leaseId !== item.leaseId
+        || event.repositoryId !== item.repositoryId || event.attempt !== item.attempt
+        || event.childRunId !== (typeof item.childRunId === "string" ? item.childRunId : null)
+        || event.state !== state || event.revision !== item.revision || event.ownerScope?.kind !== item.ownerScope?.kind
+        || event.ownerScope?.rootSessionId !== item.ownerScope?.rootSessionId
+        || !event.delivery || !["pending", "delivered", "debt"].includes(event.delivery.state)
+        || !Number.isSafeInteger(event.delivery.attempts) || event.delivery.attempts < 0) throw new Error("receipt event identity or delivery is invalid");
+    return event;
+  }
+  function findReceiptEventForItemUnlocked(item: any, state: IntegrationReceiptEvent["state"]) {
+    const name = receiptEventName(item.queueItemId, state);
+    if (ledger.exists(name)) return assertReceiptEventMatchesItem(receiptEventLoad(name), item, state);
+    const indexed = loadReceiptEventsUnlocked().find((entry) => entry.eventId === `${item.queueItemId}:${state}`) ?? null;
+    return indexed ? assertReceiptEventMatchesItem(indexed, item, state) : null;
+  }
+  function reconcileReceiptEventsUnlocked() {
+    for (const item of listQueue()) {
+      if (!terminalReceiptStates.includes(item.state)) continue;
+      appendReceiptEventUnlocked(item, item.state);
+    }
+  }
   function listReceiptEvents(ownerRootSessionId?: string) {
-    const events = loadReceiptEventsUnlocked().map((entry) => structuredClone(entry));
-    return ownerRootSessionId === undefined ? events : events.filter((entry) => entry.ownerScope?.rootSessionId === ownerRootSessionId);
+    return ledger.withLock(() => {
+      // queue item 是终态事实；读取入口在同一 ledger 锁内补齐终态事件，覆盖
+      // queue 写入后 event/index 任一写入中断。非法孤立事件保持 fail-closed。
+      reconcileReceiptEventsUnlocked();
+      const events = loadReceiptEventsUnlocked().map((entry) => structuredClone(entry));
+      return ownerRootSessionId === undefined ? events : events.filter((entry) => entry.ownerScope?.rootSessionId === ownerRootSessionId);
+    });
   }
   // 按 owner 过滤且只含 pending 的回执事件读取（计划 T4，queue.receipt-events 消费）：
   // delivered 已完成 at-least-once 送达、debt 为 child-run 不可用终态，均不再返回。
@@ -303,11 +333,16 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
     });
   }
   // 仅可在 ledger.withLock 临界区内调用；只追加事件，不改变任何既有终态写入行为。
-  function appendReceiptEventUnlocked(item: any, state: string) {
-    if (state !== "completed" && state !== "preserved" && state !== "cancelled") return null;
+  function appendReceiptEventUnlocked(item: any, state: IntegrationReceiptEvent["state"]) {
+    if (!terminalReceiptStates.includes(state)) return null;
     const eventId = `${item.queueItemId}:${state}`;
-    const existing = loadReceiptEventsUnlocked().find((entry) => entry.eventId === eventId);
-    if (existing) return structuredClone(existing);
+    const name = receiptEventName(item.queueItemId, state);
+    const existing = findReceiptEventForItemUnlocked(item, state);
+    if (existing) {
+      const names = receiptEventFiles();
+      if (!names.includes(name)) ledger.write(receiptEventIndexFile, [...names, name]);
+      return structuredClone(existing);
+    }
     const now = new Date().toISOString();
     const settledAt = state === "completed" ? { completedAt: typeof item.completedAt === "string" ? item.completedAt : now }
       : state === "preserved" ? { preservedAt: typeof item.preservedAt === "string" ? item.preservedAt : now }
@@ -321,7 +356,6 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
       ...(typeof item.workspaceDispositionReceiptId === "string" ? { workspaceDispositionReceiptId: item.workspaceDispositionReceiptId } : {}),
       ...settledAt,
       delivery: { state: "pending", attempts: 0 } };
-    const name = `receipt-event-${eventId}.json`;
     ledger.write(name, event);
     const names = receiptEventFiles();
     if (!names.includes(name)) ledger.write(receiptEventIndexFile, [...names, name]);
@@ -563,7 +597,7 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
       return structuredClone(next);
     });
   }
-  function transition(receipt: any, state: string) { return ledger.withLock(() => { const current = load(`${id(receipt.queueItemId, "queueItemId")}.json`); const allowed = state === "preserved" ? ["admitted", "rebasing", "resolving-conflict", "prepared", "blocked"] : ["admitted"]; if (!current || !allowed.includes(current.state) || current.queueLeaseId !== receipt.queueLeaseId || current.revision !== receipt.revision) throw new Error("queue lease or revision mismatch"); const next = { ...current, state, revision: current.revision + 1 }; save(`${current.queueItemId}.json`, next); appendReceiptEventUnlocked(next, state); return structuredClone(next); }); }
+  function transition(receipt: any, state: IntegrationReceiptEvent["state"]) { return ledger.withLock(() => { const current = load(`${id(receipt.queueItemId, "queueItemId")}.json`); const allowed = state === "preserved" ? ["admitted", "rebasing", "resolving-conflict", "prepared", "blocked"] : ["admitted"]; if (!current || !allowed.includes(current.state) || current.queueLeaseId !== receipt.queueLeaseId || current.revision !== receipt.revision) throw new Error("queue lease or revision mismatch"); const next = { ...current, state, revision: current.revision + 1 }; save(`${current.queueItemId}.json`, next); appendReceiptEventUnlocked(next, state); return structuredClone(next); }); }
   function recoverClaims(instanceIdentity: any) { return ledger.withLock(() => { const recovered: any[] = []; for (const current of listQueue()) if (current.state === "admitted" && current.daemonClaim && current.daemonClaim.instanceId === instanceIdentity.instanceId) {
     const status = processAliveStatus(instanceIdentity.pid ?? current.daemonClaim.pid, instanceIdentity.birthIdentity ?? current.daemonClaim.birthIdentity);
     if (status.state === "undetermined") diagnose({ version: 1, phase: "integration-queue-owner-liveness-undetermined", state: status.state, error: status.error, cause: (status.error as any)?.cause, errno: status.errno, instanceId: instanceIdentity.instanceId });

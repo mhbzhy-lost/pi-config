@@ -71,6 +71,14 @@ test("completePrepared 落 completed 回执事件：字段完备、索引与事�
   const persisted = JSON.parse(await readFile(path.join(queueDir(root), `receipt-event-${event.eventId}.json`), "utf8"));
   assert.deepEqual(persisted, event);
 
+  // 受控中断：真实 public queue 已写入终态后丢失 event/index；重开读取从权威 queue item 补齐。
+  await rm(path.join(queueDir(root), `receipt-event-${event.eventId}.json`), { force: true });
+  await rm(path.join(queueDir(root), "queue-receipt-events.json"), { force: true });
+  const reopened = createIntegrationQueue({ stateRoot: root, repositoryId });
+  const recovered = reopened.listReceiptEvents();
+  assert.equal(recovered.length, 1);
+  assert.deepEqual(recovered[0], event);
+
   // 既有行为不变：active resume intent 在同一锁内关闭；完成即推进 FIFO；
   // 队列项记录不含回执事件字段。
   assert.equal(queue.listResumeIntents()[0].state, "completed");
@@ -84,7 +92,7 @@ test("completePrepared 落 completed 回执事件：字段完备、索引与事�
   assert.equal(queue.listReceiptEvents().length, 1);
 }));
 
-test("preserveByBinding 落 preserved 回执事件，重复终态写入不产生第二事件", async () => withQueue(async ({ queue }) => {
+test("preserveByBinding 落 preserved 回执事件，重复终态写入不产生第二事件", async () => withQueue(async ({ root, queue }) => {
   const enqueued = queue.enqueueIntegration(item("ws-1", { childRunId: "run-ws-1" }));
   const binding = { workspaceId: "ws-1", leaseId: sha("lease-ws-1"), runId: "run-ws-1", ownerScope: { kind: "standalone-subagent", rootSessionId: "root-1" } };
   const preserved = queue.preserveByBinding(binding, "child exited before integration");
@@ -106,6 +114,16 @@ test("preserveByBinding 落 preserved 回执事件，重复终态写入不产生
   assert.ok(!("candidateHead" in event) && !("integrationIntentId" in event) && !("workspaceDispositionReceiptId" in event) && !("completedAt" in event) && !("cancelledAt" in event));
   assert.deepEqual(event.delivery, { state: "pending", attempts: 0 });
 
+  // 受控中断：保留真实终态 event 文件但丢失索引；重开读取补索引并保留 delivery。
+  queue.markReceiptEventDelivery({ eventIds: [event.eventId], state: "delivered", reason: "host execution facts notified" });
+  await rm(path.join(queueDir(root), "queue-receipt-events.json"), { force: true });
+  const reopened = createIntegrationQueue({ stateRoot: root, repositoryId });
+  const recovered = reopened.listReceiptEvents();
+  assert.equal(recovered.length, 1);
+  assert.equal(recovered[0].delivery.state, "delivered");
+  assert.equal(recovered[0].delivery.attempts, 1);
+  assert.deepEqual(JSON.parse(await readFile(path.join(queueDir(root), "queue-receipt-events.json"), "utf8")), [`receipt-event-${event.eventId}.json`]);
+
   // 幂等：重复 preserveByBinding 是既有幂等 no-op，不产生第二事件，也不改队列项。
   const replay = queue.preserveByBinding(binding, "child exited before integration");
   assert.equal(replay.revision, preserved.revision);
@@ -113,7 +131,7 @@ test("preserveByBinding 落 preserved 回执事件，重复终态写入不产生
   assert.deepEqual(queue.getItem(enqueued.queueItemId), preserved);
 }));
 
-test("cancelItem/completeItem/failItem（transition）各落回执事件；未绑定 child 的 cancelled 事件 childRunId 为 null", async () => withQueue(async ({ queue }) => {
+test("cancelItem/completeItem/failItem（transition）各落回执事件；未绑定 child 的 cancelled 事件 childRunId 为 null", async () => withQueue(async ({ root, queue }) => {
   queue.enqueueIntegration(item("ws-1"));
   queue.enqueueIntegration(item("ws-2", { childRunId: "run-ws-2" }));
   queue.enqueueIntegration(item("ws-3", { childRunId: "run-ws-3" }));
@@ -141,6 +159,11 @@ test("cancelItem/completeItem/failItem（transition）各落回执事件；未�
   assert.equal(preserved.state, "preserved");
 
   events = queue.listReceiptEvents();
+  assert.equal(events.length, 3);
+  await rm(path.join(queueDir(root), `receipt-event-${events[0].eventId}.json`), { force: true });
+  await rm(path.join(queueDir(root), "queue-receipt-events.json"), { force: true });
+  const reopened = createIntegrationQueue({ stateRoot: root, repositoryId });
+  events = reopened.listReceiptEvents();
   assert.equal(events.length, 3);
   assert.deepEqual(events.map((entry) => `${entry.queueItemId}:${entry.state}`),
     [`${first.queueItemId}:cancelled`, `${second.queueItemId}:completed`, `${third.queueItemId}:preserved`]);
