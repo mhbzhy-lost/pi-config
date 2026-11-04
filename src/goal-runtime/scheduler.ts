@@ -283,7 +283,7 @@ export function createGoalRuntime(input: CreateGoalRuntimeInput) {
   const maxConcurrentTasks = positive(input.maxConcurrentTasks ?? 2);
   const maxNoProgressTurns = positive(input.maxNoProgressTurns ?? 3);
   const facts: Record<string, PlanRunFacts> = {};
-  let operation: "advance" | "retry" | "verify" | null = null;
+  let operation: "advance" | "retry" | "verify" | "force-close" | null = null;
   let writes: Promise<unknown> = Promise.resolve();
   let refreshFlight: Promise<RunFacts> | null = null;
 
@@ -405,6 +405,88 @@ export function createGoalRuntime(input: CreateGoalRuntimeInput) {
       });
       for (const runId of Object.keys(facts)) delete facts[runId];
       return state;
+    });
+  }
+
+  /** force-close 的两种模式：verified=核实型（plan_force_close typed 工具入口）；manual=盲闭合（/plan force-close 人工确认后）。 */
+  async function forceCloseTasks(opts: { mode: "verified" | "manual" }): Promise<GoalState> {
+    return exclusive("force-close", async () => {
+      store.assertWritable();
+      if (refreshFlight) await refreshFlight;
+      await writes;
+      const baseline = read();
+      if (baseline.status !== "cancelled") reject("GOAL_NOT_CANCELLED", "强制闭合仅适用于已取消计划；先经 /plan cancel 取消");
+      const closedAt = new Date().toISOString();
+      if (opts.mode === "verified") {
+        // 模式 A（核实型）：逐任务按 resume 血缘重绑后 inspect(最终 run) 必须 closed；
+        // 任一任务不满足即整体拒绝，绝不部分写入。
+        const verified: Array<{ taskId: string; finalRun: PlanRunRef }> = [];
+        const unclosed: string[] = [];
+        for (const task of baseline.contract.tasks) {
+          const current = baseline.tasks[task.id]!;
+          if (!current.run) {
+            if (current.dispatchKey || current.workspaceId || current.status === "running") {
+              unclosed.push(`${task.id}（无 run 绑定）: 存在未绑定 run 的启动 intent/workspace，无权威事实可核实`);
+            }
+            continue;
+          }
+          let run = current.run;
+          const resolution = await resolveLineageRun(execution, run);
+          if (resolution?.superseded) run = resolution.run;
+          const describe = (reason: string) => `${task.id}（run ${run.runId}）: ${reason}`;
+          let fact: PlanRunFacts;
+          try { fact = await execution.inspect(run); }
+          catch (error) {
+            unclosed.push(describe(`权威事实读取失败：${error instanceof Error ? error.message : String(error)}`));
+            continue;
+          }
+          if (!sameRun(run, fact.run)) {
+            unclosed.push(describe("最终 run 的 facts 身份不符，拒绝采纳"));
+            continue;
+          }
+          if (!closed(fact)) {
+            unclosed.push(describe(`未闭合：terminal=${fact.terminal}、integration=${fact.integration}`
+              + `、workspaceState=${fact.workspaceState}、recovery=${fact.recovery}${fact.blocker ? `、blocker=${fact.blocker}` : ""}`));
+            continue;
+          }
+          verified.push({ taskId: task.id, finalRun: run });
+        }
+        if (unclosed.length) {
+          reject("FORCE_CLOSE_VERIFICATION_FAILED", `核实型强制闭合被拒，未做任何写入：${unclosed.join("；")}`
+            + "；如确已人工核实闭合，请改走 /plan force-close（人工断言闭合）");
+        }
+        // 全部通过：经 change() 持久化重绑（仅 superseded 任务）并留 checkpoint 审计痕。
+        return change(baseline, state => {
+          let next = state;
+          for (const { taskId, finalRun } of verified) {
+            if (!sameRun(state.tasks[taskId]!.run, finalRun)) next = rebindTaskRun(next, taskId, finalRun);
+          }
+          return { ...next, checkpoint: {
+            decisions: [`force-close verified: closedAt=${closedAt} planId=${baseline.planId}`,
+              ...verified.map(({ taskId, finalRun }) => `task ${taskId} 最终 runId=${finalRun.runId}`)],
+            sourceRefs: [],
+            nextAction: "核实型强制闭合已完成并留痕；重新 plan_execute 绑定新计划",
+          } };
+        });
+      }
+      // 模式 B（盲闭合）：人工确认后置空全部 run/intent/workspace 引用；proof/receipt 保留原值，
+      // 历史条目不删，仅经 change() 追加。
+      return change(baseline, state => {
+        const tasks = { ...state.tasks };
+        for (const task of state.contract.tasks) {
+          const current = tasks[task.id]!;
+          const settled = current.status === "accepted" || current.status === "blocked";
+          tasks[task.id] = { ...current, run: null, dispatchKey: null, workspaceId: null,
+            status: settled ? current.status : "blocked",
+            blocker: settled ? current.blocker : "FORCE_CLOSED_BY_ADMIN" };
+        }
+        return { ...state, tasks, checkpoint: {
+          decisions: [`force-close manual: closedAt=${closedAt} planId=${baseline.planId}`,
+            ...state.contract.tasks.map(task => `task ${task.id} run/intent/workspace 引用已人工断言闭合并置空`)],
+          sourceRefs: [],
+          nextAction: "人工盲闭合已完成并留痕；重新 plan_execute 绑定新计划",
+        } };
+      });
     });
   }
 
@@ -765,7 +847,7 @@ export function createGoalRuntime(input: CreateGoalRuntimeInput) {
         pauseReason: noProgressTurns >= maxNoProgressTurns ? "连续自动推进无有效进展，保留未完成状态并等待诊断" : current.pauseReason };
     });
   }
-  return { activate, replaceCancelled, advance, refreshRuns, retryTask, verify, recordCheckpoint, recordProgressTurn,
+  return { activate, replaceCancelled, advance, refreshRuns, retryTask, verify, recordCheckpoint, recordProgressTurn, forceCloseTasks,
     readFacts: (): RunFacts => ({ ...facts }),
     nextAction: (): NextAction => decideNextAction(read(), facts, maxConcurrentTasks) };
 }

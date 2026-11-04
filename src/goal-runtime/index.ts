@@ -33,6 +33,9 @@ export const PLAN_TOOL_PARAMETERS = {
     task_id: Type.String({ minLength: 1 }), message: Type.String({ minLength: 1, pattern: "\\S" }),
     expected_revision: Type.Integer({ minimum: 0 }),
   }, { additionalProperties: false }),
+  plan_force_close: Type.Object({
+    force_confirm: Type.String({ minLength: 1 }),
+  }, { additionalProperties: false }),
   plan_verify: Type.Object({
     check_ids: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, uniqueItems: true })),
   }, { additionalProperties: false }),
@@ -442,6 +445,21 @@ export function installGoalRuntime(pi: ExtensionAPI, options: InstallGoalRuntime
     }); },
   });
 
+  pi.registerTool({
+    name: "plan_force_close", label: "plan_force_close", parameters: PLAN_TOOL_PARAMETERS.plan_force_close,
+    exposure: "model-only", executionMode: "sequential",
+    description: "仅核实型闭合，核实不通过时拒绝；人工断言闭合使用 /plan force-close。以 force_confirm 精确匹配当前 planId 确认对已取消计划逐任务按 resume 血缘重绑最终 run 并核实 closed，全部通过后持久化重绑与 checkpoint 留痕。",
+    async execute(_id, params, _signal, _onUpdate, ctx) { return runTool(async () => {
+      const session = await toolSession(ctx);
+      const state = session.store.read();
+      if (!state) fail("NO_GOAL_STATE", "当前会话没有已绑定计划");
+      if (params.force_confirm !== state.planId) fail("FORCE_CLOSE_CONFIRM_MISMATCH", "force_confirm 必须精确等于当前 planId，以确认强制闭合对象");
+      await session.runtime!.forceCloseTasks({ mode: "verified" });
+      assertCurrent(session, ctx);
+      return status(session);
+    }); },
+  });
+
   pi.on("session_start", (_event, ctx) => start(ctx));
   pi.on("session_shutdown", () => dispose());
   pi.on("agent_start", (_event, ctx) => {
@@ -492,7 +510,14 @@ export function installGoalRuntime(pi: ExtensionAPI, options: InstallGoalRuntime
     if (event.aborted) session.suspended = true;
   });
 
-  const bridge = { getSession: () => current, isCurrent, assertCurrent, start, dispose, reconcile, attachExecution, status };
+  async function forceClose(session: GoalRuntimeSession) {
+    assertCurrent(session);
+    session.store.assertWritable();
+    if (!session.runtime) attachExecution(session);
+    return session.runtime!.forceCloseTasks({ mode: "manual" });
+  }
+
+  const bridge = { getSession: () => current, isCurrent, assertCurrent, start, dispose, reconcile, attachExecution, status, forceClose };
   installGoalContinuity(pi, bridge);
   return bridge;
 }

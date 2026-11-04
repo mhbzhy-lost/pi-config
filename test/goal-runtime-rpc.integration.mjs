@@ -10,7 +10,7 @@ import { resolvePiCodingAgentRoot } from './helpers/pi-runtime.mjs';
 const repo = resolve(import.meta.dirname, '..');
 const hostRoot = resolvePiCodingAgentRoot();
 const moduleUrl = path => pathToFileURL(join(repo, path)).href;
-const names = ['plan_checkpoint', 'plan_execute', 'plan_retry', 'plan_status', 'plan_verify'];
+const names = ['plan_checkpoint', 'plan_execute', 'plan_force_close', 'plan_retry', 'plan_status', 'plan_verify'];
 
 // 沿用 joint-upgrade RPC 的受限 env 和官方 runRpcMode，合成模型复用 openJointSession。
 // Pi 1.4 RPC 没有 get_tools/execute_tool；测试命令只投影实际 registry，不虚构协议方法。

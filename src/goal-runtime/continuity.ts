@@ -10,6 +10,8 @@ export type GoalContinuityRuntime = {
   start(ctx: ExtensionContext, checkGate?: boolean): Promise<void>;
   attachExecution(session: GoalRuntimeSession): void;
   reconcile(session: GoalRuntimeSession): Promise<void>;
+  /** 人工确认后的盲闭合入口（模式 B）；仅取消实例，留 checkpoint 痕。 */
+  forceClose(session: GoalRuntimeSession): Promise<unknown>;
   status(session: GoalRuntimeSession): unknown;
 };
 
@@ -164,7 +166,7 @@ export function installGoalContinuity(pi: ExtensionAPI, runtime: GoalContinuityR
   }
 
   pi.registerCommand("plan", {
-    description: "控制已激活计划：/plan pause | resume | cancel | status；取消不停止 child 或清理资源。",
+    description: "控制已激活计划：/plan pause | resume | cancel | force-close | status；取消不停止 child 或清理资源。",
     async handler(args, ctx) {
       const session = await sessionFor(ctx);
       if (!session) return;
@@ -180,7 +182,14 @@ export function installGoalContinuity(pi: ExtensionAPI, runtime: GoalContinuityR
           await control(session, "active", null);
           notifyResumeNonActionable(session, ctx);
         }
-        else { ctx.ui.notify("用法：/plan pause | resume | cancel | status", "warning"); return; }
+        else if (command === "force-close") {
+          // 人工断言闭合：拒绝即中止，不产生任何写入；确认后走盲闭合（模式 B）。
+          const confirmed = await ctx.ui.confirm("Goal force-close",
+            "将对已取消计划执行人工强制闭合（跳过自动核实，不可回滚）。继续？");
+          if (!confirmed) return;
+          await runtime.forceClose(session);
+        }
+        else { ctx.ui.notify("用法：/plan pause | resume | cancel | force-close | status", "warning"); return; }
         runtime.assertCurrent(session, ctx);
         ctx.ui.notify(JSON.stringify(runtime.status(session), null, 2), "info");
       } catch (error) {

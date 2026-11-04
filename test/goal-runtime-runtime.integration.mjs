@@ -16,7 +16,7 @@ import { createGoalRuntime, resourceUsage } from '../src/goal-runtime/scheduler.
 import { hashPlanContract } from '../src/goal-runtime/contract.ts';
 import { createTypedSubagentExtension } from '../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts';
 
-const tools = ['plan_checkpoint', 'plan_execute', 'plan_retry', 'plan_status', 'plan_verify'];
+const tools = ['plan_checkpoint', 'plan_execute', 'plan_force_close', 'plan_retry', 'plan_status', 'plan_verify'];
 const config = { enabled: true, maxConcurrentTasks: 2, maxNoProgressTurns: 3 };
 function contract({ ids = ['A'], taskChecks = true, fail = false, capacity = 2 } = {}) {
   return { schema: 'goal-runtime.plan.v1', objective: '隔离 Host 验证', constraints: ['只能修改声明路径', '不得访问真实凭据', '检查只读'],
