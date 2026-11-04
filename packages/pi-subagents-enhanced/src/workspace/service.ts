@@ -13,6 +13,7 @@ import {
   managedWorkspaceSnapshotHash,
   releaseManagedGitWorkspace,
   assertManagedWorkspaceWritePaths,
+  invalidManagedWritePathReason,
   publishWorkspaceSnapshot,
   applyPublishedArtifact,
   fastForwardManagedGitWorkspace,
@@ -39,12 +40,12 @@ type ServiceFault = (event: { operation: string; phase: string; workspaceId: str
 type IntegrationBinding = { workspaceId: string; leaseId: string; runId: string; ownerScope: WorkspaceOwnerScope };
 type IntegrationFallback = {
   blockedReasons: (binding: IntegrationBinding) => string[];
-  execute: (binding: IntegrationBinding, proof: TerminalProof) => unknown;
+  execute: (binding: IntegrationBinding, proof: TerminalProof, additionalWritePaths?: readonly string[]) => unknown;
 };
 type ServiceOptions = { stateRoot?: string; storageRepositoryId?: string; terminalProofProvider?: (input: { workspaceId: string; run: unknown }) => unknown; fault?: ServiceFault; admissionProbe?: () => void; diagnosticSink?: (entry: unknown) => void; integrationFallback?: IntegrationFallback };
 export type WorkspaceOwnerScope = Readonly<{ kind: "standalone-subagent"; rootSessionId: string }>;
 type StatusInput = { workspaceId?: string; terminalProof?: unknown; expectedHead?: string };
-type DisposeInput = StatusInput & { disposition?: "integrate" | "discard" | "preserve"; strategy?: "cherry-pick" | "merge" | "rebase-ff"; reason?: string; actionToken?: string };
+type DisposeInput = StatusInput & { disposition?: "integrate" | "discard" | "preserve"; strategy?: "cherry-pick" | "merge" | "rebase-ff"; reason?: string; actionToken?: string; additionalWritePaths?: readonly string[] };
 type ReleaseInput = { workspaceId?: string; terminalProof?: unknown; actionToken?: string };
 type ReconcileInput = { originRoot?: string };
 
@@ -302,7 +303,10 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
     if (facts.inspection.headCommit !== input.authorizedWorkspaceHead || !facts.inspection.clean || !facts.inspection.descendant || !facts.inspection.hasCommits) {
       throw failure("MANAGED_WORKSPACE_INTEGRATE", "workspace admission requires the authorized clean committed HEAD");
     }
-    assertManagedWorkspaceWritePaths(facts.inspection.changedFiles, lease.record.request.policy.writePaths);
+    // 准入判定标准不变，仅 allowlist 并入队列项上持久记录的父侧补授权
+    // （additionalAuthorizedWritePaths；正常 child 路径无此字段，行为不变）。
+    const additionalPaths = Array.isArray(input.additionalAuthorizedWritePaths) ? input.additionalAuthorizedWritePaths : [];
+    assertManagedWorkspaceWritePaths(facts.inspection.changedFiles, [...lease.record.request.policy.writePaths, ...additionalPaths]);
     return { targetHead: facts.targetHead };
   }
   // claim 路径的 admission facts 入口：与 integrationAdmissionFacts 共用同一 inspection+probe，
@@ -593,12 +597,22 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
       ownerScope: { kind: "standalone-subagent", rootSessionId: lease.record.request.owner.rootSessionId } };
   }
 
-  function disposeForLease(lease, { terminalProof, expectedHead, disposition, strategy = "rebase-ff", reason, actionToken: suppliedToken }: Omit<DisposeInput, "workspaceId"> = {}) {
+  function disposeForLease(lease, { terminalProof, expectedHead, disposition, strategy = "rebase-ff", reason, actionToken: suppliedToken, additionalWritePaths }: Omit<DisposeInput, "workspaceId"> = {}) {
     if (lease.record.state === "disposing") {
       if (tokenHash(suppliedToken) !== lease.record.actionChallenge?.tokenHash) throw failure("MANAGED_WORKSPACE_ACTION", "action token does not own pending disposition");
       return receipt(recoverDisposition(lease).record);
     }
     if (lease.record.state !== "active") throw managedWorkspaceStateFailure(lease.record.state, "workspace disposition token was replayed or state is closed");
+    // additionalWritePaths 是父会话对派发合同未声明路径的显式补授权，仅 integrate
+    // 合法；文法在此（授权权威层）fail-closed，后续 coordinator 队列层再独立校验。
+    const additionalPaths = [...(Array.isArray(additionalWritePaths) ? additionalWritePaths : [])];
+    if (additionalPaths.length > 0 && disposition !== "integrate") {
+      throw failure("MANAGED_WORKSPACE_WRITE_PATHS", "additional write paths are only valid for integrate");
+    }
+    for (const candidate of additionalPaths) {
+      const reasonInvalid = invalidManagedWritePathReason(candidate);
+      if (reasonInvalid) throw failure("MANAGED_WORKSPACE_WRITE_PATHS", `additional write path is invalid: ${candidate} (${reasonInvalid})`);
+    }
     const snapshot = statusForLease(lease, { terminalProof, expectedHead });
     // This check happens in the service disposition authority immediately
     // before its durable intent; callers cannot substitute a stale snapshot.
@@ -623,7 +637,8 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
       });
       // 正常路径仍由 child 发布；父侧只消费已终止 run 的一次性授权，实际集成与
       // proof/release 全部交给同一 coordinator 队列，不调用 artifact apply。
-      return activeIntegrationFallback.execute(integrationBinding(lease), snapshot.terminalProof as TerminalProof);
+      // 补授权随一次性授权一起消费：由 coordinator 写入队列项后准入才可见。
+      return activeIntegrationFallback.execute(integrationBinding(lease), snapshot.terminalProof as TerminalProof, additionalPaths);
     }
     const normalizedDisposition = dispositionValue(disposition, { strategy, reason });
     lease = mutate(lease, (record) => {
@@ -645,12 +660,12 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
     return receipt(recoverDisposition(lease, proofValue(terminalProof)).record);
   }
 
-  function dispose({ workspaceId, terminalProof, expectedHead, disposition, strategy, reason, actionToken: suppliedToken }: DisposeInput = {}) {
-    return disposeForLease(load(workspaceId), { terminalProof, expectedHead, disposition, strategy, reason, actionToken: suppliedToken });
+  function dispose({ workspaceId, terminalProof, expectedHead, disposition, strategy, reason, actionToken: suppliedToken, additionalWritePaths }: DisposeInput = {}) {
+    return disposeForLease(load(workspaceId), { terminalProof, expectedHead, disposition, strategy, reason, actionToken: suppliedToken, additionalWritePaths });
   }
 
-  function disposeOwned({ workspaceId, ownerScope, terminalProof, expectedHead, disposition, strategy, reason, actionToken: suppliedToken }: DisposeInput & { ownerScope: WorkspaceOwnerScope }) {
-    return disposeForLease(loadOwned(workspaceId, ownerScope), { terminalProof, expectedHead, disposition, strategy, reason, actionToken: suppliedToken });
+  function disposeOwned({ workspaceId, ownerScope, terminalProof, expectedHead, disposition, strategy, reason, actionToken: suppliedToken, additionalWritePaths }: DisposeInput & { ownerScope: WorkspaceOwnerScope }) {
+    return disposeForLease(loadOwned(workspaceId, ownerScope), { terminalProof, expectedHead, disposition, strategy, reason, actionToken: suppliedToken, additionalWritePaths });
   }
 
   function issueReleaseForLease(lease, { terminalProof }: { terminalProof?: unknown } = {}) {

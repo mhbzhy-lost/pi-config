@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { createCoordinatorLedger } from "./coordinator-ledger.ts";
+import { invalidManagedWritePathReason } from "./git-worktree.ts";
 import { isPreparedWorkspaceDisposition, type PreparedWorkspaceDispositionV1 } from "./disposition-contract.ts";
 import { assertProcessBirthOutput } from "../subagent-dispatch/process-birth-identity.ts";
 import { createIntegrationResumeIntentV1, progressFingerprint } from "../subagent-dispatch/recovery-resume-contract.ts";
@@ -407,6 +408,31 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
   function getItem(queueItemId: string) { const current = load(`${id(queueItemId, "queueItemId")}.json`); return current ? structuredClone(current) : null; }
   // child 自有 commit 使 HEAD 前进为旧授权头的后代时刷新授权头（coordinator
   // 侧已校验后代关系）；revision+1，幂等重复刷新不叠加。
+  /**
+   * 父侧 dispose(integrate) 的显式补授权：把派发合同未声明、但父会话审查后
+   * 承认的写入路径持久记录到队列项。不是门禁降级：assertManagedWorkspaceWritePaths
+   * 的判定标准不变，只是 allowlist 从“仅派发时声明”变为“声明 ∪ 补授权”。
+   * 授权事实（会话身份、时间、路径）随队列项持久保存，供事后审计。
+   */
+  function authorizeAdditionalWritePaths(input: any) {
+    const paths = Array.isArray(input?.additionalWritePaths) ? [...input.additionalWritePaths] : [];
+    return ledger.withLock(() => {
+      const current = findByBinding({ workspaceId: input?.workspaceId, leaseId: input?.leaseId, runId: input?.runId, ownerScope: input?.ownerScope });
+      if (!current) throw new Error("auto integration queue item is absent");
+      if (["completed", "cancelled", "preserved"].includes(current.state)) throw new Error("queue item is terminal; additional write paths cannot be authorized");
+      if (paths.length === 0) return structuredClone(current);
+      for (const candidate of paths) {
+        const reason = invalidManagedWritePathReason(candidate);
+        if (reason) throw new Error(`additional write path is invalid: ${candidate} (${reason})`);
+      }
+      const merged = [...new Set([...(current.additionalAuthorizedWritePaths ?? []), ...paths])];
+      const next = { ...current, additionalAuthorizedWritePaths: merged,
+        additionalWritePathsAuthorization: { rootSessionId: input?.ownerScope?.rootSessionId, authorizedAt: new Date().toISOString(), paths: [...paths] },
+        revision: current.revision + 1 };
+      save(`${current.queueItemId}.json`, next);
+      return structuredClone(next);
+    });
+  }
   function refreshAuthorizedWorkspaceHead(input: any) {
     id(input?.queueItemId, "queueItemId"); commit(input.authorizedWorkspaceHead, "authorizedWorkspaceHead");
     return ledger.withLock(() => {
@@ -603,7 +629,7 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
     if (status.state === "undetermined") diagnose({ version: 1, phase: "integration-queue-owner-liveness-undetermined", state: status.state, error: status.error, cause: (status.error as any)?.cause, errno: status.errno, instanceId: instanceIdentity.instanceId });
     if (status.state === "dead" || status.state === "mismatch") { const next = { ...current, state: "queued", revision: current.revision + 1, daemonClaim: undefined, queueLeaseId: undefined, childAdmissionLeaseId: undefined }; save(`${current.queueItemId}.json`, next); recovered.push(next); }
   } return recovered; }); }
-  return Object.freeze({ enqueueIntegration, claimNext, getItem, findByBinding, preserveByBinding, prepareCandidate, completePrepared, markResolvingConflict, completeItem, failItem, cancelItem, retryItem, recoverClaims, listQueue, recoveryIntent, listRecoveryIntents, mutateRecovery, markRecoveryDelivery, notificationDeliveryDebt,
+  return Object.freeze({ enqueueIntegration, claimNext, getItem, findByBinding, preserveByBinding, authorizeAdditionalWritePaths, prepareCandidate, completePrepared, markResolvingConflict, completeItem, failItem, cancelItem, retryItem, recoverClaims, listQueue, recoveryIntent, listRecoveryIntents, mutateRecovery, markRecoveryDelivery, notificationDeliveryDebt,
     requestChildResume, promoteRecoverableHead, markResumeDelivery, markResumeStarting, markResumeActivated, completeResumeIntent, failResumeIntent, listResumeIntents, rebindChildRunForRecovery, refreshAuthorizedWorkspaceHead, listReceiptEvents, listPendingReceiptEvents, markReceiptEventDelivery,
     recordDispositionIntent, advanceDispositionIntent, listDispositionIntents, verifyDispositionBinding, settleDispositionQueue });
 }

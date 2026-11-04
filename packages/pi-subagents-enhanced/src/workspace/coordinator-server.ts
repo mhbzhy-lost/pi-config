@@ -177,13 +177,19 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
     return [];
   }
 
-  async function integrateTerminalWorkspace(binding: any, terminalProof: any) {
+  async function integrateTerminalWorkspace(binding: any, terminalProof: any, additionalWritePaths: readonly string[] = []) {
     const blocked = integrationFallbackBlockedReasons(binding);
     if (blocked.length) throw Object.assign(new Error(`integration fallback blocked: ${blocked.join(", ")}`), { code: "MANAGED_WORKSPACE_INTEGRATE" });
     // 合法 coding allocation/bindRun 可能因 child 工具未装载而没有 queue item。
     // 首次偏离是 publication 从未入队；父侧授权由 service 的 proof+快照 CAS 消费，
     // 随后复用原 auto queue，绝不建立第二份 workspace 或 publication 账本。
     prepareAutoIntegration(binding);
+    // 父会话对派发合同未声明路径的显式补授权：在准入前持久写入队列项，
+    // 授权事实（会话身份、时间、路径）随队列项留痕；queue 层独立做文法与
+    // 终态 fail-closed，不信任 service 已验证过的输入。
+    if (additionalWritePaths.length > 0) {
+      integrationQueue!.authorizeAdditionalWritePaths({ ...binding, additionalWritePaths: [...additionalWritePaths] });
+    }
     let item = integrationQueue!.findByBinding(binding);
     if (item.state === "prepared") {
       publishRebasedCandidate({ queueItemId: item.queueItemId, queueLeaseId: item.queueLeaseId, candidateHead: item.candidateHead }, binding);

@@ -12,8 +12,10 @@
 //   INVALID_WORKSPACE_STRATEGY 裁决（旧 execute 内 guard 保持），description 说明。
 // - renderer 复用传入引用（新 name→operation 的显示接线归 S4，本文件不产生新渲染逻辑）。
 import { createSubagentWorkspaceTool } from "./tool.ts";
+import { invalidManagedWritePathReason } from "./git-worktree.ts";
 
 const ID_MAX = 4096;
+const ADDITIONAL_PATHS_MAX = 64;
 const DISPOSITIONS = Object.freeze(["integrate", "discard", "preserve"]);
 const STRATEGIES = Object.freeze(["rebase-ff"]);
 
@@ -39,9 +41,10 @@ function failure(code: string, message: string, keypath?: string): WorkspaceTool
 
 const STRING_FIELD = Object.freeze({ type: "string", minLength: 1, maxLength: ID_MAX });
 
-type FieldRule = Readonly<{ key: string; required: boolean; kind: "string" | "enum"; values?: readonly string[] }>;
+type FieldRule = Readonly<{ key: string; required: boolean; kind: "string" | "enum" | "strings"; values?: readonly string[] }>;
 
 function fieldSchema(field: FieldRule) {
+  if (field.kind === "strings") return { type: "array", maxItems: ADDITIONAL_PATHS_MAX, items: { type: "string", minLength: 1, maxLength: ID_MAX } };
   return field.kind === "string" ? { ...STRING_FIELD } : { enum: [...(field.values ?? [])] };
 }
 
@@ -98,17 +101,22 @@ const OPERATIONS: readonly OperationSpec[] = Object.freeze([
       "沿同一 queue、receipt、proof 与释放路径完成；运行中、证明待定、dirty 或过期 token 均拒绝。" +
       "strategy 为可选参数（rebase-ff，缺省 rebase-ff），仅对 integrate 有效：schema 不保留顶层 allOf 条件早拒，" +
       "非 integrate 携带 strategy 由原 runtime 以 INVALID_WORKSPACE_STRATEGY 拒绝，这是明确的 schema 早拒降级为 runtime 裁决，而非语义放宽。" +
+      "additionalWritePaths 为可选字符串数组（仅 integrate）：派发合同声明不全、父会话审查 diff 后显式承认的写入路径；" +
+      "不是门禁降级，writePaths 准入标准不变，只是 allowlist 并入这些路径，授权事实（会话身份、时间、路径）持久写入队列项供审计。" +
+      "禁止用于跳过对未知变更的审查。" +
       "preserve 的 reason 由 runtime 注入，不作为模型参数。",
     promptSnippet: "携带 status 签发的 action_token 处置工作区（integrate|discard|preserve）。",
     promptGuidelines: [
       "先用 managed_workspace_status 取得 state、allowed_dispositions 与 action_token，只执行当前状态允许的处置，不预判动作可用性。",
       "strategy 仅对 integrate 有效；非 integrate 携带 strategy 由 runtime INVALID_WORKSPACE_STRATEGY 拒绝，不在 schema 层提前判定。",
+      "additionalWritePaths 仅在审查过 workspace 实际 diff、确认越界文件是合法工作产物后使用；每项须符合 writePath 文法（精确路径或末尾 /**），授权会持久留痕。",
     ],
     fields: [
       Object.freeze({ key: "workspace_id", required: true, kind: "string" }),
       Object.freeze({ key: "disposition", required: true, kind: "enum", values: DISPOSITIONS }),
       Object.freeze({ key: "strategy", required: false, kind: "enum", values: STRATEGIES }),
       Object.freeze({ key: "action_token", required: true, kind: "string" }),
+      Object.freeze({ key: "additionalWritePaths", required: false, kind: "strings" }),
     ],
   }),
   Object.freeze({
@@ -159,6 +167,22 @@ function validateOperationInput(operation: OperationSpec, input: unknown): { val
     if (field.kind === "string") {
       if (!nonempty(raw)) {
         return { error: failure("INVALID_WORKSPACE_TOOL_INPUT", `参数 "${field.key}" 必须是 1-${ID_MAX} 个字符的非空字符串`, `$.${field.key}`) };
+      }
+    } else if (field.kind === "strings") {
+      if (!Array.isArray(raw)) {
+        return { error: failure("INVALID_WORKSPACE_TOOL_INPUT", `参数 "${field.key}" 必须是字符串数组`, `$.${field.key}`) };
+      }
+      if (raw.length > ADDITIONAL_PATHS_MAX) {
+        return { error: failure("INVALID_WORKSPACE_TOOL_INPUT", `参数 "${field.key}" 最多 ${ADDITIONAL_PATHS_MAX} 项`, `$.${field.key}`) };
+      }
+      for (const candidate of raw) {
+        if (!nonempty(candidate)) {
+          return { error: failure("INVALID_WORKSPACE_TOOL_INPUT", `参数 "${field.key}" 的每一项必须是非空字符串`, `$.${field.key}`) };
+        }
+        const reason = invalidManagedWritePathReason(candidate);
+        if (reason) {
+          return { error: failure("INVALID_WORKSPACE_TOOL_INPUT", `参数 "${field.key}" 含非法路径 ${candidate}：${reason}`, `$.${field.key}`) };
+        }
       }
     } else if (!(field.values ?? []).includes(raw as string)) {
       return { error: failure("INVALID_WORKSPACE_TOOL_INPUT", `参数 "${field.key}" 必须是 ${field.values?.join(" | ")}`, `$.${field.key}`) };

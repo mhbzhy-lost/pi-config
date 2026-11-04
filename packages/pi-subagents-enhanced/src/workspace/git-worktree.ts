@@ -260,6 +260,27 @@ function matchesWritePath(file, allowed) {
   return file === allowed;
 }
 
+/**
+ * writePaths / additionalWritePaths 共用文法：仓库相对 POSIX 路径，精确路径或
+ * 末尾 /** 递归目录；不允许绝对路径、反斜杠、glob 通配符、空段、"."/".."。
+ * 返回非法原因字符串，合法返回 null；调用方各自映射为自己的失败 shape。
+ */
+export function invalidManagedWritePathReason(value: unknown): string | null {
+  if (typeof value !== "string") return "write path must be a string";
+  if (value.length === 0) return "write path must not be empty";
+  if (value.length > 4096) return "write path must be at most 4096 characters";
+  if (value.includes("\\")) return "write path must use POSIX separators";
+  if (value.startsWith("/")) return "write path must be repository-relative";
+  const normalized = value.endsWith("/**") ? value.slice(0, -3) : value;
+  if (normalized.length === 0) return "write path must not be a bare /** root glob";
+  if (/[*[?]/.test(normalized)) return "write path glob wildcards are not permitted";
+  for (const segment of normalized.split("/")) {
+    if (segment === "") return "write path must not contain empty segments or trailing slash";
+    if (segment === "." || segment === "..") return "write path must not contain '.' or '..' segments";
+  }
+  return null;
+}
+
 export function assertManagedWorkspaceWritePaths(changedFiles, writePaths) {
   const rejected = changedFiles.filter((file) => !writePaths.some((allowed) => matchesWritePath(file, allowed)));
   if (rejected.length > 0) throw failure("MANAGED_WORKSPACE_WRITE_PATHS", `changed files outside writePaths: ${rejected.join(", ")}`);

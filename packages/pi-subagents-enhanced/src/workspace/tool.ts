@@ -1,4 +1,5 @@
 import { allowedActionsFor, MANAGED_WORKSPACE_STATES } from "./ledger.ts";
+import { invalidManagedWritePathReason } from "./git-worktree.ts";
 
 const WORKSPACE_LIST_SCHEMA = {
   type: "object", additionalProperties: false, required: ["action"],
@@ -14,6 +15,7 @@ const WORKSPACE_DISPOSE_SCHEMA = {
     action: { const: "dispose" }, workspace_id: { type: "string", minLength: 1, maxLength: 4096 },
     disposition: { enum: ["integrate", "discard", "preserve"] },
     strategy: { enum: ["rebase-ff"] }, action_token: { type: "string", minLength: 1, maxLength: 4096 },
+    additionalWritePaths: { type: "array", maxItems: 64, items: { type: "string", minLength: 1, maxLength: 4096 } },
   },
   allOf: [{ if: { required: ["strategy"] }, then: { properties: { disposition: { const: "integrate" } } } }],
 };
@@ -90,7 +92,16 @@ export function createSubagentWorkspaceTool({ service, resolveRootSessionId, ren
         } else if (input?.action === "dispose") {
           if (input.strategy !== undefined && input.disposition !== "integrate") return failure("INVALID_WORKSPACE_STRATEGY", "strategy is only valid for integrate");
           if (input.strategy !== undefined && input.strategy !== "rebase-ff") return failure("INVALID_WORKSPACE_STRATEGY", "integration strategy must be rebase-ff");
-          value = await Promise.resolve(scopedService.disposeOwned({ workspaceId: input.workspace_id, ownerScope, disposition: input.disposition, strategy: input.strategy ?? "rebase-ff", reason: input.disposition === "preserve" ? "subagent workspace preserved" : undefined, actionToken: input.action_token }));
+          // 补授权仅在 integrate 合法；文法在此先行拒绝，避免非法路径穿越 RPC。
+          const additionalWritePaths = Array.isArray(input.additionalWritePaths) ? input.additionalWritePaths : undefined;
+          if (additionalWritePaths !== undefined && input.disposition !== "integrate") return failure("MANAGED_WORKSPACE_WRITE_PATHS", "additionalWritePaths is only valid for integrate");
+          if (additionalWritePaths !== undefined) {
+            for (const candidate of additionalWritePaths) {
+              const reason = invalidManagedWritePathReason(candidate);
+              if (reason) return failure("MANAGED_WORKSPACE_WRITE_PATHS", `additional write path is invalid: ${candidate} (${reason})`, "$.additionalWritePaths");
+            }
+          }
+          value = await Promise.resolve(scopedService.disposeOwned({ workspaceId: input.workspace_id, ownerScope, disposition: input.disposition, strategy: input.strategy ?? "rebase-ff", reason: input.disposition === "preserve" ? "subagent workspace preserved" : undefined, actionToken: input.action_token, additionalWritePaths }));
         } else if (input?.action === "release") {
           value = await Promise.resolve(scopedService.releaseOwned({ workspaceId: input.workspace_id, ownerScope }));
         } else return failure("UNSUPPORTED_WORKSPACE_ACTION", "unsupported subagent workspace action");

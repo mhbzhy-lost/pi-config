@@ -400,7 +400,8 @@ if (status.state === "preserved" || status.state === "cleanup-debt") {
 
 - `released` 是终态，无需任何操作。
 - `active` 需要处置时，只能选择该次 `managed_workspace_status` 实际返回的 `allowed_dispositions`，并使用其 `action_token`；不要将 preserve/release 与 discard/integrate 串联。
-- `coding` 的 publication 由 child integration queue 集成，父会话不可直接 `integrate`；若状态或阻塞原因显示 `CHILD_OWNS_INTEGRATION`，不得强行 dispose 或改用 raw git。
+- `coding` 的 publication 正常由 child integration queue 集成；child 已终止但集成未完成时，status 允许 `integrate` 即可使用父侧受控兜底（同一 queue/receipt/proof 路径）。若阻塞原因显示 `CHILD_OWNS_INTEGRATION` 或其他 blocked 项，不得强行 dispose 或改用 raw git。
+- `integrate` 被 `MANAGED_WORKSPACE_WRITE_PATHS` 阻塞且确认越界文件是派发合同漏声明的合法工作产物时，可在 `managed_workspace_dispose` 携带 `additionalWritePaths`（仅 integrate 合法，符合 writePath 文法）：这是父会话审查 diff 后的显式补授权而非门禁降级，writePaths 准入标准不变，授权事实（会话身份、时间、路径）持久写入队列项供审计；未审查过实际 diff 不得使用。
 - `reserved` 或 `allocating` 仅等待 runtime，不能强行 dispose；`disposing` 仅在实际允许的 `pendingdispose` 恢复动作下处理。
 - origin dirty 时不得自动 stash/reset/覆盖；向用户报告并等待决定。
 - 禁止 raw git worktree 命令操作 managed workspace。
