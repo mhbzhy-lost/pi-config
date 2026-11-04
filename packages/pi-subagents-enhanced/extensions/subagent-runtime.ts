@@ -125,29 +125,35 @@ export async function connectRuntimeCoordinator({ pi, cwd, broker, stateRoot, rp
   const pumpResumeHandoffs = async () => {
     if (closing || pumpBusy || !lazy.hasClient()) return;
     pumpBusy = true;
-    let client: Awaited<ReturnType<typeof lazy.preferClient>>;
-    try { client = await lazy.preferClient(); } catch { return; }
-    if (!client) return;
-    let intents: unknown;
-    try { intents = await client.recoveryStatus(); } catch { return; }
-    for (const intent of Array.isArray(intents) ? intents : []) {
-      const entry = intent as { requiredAction?: string; state?: string; delivery?: { state?: string }; resumeIntentId?: string; queueItemId?: string; workspaceId?: string; leaseId?: string; ownerScope?: unknown; sourceRunId?: string };
-      if (entry?.requiredAction !== "resume-child" || entry.state !== "pending" || entry.delivery?.state === "delivered") continue;
-      if (typeof entry.resumeIntentId !== "string" || typeof entry.sourceRunId !== "string" || typeof entry.workspaceId !== "string" || typeof entry.queueItemId !== "string") continue;
-      // 存储 intent 不携带 handoff（daemon 侧临时构造）；此处同样重建后经
-      // pi.sendMessage 送达，等价旧 in-process sink 快路径。
-      const handoff = createManualIntegrationHandoff({ resumeIntentId: entry.resumeIntentId, sourceRunId: entry.sourceRunId, workspaceId: entry.workspaceId, queueItemId: entry.queueItemId });
-      try {
-        await (pi as any).sendMessage(handoff, { deliverAs: "followUp", triggerTurn: true });
-        await client.resumeDelivered({ resumeIntentId: entry.resumeIntentId, workspaceId: entry.workspaceId, leaseId: entry.leaseId, ownerScope: entry.ownerScope, authorization: "root", reason: "host handoff delivered" });
-        diagnosticSink?.({ version: 1, phase: "recovery-handoff-pumped", resumeIntentId: entry.resumeIntentId, sourceRunId: entry.sourceRunId });
-      } catch (error) {
-        diagnosticSink?.({ version: 1, phase: "recovery-handoff-pump-failed", error, cause: (error as { cause?: unknown })?.cause, resumeIntentId: entry.resumeIntentId, sourceRunId: entry.sourceRunId });
-      } finally {
-        try { broker.notifyExecutionFacts(entry.sourceRunId); } catch { /* 通知失败不影响下一轮 */ }
+    // 外层 finally 覆盖置 busy 之后的全部分支：preferClient/recoveryStatus 等
+    // 瞬时 RPC 故障只放弃本轮，不得让 busy 位永久卡死后续 handoff 投递。异常
+    // 结果与诊断边界保持原样（finally 不吞异常，本轮仍无自动 resume）。
+    try {
+      let client: Awaited<ReturnType<typeof lazy.preferClient>>;
+      try { client = await lazy.preferClient(); } catch { return; }
+      if (!client) return;
+      let intents: unknown;
+      try { intents = await client.recoveryStatus(); } catch { return; }
+      for (const intent of Array.isArray(intents) ? intents : []) {
+        const entry = intent as { requiredAction?: string; state?: string; delivery?: { state?: string }; resumeIntentId?: string; queueItemId?: string; workspaceId?: string; leaseId?: string; ownerScope?: unknown; sourceRunId?: string };
+        if (entry?.requiredAction !== "resume-child" || entry.state !== "pending" || entry.delivery?.state === "delivered") continue;
+        if (typeof entry.resumeIntentId !== "string" || typeof entry.sourceRunId !== "string" || typeof entry.workspaceId !== "string" || typeof entry.queueItemId !== "string") continue;
+        // 存储 intent 不携带 handoff（daemon 侧临时构造）；此处同样重建后经
+        // pi.sendMessage 送达，等价旧 in-process sink 快路径。
+        const handoff = createManualIntegrationHandoff({ resumeIntentId: entry.resumeIntentId, sourceRunId: entry.sourceRunId, workspaceId: entry.workspaceId, queueItemId: entry.queueItemId });
+        try {
+          await (pi as any).sendMessage(handoff, { deliverAs: "followUp", triggerTurn: true });
+          await client.resumeDelivered({ resumeIntentId: entry.resumeIntentId, workspaceId: entry.workspaceId, leaseId: entry.leaseId, ownerScope: entry.ownerScope, authorization: "root", reason: "host handoff delivered" });
+          diagnosticSink?.({ version: 1, phase: "recovery-handoff-pumped", resumeIntentId: entry.resumeIntentId, sourceRunId: entry.sourceRunId });
+        } catch (error) {
+          diagnosticSink?.({ version: 1, phase: "recovery-handoff-pump-failed", error, cause: (error as { cause?: unknown })?.cause, resumeIntentId: entry.resumeIntentId, sourceRunId: entry.sourceRunId });
+        } finally {
+          try { broker.notifyExecutionFacts(entry.sourceRunId); } catch { /* 通知失败不影响下一轮 */ }
+        }
       }
+    } finally {
+      pumpBusy = false;
     }
-    pumpBusy = false;
   };
   // D7 回执事件泵（计划 T4）：与 pumpResumeHandoffs 共用同一 5s 定时器，同
   // closing/busy/!lazy.hasClient() 门控（独立 busy 位，互不饿死），daemon 缺位空转。
