@@ -180,7 +180,7 @@ preservationTest("behavior#global-append-preserves-base-and-canary", async () =>
   const run = await runBeforeAgentStart({ extensions: [global.extension] });
   assert.equal(run.errors.length, 0);
   assert.equal(run.systemPromptOptions.forceSystemPrompt, undefined, "GLOBAL 不得引入 forceSystemPrompt");
-  assert.equal(run.systemPromptOptions.sections.pi_global_instructions, `来源：PI_CODING_AGENT_DIR/AGENTS_GLOBAL.md\n${GLOBAL_FIXTURE}`);
+  assert.equal(run.systemPromptOptions.sections.pi_global_instructions, `来源：PI_CODING_AGENT_DIR/AGENTS_MAIN.md\n${GLOBAL_FIXTURE}`);
   assert.equal(run.final.split(GLOBAL_BLOCK_OPEN).length - 1, 1, "SDK 只包一层 GLOBAL XML");
   assert.ok(run.final.startsWith(run.base), "GLOBAL 追加后 base 必须逐字保留为前缀");
   assert.ok(run.final.includes(GLOBAL_BLOCK_OPEN), "GLOBAL 自有块必须存在");
@@ -207,7 +207,7 @@ preservationTest("behavior#global-block-replace-preserves-base-and-canary", asyn
     "自有块必须只有一个（去重语义不被替换分支破坏）",
   );
   assert.equal(run.systemPromptOptions.forceSystemPrompt, undefined, "section 替换不得变成完整 override");
-  assert.equal(run.systemPromptOptions.sections.pi_global_instructions, "来源：PI_CODING_AGENT_DIR/AGENTS_GLOBAL.md\nGLOBAL v2 正文（已更新）");
+  assert.equal(run.systemPromptOptions.sections.pi_global_instructions, "来源：PI_CODING_AGENT_DIR/AGENTS_MAIN.md\nGLOBAL v2 正文（已更新）");
   assertCanaryRetained(run.final, "GLOBAL 自有 section 替换");
 });
 
@@ -249,7 +249,7 @@ preservationTest("behavior#global-block-replace-keeps-foreign-block-outside-own-
   assert.equal(afterOwn, seededBase.slice(seededBase.indexOf(GLOBAL_BLOCK_CLOSE) + GLOBAL_BLOCK_CLOSE.length), "自有块之后的内容（含外部 feature tag）必须逐字保留");
   assert.equal(run.systemPromptOptions.forceSystemPrompt, undefined);
   assert.equal(run.systemPromptOptions.sections.foreign_feature, FOREIGN_BLOCK, "外部 section 正文逐字保留");
-  assert.equal(seeded.systemPromptOptions.sections.pi_global_instructions, "来源：PI_CODING_AGENT_DIR/AGENTS_GLOBAL.md\nGLOBAL v1 正文", "不得改写传入的上一轮 options");
+  assert.equal(seeded.systemPromptOptions.sections.pi_global_instructions, "来源：PI_CODING_AGENT_DIR/AGENTS_MAIN.md\nGLOBAL v1 正文", "不得改写传入的上一轮 options");
   assert.ok(run.final.includes(FOREIGN_BLOCK), "替换分支不得吞掉块外的其它 feature 内容");
   assert.ok(run.final.includes("GLOBAL v2 正文"), "本轮新快照必须生效");
   assertCanaryRetained(run.final, "GLOBAL 块外内容保留");
@@ -400,7 +400,7 @@ behaviorTest("behavior#negative-handler-empty-return-leaves-base-untouched", asy
 
 behaviorTest("behavior#negative-real-handlers-unreadable-file-never-fabricate-replacement", async () => {
   // 真实生产 handler 在规范文件缺失时不得伪造错误 system prompt 冒充 provider 拦截。
-  const global = installAgentsGlobal({ instructions: new Error("ENOENT: fixture AGENTS_GLOBAL.md missing") });
+  const global = installAgentsGlobal({ instructions: new Error("ENOENT: fixture AGENTS_MAIN.md missing") });
   const sharedMain = installAgentsShared({ instructions: new Error("ENOENT: fixture AGENTS_SHARED.md missing"), scope: "main" });
   const run = await runBeforeAgentStart({
     extensions: [global.extension, sharedMain.extension],

@@ -114,7 +114,7 @@ fresh Host 的 main 模型工具按操作拆分为 `subagent_start`、`subagent_
 
 ## 角色流程与失败恢复
 
-组合流程指令归 `pi/AGENTS_GLOBAL.md`（仅父会话适用），角色方法论归 `pi/agents/{delegate,executor,reviewer}.md` 正文（`systemPromptMode: append`，由用户明确确认），共同安全与工程约束归 `pi/AGENTS_SHARED.md`；SHARED 不收纳多工具流程。三个角色 profile 保留 Pi 原生 system preamble/tools/rules，角色正文作为附加部分，不整体替换原生 prompt；models/tools/inheritance 元数据不因此扩大。
+组合流程、计划编写与 Goal 六工具协议归 `pi/AGENTS_MAIN.md`（仅父会话适用），角色方法论归 `pi/agents/{delegate,executor,reviewer}.md` 正文（`systemPromptMode: append`，由用户明确确认），共同安全与工程约束（含 Git Commit 规范）归 `pi/AGENTS_SHARED.md`；SHARED 不收纳多工具流程。三个角色 profile 保留 Pi 原生 system preamble/tools/rules，角色正文作为附加部分，不整体替换原生 prompt；models/tools/inheritance 元数据不因此扩大。
 
 child 出现上游过载、暂时性流中断等偶发 provider/transport 故障且原 child 持久化 session、身份与执行合同仍有效时，主管优先 `resume` 原 run（附非空新指导，继续既有 child 会话历史），不自动 fresh 重派、不自动更换模型、不建立常驻重试；不可恢复/stopped、权限或身份失败、来源不明不属于该规则范围。此规则是主管决策顺序，不是 runtime 自动重试。
 
@@ -161,4 +161,5 @@ basic-memory doctor --local
 ## Skill 选择
 
 Git 管理的共享 Skill 唯一来源是 `skill-overrides/<name>/SKILL.md`；所有非隐藏直接子目录中的合法 Skill 会由 `scripts/sync-skills.ts` 自动同步。个人 Skill 直接放在 `~/.agents/skills`，不由仓库清单管理。
+网络搜索、浏览器、IPA 重签和 Skill 编写等按需知识继续保留为 Skill；Git 与计划规范已分别内化到 `pi/AGENTS_SHARED.md` 与 `pi/AGENTS_MAIN.md`，TDD Skill 已退役。退役源不再参与自动同步，仓外旧 symlink 需按精确路径单独退役，不清空共享目录。
 `~/.zshrc` 中的 `pi-config` 受控区块由 `init-pi.sh` 维护，不要手工复制或改写。

@@ -16,9 +16,16 @@ Git 管理的信息必须脱敏。
 
 ## Git Commit 规范
 
-执行 git commit 时，必须遵循 `git-commit-convention` skill。
-
 本条不是提交授权：仅在明确授权范围内提交。
+
+提交、修改提交信息和起草 PR 标题时遵守以下规范：
+
+- 格式为 `type(scope): 中文祈使句`，`scope` 可选；type 仅允许英文小写 `feat`、`fix`、`refactor`、`perf`、`test`、`docs`、`style`、`chore`、`build`、`ci`、`revert`。
+- subject 必须包含至少一个中文字符，不超过 50 字，不以 `。` 或 `.` 结尾；以祈使句动词开头（如“增加”“修复”“重构”），不用“已修复”“实现了”“修复了”等过去时。
+- 禁止以零信息词单独作为 subject：`fix`、`update`、`bugfix`、`wip`、“修改”、“更新”。subject 说明做了什么，body 解释为什么（why），不重复 diff 已说明的 what。
+- 提交信息任何位置禁止 AI 署名或等效辅助标识，包括 `Co-Authored-By: Claude/Copilot/Cursor`（及其他 AI 工具名）、`Generated with Claude`、`AI-assisted`。改动描述中提及 AI 工具文件名（如 `claude-config`）不受此限制。
+- 一次 commit 对应一个逻辑变更，不合并无关改动；修复与对应测试可放同一 commit，重构与修复必须拆开。PR 标题遵循上述 subject 规则。
+- Pi `security-gates` Extension 自动校验 type 白名单、中文字符、句号结尾、过去时、零信息 subject、AI 署名等可机械判定规则；失败会拦截 commit 并返回错误码。机械检查不能代替对祈使句、body 质量、逻辑拆分与 PR 标题的人工核对，也不授予提交权限。
 
 ## 输出语言
 

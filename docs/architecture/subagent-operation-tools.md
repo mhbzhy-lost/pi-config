@@ -34,7 +34,7 @@ fresh Host 的 main model-visible 工具拆为14项：
 
 ## 引导归属
 
-操作对象、必填字段和实时权威在各工具description；跨操作的治理、授权、恢复顺序和安全政策仍在`pi/AGENTS_GLOBAL.md`与`pi/AGENTS_SHARED.md`。workspace completion reminder不再给出无条件`integrate or discard`，而是指向实时status和child-owned边界。TUI renderer按工具名映射operation，历史旧名仍可显示；raw arguments、details、session和上游通知不被改写。
+操作对象、必填字段和实时权威在各工具description；跨操作的治理、授权、恢复顺序和安全政策仍在`pi/AGENTS_MAIN.md`与`pi/AGENTS_SHARED.md`。workspace completion reminder不再给出无条件`integrate or discard`，而是指向实时status和child-owned边界。TUI renderer按工具名映射operation，历史旧名仍可显示；raw arguments、details、session和上游通知不被改写。
 
 ## 验收
 

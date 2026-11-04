@@ -229,7 +229,7 @@ const { createAgentsSharedExtension } = await import("../../src/agents-shared/in
  * 安装**真实生产** GLOBAL factory（`src/agents-global/index.ts`）。
  * `agentsGlobalPath` / `readFile` 是 factory 自己声明的可注入依赖，不是伪造 handler。
  */
-export function installAgentsGlobal({ extensionPath = "<src/agents-global/index.ts>", instructions, path = "/fixture/AGENTS_GLOBAL.md" }) {
+export function installAgentsGlobal({ extensionPath = "<src/agents-global/index.ts>", instructions, path = "/fixture/AGENTS_MAIN.md" }) {
   const recorder = createExtensionRecorder(extensionPath);
   createAgentsGlobalExtension(recorder.api, {
     agentsGlobalPath: path,

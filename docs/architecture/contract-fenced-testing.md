@@ -1,7 +1,7 @@
 # 契约围栏下的独立测试与计划锚定
 
 **状态：** 设计提案（2026-10-13）。尚未实施；实施路径见 §8。
-**适用范围：** `pi-subagents-enhanced` runtime、`writing-plans` skill、以及围绕 dispatch/workspace/merge-queue 的外围建设。
+**适用范围：** `pi-subagents-enhanced` runtime、`pi/AGENTS_MAIN.md` 的计划规范、以及围绕 dispatch/workspace/merge-queue 的外围建设。
 
 ## 目的
 

@@ -3,7 +3,7 @@
 // 边界（如实声明，不夸大）：
 // - 本文件只做「文本迁移」合同核对：roster 退役后的 13 个工具 description/prompt 短说明与 S0 对象/必填/权威一致；
 //   本仓自有 spawn/reminder 回执不再无条件建议 integrate/discard，改指 managed_workspace_status 实时权威；
-//   AGENTS_GLOBAL 旧调用示例切到新工具名并保留治理/授权/恢复政策；bash_async 第4条只补 Host/RPC 限定。
+//   AGENTS_MAIN 旧调用示例切到新工具名并保留治理/授权/恢复政策；bash_async 第4条只补 Host/RPC 限定。
 // - 对 extension.ts / completion-reminder.ts 的 receipt 断言采用「源码文本 + 真实 factory」两层：
 //   factory 层覆盖 description/schema/guidelines 的真实导出值；源码层只核对自有文案与 details 字段未被改写。
 //   行为层的 spawn 回执整句由 test/subagent-runtime-membrane.test.mjs 覆盖（该文件原第 1419 行
@@ -25,7 +25,7 @@ import {
 const ROOT = join(import.meta.dirname, "..");
 const read = (relative) => readFileSync(join(ROOT, relative), "utf8");
 
-const globalMd = () => read("pi/AGENTS_GLOBAL.md");
+const globalMd = () => read("pi/AGENTS_MAIN.md");
 const reviewerMd = () => read("pi/agents/reviewer.md");
 const executorMd = () => read("pi/agents/executor.md");
 const delegateMd = () => read("pi/agents/delegate.md");
@@ -200,10 +200,10 @@ test("引导合同：completion-reminder 只指状态权威，details/customType
 });
 
 /* ------------------------------------------------------------------ */
-/* 3. AGENTS_GLOBAL：旧示例→新工具名映射，治理政策保留                */
+/* 3. AGENTS_MAIN：旧示例→新工具名映射，治理政策保留                  */
 /* ------------------------------------------------------------------ */
 
-test("引导合同：AGENTS_GLOBAL 示例切到新工具名并给一次旧→新映射", () => {
+test("引导合同：AGENTS_MAIN 示例切到新工具名并给一次旧→新映射", () => {
   const md = globalMd();
   assert.doesNotMatch(md, /subagent\(\{/, "GLOBAL 不得再保留旧 subagent({…}) 调用示例");
   assert.doesNotMatch(md, /subagent_worktree\(\{/, "GLOBAL 不得再保留旧 subagent_worktree({…}) 调用示例");
@@ -224,7 +224,7 @@ test("引导合同：AGENTS_GLOBAL 示例切到新工具名并给一次旧→新
   assert.doesNotMatch(md, /`subagent_roster` 查看|→`subagent_roster`/);
 });
 
-test("引导合同：AGENTS_GLOBAL 保留治理/授权/恢复/预算政策，只下移逐操作参数", () => {
+test("引导合同：AGENTS_MAIN 保留治理/授权/恢复/预算政策，只下移逐操作参数", () => {
   const md = globalMd();
   for (const [label, needle] of [
     ["默认委派", "默认委派 subagent 执行"],

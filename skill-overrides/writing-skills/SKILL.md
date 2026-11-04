@@ -30,7 +30,7 @@ Skill 是可复用的操作说明、技术方法或参考资料。共享目录�
 - 触发描述可以帮助后续 agent 找到本 Skill；正文说明实际工作和失败出口。
 - 引用文件存在，命令与产品接口一致，没有将第三方说明升级为用户授权。
 - supporting references 中的测试方案同样遵守上述授权边界；不通过引用恢复默认强制测试。
-- 有用户明确提交/发布授权才提交、推送或贡献上游；提交时使用 `git-commit-convention`。
+- 有用户明确提交/发布授权才提交、推送或贡献上游；提交时遵循 `pi/AGENTS_SHARED.md` 的「Git Commit 规范」。
 - 交付说明实际修改、已有检查结果、未执行验证和剩余限制，不宣称未经观察的效果。
 
 可按需参考：`anthropic-best-practices.md`（编排与结构）、`testing-skills-with-subagents.md`（获授权后的评估建议）、`persuasion-principles.md`（措辞原理）、`graphviz-conventions.dot`（图形样式）。

@@ -1,24 +1,24 @@
 import { readFile as readTextFile } from "node:fs/promises";
 import { join } from "node:path";
 
-// 默认路径锚定本 feature 模块所在仓库的 pi/AGENTS_GLOBAL.md：以 import.meta 定位
+// 默认路径锚定本 feature 模块所在仓库的 pi/AGENTS_MAIN.md：以 import.meta 定位
 // 物理仓库根，不随进程 cwd 或 HOME 漂移，worktree 进程也不用 cwd 识别角色。
-// GLOBAL 仅由 main 会话经 Host binding 显式加载；child 不读取本文件（见
+// MAIN 仅由 main 会话经 Host binding 显式加载；child 不读取本文件（见
 // pi/extensions/agents-global.ts 的 child guard）。
 const DEFAULT_AGENTS_GLOBAL_PATH = join(
   import.meta.dirname,
   "..",
   "..",
   "pi",
-  "AGENTS_GLOBAL.md",
+  "AGENTS_MAIN.md",
 );
 
 const UNREADABLE_DIAGNOSTIC =
-  "Required Pi global AGENTS_GLOBAL.md is missing or unreadable";
-const EMPTY_DIAGNOSTIC = "Required Pi global AGENTS_GLOBAL.md is empty";
+  "Required Pi main AGENTS_MAIN.md is missing or unreadable";
+const EMPTY_DIAGNOSTIC = "Required Pi main AGENTS_MAIN.md is empty";
 
 // SDK 以 section key 自动包裹外层 XML；来源说明留在正文，不重复外层 tag。
-const GLOBAL_INSTRUCTIONS_SOURCE = "来源：PI_CODING_AGENT_DIR/AGENTS_GLOBAL.md";
+const GLOBAL_INSTRUCTIONS_SOURCE = "来源：PI_CODING_AGENT_DIR/AGENTS_MAIN.md";
 
 async function loadInstructions(agentsGlobalPath, readFile) {
   let content;
@@ -80,7 +80,7 @@ export function createAgentsGlobalExtension(pi, {
 
   pi.on("session_start", async () => {
     // startup 校验：读取失败即抛扩展错误（main Host 记录为非 fatal extension
-    // error），不伪 provider 硬拦截。不发 ACK：GLOBAL 不参与 child required 注册，
+    // error），不伪 provider 硬拦截。不发 ACK：MAIN 不参与 child required 注册，
     // child 进程根本不会加载本入口。
     const loaded = await loadInstructions(agentsGlobalPath, readFile);
     if (loaded.error) {

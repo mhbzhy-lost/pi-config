@@ -1,6 +1,6 @@
 # Agent Configuration
 
-Pi config root is `pi/` (not `~/.pi`). Agent 规范入口：`pi/AGENTS_SHARED.md` 对主 agent 与全部 subagent 生效；`pi/AGENTS_GLOBAL.md` 由 runtime 仅加载进父/main 会话，root 不会要求 child 再读 GLOBAL。角色限定只影响 pi/ 规范文件的适用范围，不改变本根目录工程规范对所有 agent（含 subagent）的适用。
+Pi config root is `pi/` (not `~/.pi`). Agent 规范入口：`pi/AGENTS_SHARED.md` 对主 agent 与全部 subagent 生效；`pi/AGENTS_MAIN.md` 由 runtime 仅加载进父/main 会话，root 不会要求 child 再读 MAIN。角色限定只影响 pi/ 规范文件的适用范围，不改变本根目录工程规范对所有 agent（含 subagent）的适用。
 
 ## 目录职责与依赖边界
 

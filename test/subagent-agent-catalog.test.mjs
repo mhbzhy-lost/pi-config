@@ -37,7 +37,7 @@ const ROSTER_TOOL = 'subagent_roster';
 const EXPECTED_CATALOG_BYTES = 714;
 const FOREIGN_SECTION_KEY = 'foreign_extension_canary';
 const FOREIGN_SECTION_TEXT = 'FOREIGN-EXTENSION-SECTION-CANARY-4c7a91';
-const GLOBAL_SOURCE_LINE = '来源：PI_CODING_AGENT_DIR/AGENTS_GLOBAL.md';
+const GLOBAL_SOURCE_LINE = '来源：PI_CODING_AGENT_DIR/AGENTS_MAIN.md';
 const SHARED_SOURCE_LINE = '来源：PI_CODING_AGENT_DIR/AGENTS_SHARED.md';
 
 /** 生产 admission 源：同一实例既供 catalog 初始化，也供真实派发 discovery。 */
@@ -206,7 +206,7 @@ test('F1/F3/F7 首个真实请求：唯一且同代的名册 section 与 GLOBAL/
   }
   assert.equal('pi_child_execution_boundaries' in sections, false, 'main scope 不得携带 child 边界');
   const [globalText, sharedText] = await Promise.all([
-    readRepoFile('pi/AGENTS_GLOBAL.md'),
+    readRepoFile('pi/AGENTS_MAIN.md'),
     readRepoFile('pi/AGENTS_SHARED.md'),
   ]);
   // SDK 以 section key 自动包裹外层 tag，正文只保留来源说明与文件快照。

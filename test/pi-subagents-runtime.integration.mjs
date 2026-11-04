@@ -439,7 +439,7 @@ Use the deterministic compatibility marker from the assigned task.
     // legacy 名 subagent_supervisor 被 membrane 有意隐藏：registerTool 拦截仅 bind
     // execute（runtime-membrane.ts:174-179），getAllTools 代理显式 filter 该名
     // （runtime-membrane.ts:187-189）；模型面替代物为 supervisor_request_*
-    // （supervisor-operation-tools.ts:5；pi/AGENTS_GLOBAL.md:82 一次性映射），
+    // （supervisor-operation-tools.ts:5；pi/AGENTS_MAIN.md:82 一次性映射），
     // 这不是 fixture 缺件，勿再按缺件排查。
     assert.ok(!details.activeTools.includes("subagent_supervisor"), JSON.stringify(details.activeTools));
     for (const supervisorTool of ["supervisor_request_pending", "supervisor_request_status", "supervisor_request_reply"]) {
