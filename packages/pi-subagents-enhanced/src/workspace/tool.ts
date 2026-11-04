@@ -13,7 +13,7 @@ const WORKSPACE_DISPOSE_SCHEMA = {
   properties: {
     action: { const: "dispose" }, workspace_id: { type: "string", minLength: 1, maxLength: 4096 },
     disposition: { enum: ["integrate", "discard", "preserve"] },
-    strategy: { enum: ["cherry-pick", "merge"] }, action_token: { type: "string", minLength: 1, maxLength: 4096 },
+    strategy: { enum: ["rebase-ff"] }, action_token: { type: "string", minLength: 1, maxLength: 4096 },
   },
   allOf: [{ if: { required: ["strategy"] }, then: { properties: { disposition: { const: "integrate" } } } }],
 };
@@ -28,7 +28,7 @@ export const SUBAGENT_WORKSPACE_PARAMETERS = Object.freeze({
 export const SUBAGENT_WORKSPACE_DESCRIPTION =
   "当 worktree=true 的 subagent 派发返回 workspace_id 且 run 已完成时使用本工具。 " +
   "每个已分配的工作区都必须显式处置，处置选项不固定：以 status 返回的 allowed_dispositions 与 integrate_blocked_reasons 为准，已 released 的即为终态、无需额外处置；先用 action:\"status\" 查看状态、allowed_dispositions 与 integrate_blocked_reasons，再按各状态可执行的动作携带 action_token 操作。 " +
-  "publication=allowed 的 coding 托管工作区（Auto Integration）集成由子代理 integration queue 自主拥有：父层对其执行 integrate 会被拒绝（CHILD_OWNS_INTEGRATION），子代理自行发布并释放；并非所有工作区都禁止父层 integrate，publication=forbidden（generic）的工作区能否 integrate 以状态权威返回为准。 " +
+  "publication=allowed 的 coding 工作区正常由子代理 integration queue 自主发布；child 未完成集成且权威 terminal proof 已 observed 时，父层可用 integrate 受控兜底。该动作必须通过 owner/lease、action token/快照 CAS、origin/workspace clean 与 queue 准入，并沿原 receipt/proof/释放链完成；strategy 仅支持 rebase-ff。 " +
   `工作区状态：${MANAGED_WORKSPACE_STATES.join(" | ")}。 ` +
   `各状态下 agent 可执行的动作：${MANAGED_WORKSPACE_STATES.map((state) => `${state}=[${allowedActionsFor(state).join(",") || "none"}]`).join("; ")}。`;
 
@@ -65,7 +65,7 @@ export function createSubagentWorkspaceTool({ service, resolveRootSessionId, ren
     promptSnippet: "查询与处置 worktree=true 派发返回的托管工作区（list/status/dispose/release）。",
     promptGuidelines: [
       "处置按状态操作：先用 status 取得 state、allowed_dispositions 与 action_token，只执行当前状态允许的动作，不预判动作可用性。",
-      "publication=allowed 的 coding 托管工作区集成由子代理自主拥有（父层 integrate 返回 CHILD_OWNS_INTEGRATION），父层只处理状态权威允许的其余处置。",
+      "coding 工作区正常由 child 自主发布；integrate 仅在权威 terminal proof 已 observed 且 status 允许时作为父侧兜底，不能绕过 queue 或 dirty 护栏。",
     ],
     parameters: SUBAGENT_WORKSPACE_PARAMETERS,
     ...(typeof renderCall === "function" ? { renderCall } : {}),
@@ -89,12 +89,8 @@ export function createSubagentWorkspaceTool({ service, resolveRootSessionId, ren
             : status;
         } else if (input?.action === "dispose") {
           if (input.strategy !== undefined && input.disposition !== "integrate") return failure("INVALID_WORKSPACE_STRATEGY", "strategy is only valid for integrate");
-          try {
-            value = await Promise.resolve(scopedService.disposeOwned({ workspaceId: input.workspace_id, ownerScope, disposition: input.disposition, strategy: input.strategy ?? "cherry-pick", reason: input.disposition === "preserve" ? "subagent workspace preserved" : undefined, actionToken: input.action_token }));
-          } catch (error) {
-            if (error?.code !== "CHILD_OWNS_INTEGRATION") throw error;
-            return failure("CHILD_OWNS_INTEGRATION", error.message);
-          }
+          if (input.strategy !== undefined && input.strategy !== "rebase-ff") return failure("INVALID_WORKSPACE_STRATEGY", "integration strategy must be rebase-ff");
+          value = await Promise.resolve(scopedService.disposeOwned({ workspaceId: input.workspace_id, ownerScope, disposition: input.disposition, strategy: input.strategy ?? "rebase-ff", reason: input.disposition === "preserve" ? "subagent workspace preserved" : undefined, actionToken: input.action_token }));
         } else if (input?.action === "release") {
           value = await Promise.resolve(scopedService.releaseOwned({ workspaceId: input.workspace_id, ownerScope }));
         } else return failure("UNSUPPORTED_WORKSPACE_ACTION", "unsupported subagent workspace action");

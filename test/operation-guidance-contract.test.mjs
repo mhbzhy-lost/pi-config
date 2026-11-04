@@ -103,7 +103,7 @@ test("引导合同：workspace 四工具以实时 status 为唯一权威、codin
   assert.match(by.managed_workspace_status.description, /allowed_dispositions/);
   assert.match(by.managed_workspace_status.description, /action_token/);
   assert.match(by.managed_workspace_list.description, /managed_workspace_status/, "list 只投影名册，动作权威仍是 status");
-  assert.match(by.managed_workspace_dispose.description, /CHILD_OWNS_INTEGRATION/, "dispose 必须写明 coding child-owned");
+  assert.match(by.managed_workspace_dispose.description, /正常由 child integration queue 自主发布.*受控兜底/, "dispose 必须写明正常路径与父侧兜底");
   assert.match(by.managed_workspace_dispose.description, /以 status 当前 allowed_dispositions 包含的处置|allowed_dispositions/);
   // released 终态 + release 为独立分支，不得写成 dispose 之后的串联续步。
   assert.match(by.managed_workspace_release.description, /released[^\n]*终态/);

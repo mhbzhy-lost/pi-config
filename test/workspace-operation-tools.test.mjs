@@ -81,12 +81,12 @@ test("workspace 操作工具 schema 集合：四 model-only 工具、单 object 
   assert.deepEqual(by.managed_workspace_release.parameters.required, ["workspace_id"]);
   assert.deepEqual(by.managed_workspace_dispose.parameters.required, ["workspace_id", "disposition", "action_token"]);
   assert.deepEqual(by.managed_workspace_dispose.parameters.properties.disposition.enum, ["integrate", "discard", "preserve"]);
-  assert.deepEqual(by.managed_workspace_dispose.parameters.properties.strategy.enum, ["cherry-pick", "merge"]);
+  assert.deepEqual(by.managed_workspace_dispose.parameters.properties.strategy.enum, ["rebase-ff"]);
   // strategy 条件早拒已从 schema 移除（顶层 allOf 降级为原 runtime INVALID_WORKSPACE_STRATEGY 裁决），
   // description 必须把该降级说清楚，且 child-owned 边界保持。
   assert.match(by.managed_workspace_dispose.description, /INVALID_WORKSPACE_STRATEGY/);
   assert.match(by.managed_workspace_dispose.description, /早拒降级|schema 不保留顶层 allOf/);
-  assert.match(by.managed_workspace_dispose.description, /CHILD_OWNS_INTEGRATION/);
+  assert.match(by.managed_workspace_dispose.description, /受控兜底/);
   // 计划 §2.1：release 不是 dispose 的串联续步，而是 preserved/cleanup-debt 各自独立可执行的分支；
   // released 为终态无需动作。文案不得要求“先 dispose 才能 release”。
   assert.match(by.managed_workspace_release.description, /独立可执行|各自独立/);
@@ -123,7 +123,7 @@ test("四个新定义委托旧 createSubagentWorkspaceTool 的同一 execute：s
   await dispose.execute("call", { workspace_id: "workspace-a", disposition: "preserve", action_token: "token-a" }, undefined, undefined, CTX);
   const [, disposeInput] = calls.find(([name]) => name === "disposeOwned");
   assert.equal(disposeInput.reason, "subagent workspace preserved");
-  assert.equal(disposeInput.strategy, "cherry-pick", "缺省 strategy 仍由旧闭包注入 cherry-pick");
+  assert.equal(disposeInput.strategy, "rebase-ff", "缺省 strategy 对齐 queue 合同");
   assert.deepEqual(disposeInput.ownerScope, { kind: "standalone-subagent", rootSessionId: "session-a" }, "owner 固定注入，模型不可指定");
 });
 
@@ -139,7 +139,7 @@ test("factory 安全拒绝 raw 未知字段/缺必填/action 注入，错误 sha
     ["managed_workspace_status", {}, "$.workspace_id", /缺少必填/],
     ["managed_workspace_status", { workspace_id: "" }, "$.workspace_id", /1-4096/],
     ["managed_workspace_dispose", { workspace_id: "workspace-a", disposition: "keep", action_token: "token-a" }, "$.disposition", /integrate \| discard \| preserve/],
-    ["managed_workspace_dispose", { workspace_id: "workspace-a", disposition: "discard", action_token: "token-a", strategy: "rebase" }, "$.strategy", /cherry-pick \| merge/],
+    ["managed_workspace_dispose", { workspace_id: "workspace-a", disposition: "discard", action_token: "token-a", strategy: "rebase" }, "$.strategy", /rebase-ff/],
     ["managed_workspace_dispose", { workspace_id: "workspace-a", disposition: "discard" }, "$.action_token", /缺少必填/],
     ["managed_workspace_release", "not-an-object", "$", /扁平对象/],
     ["managed_workspace_list", null, "$", /扁平对象/, "strict 原始 null 拒绝：null 不得当作空参数"],
@@ -165,7 +165,7 @@ test("strategy 条件由原 runtime 裁决：schema 不再早拒，INVALID_WORKS
   assert.equal(JSON.stringify(by.managed_workspace_dispose.parameters).includes("allOf"), false);
   const result = await by.managed_workspace_dispose.execute(
     "call",
-    { workspace_id: "workspace-a", disposition: "discard", strategy: "merge", action_token: "token-a" },
+    { workspace_id: "workspace-a", disposition: "discard", strategy: "rebase-ff", action_token: "token-a" },
     undefined, undefined, CTX,
   );
   assert.equal(result.isError, true);
@@ -247,7 +247,7 @@ test("真实 service：status token/allowed 权威、owner fail-closed、CAS tok
   assert.equal(statusA.details.state, "active");
   assert.equal(statusA.details.workspace_state, "active");
   assert.equal(statusA.details.process_terminal, "pending", "未观察 proof 的实时事实原样投影（旧 workspacePublic 语义）");
-  assert.deepEqual(statusA.details.allowed_dispositions, ["preserve", "release"]);
+  assert.deepEqual(statusA.details.allowed_dispositions, ["preserve"]);
   assert.deepEqual(statusA.details.integrate_blocked_reasons, ["terminal-unobserved"]);
   assert.match(statusA.details.action_token, /^managed-workspace-action\.v1:[a-f0-9]{64}$/);
 
@@ -276,7 +276,8 @@ test("真实 service：status token/allowed 权威、owner fail-closed、CAS tok
 
   // CAS：token 一次性且绑定最新 challenge —— 重签后旧 token 必须被拒。
   const statusB1 = await by.managed_workspace_status.execute("call", { workspace_id: "ws-b" }, undefined, undefined, ctx);
-  assert.deepEqual(statusB1.details.allowed_dispositions, ["publish", "discard", "preserve", "release"]);
+  assert.deepEqual(statusB1.details.allowed_dispositions, ["discard", "preserve"]);
+  assert.ok(statusB1.details.integrate_blocked_reasons.includes("integration-coordinator-unavailable"));
   const statusB2 = await by.managed_workspace_status.execute("call", { workspace_id: "ws-b" }, undefined, undefined, ctx);
   assert.notEqual(statusB1.details.action_token, statusB2.details.action_token);
   const replay = await by.managed_workspace_dispose.execute(
@@ -290,7 +291,7 @@ test("真实 service：status token/allowed 权威、owner fail-closed、CAS tok
     "call", { workspace_id: "ws-b", disposition: "integrate", action_token: statusB2.details.action_token }, undefined, undefined, ctx,
   );
   assert.equal(parentIntegrate.isError, true);
-  assert.equal(parentIntegrate.details.code, "CHILD_OWNS_INTEGRATION", "child-owned 门禁不变，token 未被消费");
+  assert.equal(parentIntegrate.details.code, "MANAGED_WORKSPACE_TERMINAL", "没有 coordinator 时不能绕过 queue，token 未被消费");
 
   // 合法 discard：以 status 权威 + 新鲜 token 处置到 released。
   const discarded = await by.managed_workspace_dispose.execute(

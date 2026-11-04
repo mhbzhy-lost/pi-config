@@ -1036,7 +1036,7 @@ test("headless runtime installation exposes only project-owned subagent tools", 
     assert.doesNotMatch(tool.description, /proactive skill methodology/i);
     assert.doesNotMatch(tool.description, /pi-subagents|upstream/i);
   }
-  assert.match(toolByName(pi, "managed_workspace_dispose").description, /CHILD_OWNS_INTEGRATION/);
+  assert.match(toolByName(pi, "managed_workspace_dispose").description, /受控兜底/);
   assert.match(toolByName(pi, "supervisor_request_reply").promptGuidelines.join("\n"), /writeReply/);
   assert.match(toolByName(pi, "supervisor_request_pending").description, /pending/);
 });

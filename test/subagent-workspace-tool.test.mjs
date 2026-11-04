@@ -39,8 +39,8 @@ test("subagent_worktree derives standalone ownership from live context and expos
   // 只把期望换为当前中文 description 的真实事实。
   assert.match(tool.description, /workspace_id.*run 已完成/);
   assert.match(tool.description, /allowed_dispositions.*action_token/);
-  assert.match(tool.description, /CHILD_OWNS_INTEGRATION/);
-  assert.match(tool.description, /publication=forbidden（generic）的工作区能否 integrate 以状态权威返回为准/);
+  assert.match(tool.description, /受控兜底/);
+  assert.match(tool.description, /terminal proof 已 observed/);
   assert.deepEqual(tool.parameters.anyOf.map((branch) => branch.properties.action.const), ["list", "status", "dispose", "release"]);
   assert.equal(JSON.stringify(tool.parameters).includes("rootSessionId"), false);
   const status = await tool.execute("call", { action: "status", workspace_id: "workspace-a" }, undefined, undefined, { sessionManager: { rootSessionId: "session-a" } });
@@ -99,7 +99,7 @@ test("root cannot directly integrate a public child workspace", async (t) => {
   assert.throws(() => service.disposeOwned({
     workspaceId: active.workspaceId, ownerScope: { kind: "standalone-subagent", rootSessionId: "root-child" },
     disposition: "integrate", terminalProof: proof, actionToken: issued.actionToken,
-  }), (error) => error?.code === "CHILD_OWNS_INTEGRATION");
+  }), (error) => error?.code === "MANAGED_WORKSPACE_ACTION");
 });
 
 test("child integration tool exposes eight actions and injects trusted identity", async () => {

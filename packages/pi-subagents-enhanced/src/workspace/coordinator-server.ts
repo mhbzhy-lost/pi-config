@@ -36,7 +36,8 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
   const stateRoot = declaredStateRoot ? canonicalWorkspaceStateRoot(declaredStateRoot) : undefined;
   const storageRepositoryId = options.storageRepositoryId ?? options.repositoryId;
   const workspaceService = stateRoot
-    ? createManagedWorkspaceService({ stateRoot, storageRepositoryId, fault: event => options.fault?.({ ...event }), admissionProbe: options.admissionProbe })
+    ? createManagedWorkspaceService({ stateRoot, storageRepositoryId, fault: event => options.fault?.({ ...event }), admissionProbe: options.admissionProbe,
+      integrationFallback: { blockedReasons: integrationFallbackBlockedReasons, execute: integrateTerminalWorkspace } })
     : undefined;
   const integrationQueue = workspaceService
     ? createIntegrationQueue({ stateRoot, repositoryId: options.repositoryId, storageRepositoryId })
@@ -153,6 +154,54 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
     if (entry.run?.runId !== binding.runId) throw new Error("trusted run binding is unavailable");
     if (entry.leaseId !== binding.leaseId) throw new Error("trusted workspace lease mismatch");
     return entry;
+  }
+
+  function integrationFallbackBlockedReasons(binding: any): string[] {
+    if (!integrationQueue || !workspaceService || !proofOutbox) return ["integration-coordinator-unavailable"];
+    trustedWorkspace(binding);
+    const items = integrationQueue.listQueue().filter(item => item.workspaceId === binding.workspaceId);
+    const item = integrationQueue.findByBinding(binding);
+    if (items.some(current => current.leaseId !== binding.leaseId || current.childRunId !== binding.runId
+        || current.ownerScope?.kind !== binding.ownerScope.kind || current.ownerScope?.rootSessionId !== binding.ownerScope.rootSessionId)) return ["queue-binding-mismatch"];
+    if (integrationQueue.listResumeIntents().some(intent => intent.workspaceId === binding.workspaceId
+        && ["starting", "activated"].includes(intent.state))) return ["queue-resume-in-progress"];
+    if (!item) return workspaceService.integrationState({}, binding).intent ? ["queue-intent-orphaned"] : [];
+    if (item.autoManaged !== true) return ["queue-child-authorization-required"];
+    if (!["queued", "admitted", "prepared", "completed"].includes(item.state)) return ["queue-recovery-required"];
+    const completion = workspaceService.inspectIntegrationCompletion(binding);
+    if (item.state === "completed" && (!completion.integrationReceipt
+        || item.workspaceDispositionReceiptId !== completion.integrationReceipt.receiptId
+        || item.candidateHead !== completion.integrationReceipt.candidateHead
+        || item.integrationIntentId !== completion.integrationReceipt.integrationIntentId)) return ["queue-receipt-mismatch"];
+    if (item.state !== "completed" && completion.integrationReceipt && item.state !== "prepared") return ["queue-receipt-mismatch"];
+    return [];
+  }
+
+  async function integrateTerminalWorkspace(binding: any, terminalProof: any) {
+    const blocked = integrationFallbackBlockedReasons(binding);
+    if (blocked.length) throw Object.assign(new Error(`integration fallback blocked: ${blocked.join(", ")}`), { code: "MANAGED_WORKSPACE_INTEGRATE" });
+    // 合法 coding allocation/bindRun 可能因 child 工具未装载而没有 queue item。
+    // 首次偏离是 publication 从未入队；父侧授权由 service 的 proof+快照 CAS 消费，
+    // 随后复用原 auto queue，绝不建立第二份 workspace 或 publication 账本。
+    prepareAutoIntegration(binding);
+    let item = integrationQueue!.findByBinding(binding);
+    if (item.state === "prepared") {
+      publishRebasedCandidate({ queueItemId: item.queueItemId, queueLeaseId: item.queueLeaseId, candidateHead: item.candidateHead }, binding);
+    } else if (item.state !== "completed") {
+      advanceAutoIntegration({}, binding);
+    }
+    item = integrationQueue!.findByBinding(binding);
+    // FIFO 尚未准入、冲突和失败不能被当成成功；已有 queue/proof 现场供后续恢复。
+    if (item.state !== "completed") throw Object.assign(new Error(`integration queue is ${item.state}; query status before retrying`), { code: "MANAGED_WORKSPACE_INTEGRATE" });
+    const completion = workspaceService!.inspectIntegrationCompletion(binding);
+    if (!completion.integrationReceipt || item.workspaceDispositionReceiptId !== completion.integrationReceipt.receiptId) throw new Error("integration queue receipt is incomplete");
+    // 已发布的 completed 项只补证明/回收，禁止再次应用候选或重写后续用户提交。
+    await proofOutbox!.enqueue({ ...terminalProof, workspaceId: binding.workspaceId, ownerScope: binding.ownerScope });
+    await replayTerminalProofs();
+    const accepted: any = await proofOutbox!.receipt(terminalProof.proofId);
+    if (!accepted?.accepted || accepted.receipt?.workspaceId !== binding.workspaceId || accepted.receipt?.leaseId !== binding.leaseId
+        || accepted.receipt?.state !== "released") throw new Error("integration terminal proof settlement remains pending");
+    return accepted.receipt;
   }
 
   function inspectAutoIntegration(binding: any) {

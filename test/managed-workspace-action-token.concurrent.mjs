@@ -15,6 +15,11 @@ test("two service processes cannot consume one v2 action token", async t => {
   const ownerScope = { kind: "standalone-subagent", rootSessionId: "root-token" }; const issued = first.issueAction({ workspaceId: active.workspaceId, ownerScope, action: "publish", terminalProof: proof });
   const results = await Promise.allSettled([Promise.resolve().then(() => first.publishOwned({ workspaceId: active.workspaceId, ownerScope, terminalProof: proof, actionToken: issued.actionToken })), Promise.resolve().then(() => second.publishOwned({ workspaceId: active.workspaceId, ownerScope, terminalProof: proof, actionToken: issued.actionToken }))]);
   assert.equal(results.filter(r => r.status === "fulfilled").length, 1); assert.equal(results.filter(r => r.status === "rejected").length, 1); assert.match(results.find(r => r.status === "rejected").reason.message, /action|replay|stale/i);
+  const published = first.issueOwnedDisposition({ workspaceId: active.workspaceId, ownerScope, terminalProof: proof });
+  assert.ok(published.blockedReasons.includes("artifact-action-exists"));
+  assert.equal(published.allowedDispositions.includes("integrate"), false);
+  assert.throws(() => first.disposeOwned({ workspaceId: active.workspaceId, ownerScope, terminalProof: proof,
+    disposition: "integrate", actionToken: published.actionToken }), error => error?.code === "MANAGED_WORKSPACE_TERMINAL");
 });
 test("reconcile repairs receipt after publish effect completed", async t => {
   const f = await fixture(t); const stateRoot = join(f.root, "recovery-state"); const request = createManagedWorkspaceRequestV2({ workspaceId: "receipt-recovery", owner: { kind: "standalone-subagent", rootSessionId: "root-recovery", toolCallId: "tool-recovery" }, originRoot: f.originRoot, requestedCwd: f.originRoot, originRef: "refs/heads/main", baseCommit: f.baseCommit, contractHash: "b".repeat(64), policy: { publication: "allowed", application: "forbidden", writePaths: ["README"] } });

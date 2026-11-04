@@ -279,7 +279,7 @@ test("unbound allocation orphans clean up through preserve and release without a
   assert.deepEqual(beforePreserve.receipt.owner, active.owner);
   assert.equal(beforePreserve.receipt.leaseId, active.leaseId);
   assert.deepEqual(beforePreserve.terminalProof, { state: "pending" });
-  assert.deepEqual(beforePreserve.allowedDispositions, ["preserve", "release"]);
+  assert.deepEqual(beforePreserve.allowedDispositions, ["preserve"]);
   assert.equal(beforePreserve.allowedDispositions.includes("discard"), false);
   const issued = service.issueDisposition({ workspaceId: active.workspaceId, terminalProof: { state: "pending" } });
   assert.equal(issued.actionToken.startsWith("managed-workspace-action.v1:"), true);
@@ -297,7 +297,7 @@ test("terminal proof and action token gate discard for bound runs, and replay is
   service.bindRun({ workspaceId: active.workspaceId, run });
 
   const pending = service.issueDisposition({ workspaceId: active.workspaceId, terminalProof: { state: "pending" } });
-  assert.deepEqual(pending.allowedDispositions, ["preserve", "release"]);
+  assert.deepEqual(pending.allowedDispositions, ["preserve"]);
   assert.throws(() => service.dispose({ workspaceId: active.workspaceId, terminalProof: { state: "pending" }, disposition: "discard", actionToken: pending.actionToken }), /terminal|allowed/i);
 
   const proof = observedProof(run);
@@ -359,10 +359,9 @@ test("ordinary untracked files still block destructive workspace disposition and
   assert.equal(record.state, "cleanup-debt", "destructive discard failure must surface as cleanup debt");
 });
 
-test("root-side integrate is child-owned and queue admission enforces writePaths on renames", async (t) => {
-  // v1 语义（root 直接 cherry-pick integrate）已随 v1 全删收束：publication=allowed 的
-  // 集成归 child 队列，root 只能 CHILD_OWNS_INTEGRATION fail closed；writePaths 的
-  // rename 源/目的地约束在队列 admission（integrationAdmissionFacts）执行。
+test("root-side integrate requires coordinator and queue admission enforces writePaths on renames", async (t) => {
+  // 独立 service 不持有 queue 权威，父侧兜底必须经 coordinator；rename 两端
+  // 仍由既有 queue admission 的 writePaths 门禁校验。
   const f = await fixture(t);
   const service = createManagedWorkspaceService({ stateRoot: f.stateRoot });
   const active = service.ensureAllocated(request(f, "integrate"));
@@ -376,11 +375,11 @@ test("root-side integrate is child-owned and queue admission enforces writePaths
 
   const proof = observedProof(run);
   const status = service.status({ workspaceId: active.workspaceId, terminalProof: proof });
-  assert.equal(status.allowedDispositions.includes("integrate"), false, "v2 dispositions never include root-side integrate");
+  assert.equal(status.allowedDispositions.includes("integrate"), false, "无 coordinator 时不得集成");
   const issued = service.issueDisposition({ workspaceId: active.workspaceId, terminalProof: proof });
   assert.throws(
     () => service.dispose({ workspaceId: active.workspaceId, terminalProof: proof, disposition: "integrate", strategy: "cherry-pick", actionToken: issued.actionToken }),
-    (error) => error?.code === "CHILD_OWNS_INTEGRATION",
+    (error) => error?.code === "MANAGED_WORKSPACE_TERMINAL",
   );
 
   const binding = { workspaceId: active.workspaceId, leaseId: active.leaseId, runId: run.runId, ownerScope: { kind: "standalone-subagent", rootSessionId: "root-1" } };
@@ -398,6 +397,9 @@ test("root-side integrate is child-owned and queue admission enforces writePaths
   git(narrow.path, "commit", "-m", "move outside scope");
   const narrowBinding = { workspaceId: narrow.workspaceId, leaseId: narrow.leaseId, runId: narrowRun.runId, ownerScope: { kind: "standalone-subagent", rootSessionId: "root-1" } };
   const narrowHead = git(narrow.path, "rev-parse", "HEAD");
+  assert.throws(() => service.integrationAdmissionFacts({ workspaceId: narrow.workspaceId, leaseId: narrow.leaseId,
+    targetRef: "refs/heads/main", authorizedWorkspaceHead: narrowHead }, { ...narrowBinding, leaseId: "foreign-lease" }),
+    error => error?.code === "MANAGED_WORKSPACE_BINDING");
   assert.throws(
     () => service.integrationAdmissionFacts({ workspaceId: narrow.workspaceId, leaseId: narrow.leaseId, targetRef: "refs/heads/main", authorizedWorkspaceHead: narrowHead }, narrowBinding),
     (error) => error?.code === "MANAGED_WORKSPACE_WRITE_PATHS",

@@ -36,10 +36,15 @@ class ManagedWorkspaceError extends Error {
 
 type TerminalProof = { state: "pending" } | { state: "observed"; conflict: boolean; runId: string; rootSessionId: string; asyncDir: string; processInstance: string; proofId: string };
 type ServiceFault = (event: { operation: string; phase: string; workspaceId: string }) => void;
-type ServiceOptions = { stateRoot?: string; storageRepositoryId?: string; terminalProofProvider?: (input: { workspaceId: string; run: unknown }) => unknown; fault?: ServiceFault; admissionProbe?: () => void; diagnosticSink?: (entry: unknown) => void };
+type IntegrationBinding = { workspaceId: string; leaseId: string; runId: string; ownerScope: WorkspaceOwnerScope };
+type IntegrationFallback = {
+  blockedReasons: (binding: IntegrationBinding) => string[];
+  execute: (binding: IntegrationBinding, proof: TerminalProof) => unknown;
+};
+type ServiceOptions = { stateRoot?: string; storageRepositoryId?: string; terminalProofProvider?: (input: { workspaceId: string; run: unknown }) => unknown; fault?: ServiceFault; admissionProbe?: () => void; diagnosticSink?: (entry: unknown) => void; integrationFallback?: IntegrationFallback };
 export type WorkspaceOwnerScope = Readonly<{ kind: "standalone-subagent"; rootSessionId: string }>;
 type StatusInput = { workspaceId?: string; terminalProof?: unknown; expectedHead?: string };
-type DisposeInput = StatusInput & { disposition?: "integrate" | "discard" | "preserve"; strategy?: "cherry-pick" | "merge"; reason?: string; actionToken?: string };
+type DisposeInput = StatusInput & { disposition?: "integrate" | "discard" | "preserve"; strategy?: "cherry-pick" | "merge" | "rebase-ff"; reason?: string; actionToken?: string };
 type ReleaseInput = { workspaceId?: string; terminalProof?: unknown; actionToken?: string };
 type ReconcileInput = { originRoot?: string };
 
@@ -160,12 +165,13 @@ function serviceRegistry(): Map<string, any> {
   return created;
 }
 
-function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODING_WORKSPACE_DIR, storageRepositoryId, terminalProofProvider, fault, admissionProbe, diagnosticSink }: ServiceOptions = {}) {
+function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODING_WORKSPACE_DIR, storageRepositoryId, terminalProofProvider, fault, admissionProbe, diagnosticSink, integrationFallback }: ServiceOptions = {}) {
   const ledger = createManagedWorkspaceLedger({ stateRoot, storageRepositoryId });
   const diagnose = (entry: unknown) => { try { diagnosticSink?.(entry); } catch (diagnosticError) { console.error("[managed-workspace-service] diagnostic sink failed", { entry, diagnosticError }); } };
   let activeTerminalProofProvider = terminalProofProvider;
   let activeFault = fault;
   let activeAdmissionProbe = admissionProbe;
+  let activeIntegrationFallback = integrationFallback;
 
   function receipt(record) { return v2Receipt(record); }
 
@@ -435,9 +441,27 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
     if (observed(proof) && policy.application === "allowed" && lease.record.publishedArtifact) allowedActions.push("apply");
     if (observed(proof)) { allowedActions.push("discard"); if (!inspection.clean) blockedReasons.push("workspace-dirty"); }
     allowedActions.push("preserve", "release");
+    const allowedDispositions = allowedActions.filter(action => action === "discard" || action === "preserve");
+    if (policy.publication === "allowed" && lease.record.request.owner.kind === "standalone-subagent") {
+      if (!activeIntegrationFallback) blockedReasons.push("integration-coordinator-unavailable");
+      if (lease.record.publishedArtifact || lease.record.application || lease.record.v2Action) blockedReasons.push("artifact-action-exists");
+      if (lease.record.integrationReceipt && lease.record.integrationReceipt.candidateHead !== inspection.headCommit) blockedReasons.push("integrated-candidate-drift");
+      if (!inspection.descendant || !inspection.hasCommits) blockedReasons.push("workspace-no-candidate");
+      if (activeIntegrationFallback && lease.record.run) {
+        blockedReasons.push(...activeIntegrationFallback.blockedReasons(integrationBinding(lease)));
+      }
+      if (blockedReasons.length === 0) {
+        // 准入检查复用 queue 的 Git/路径合同；任何检查失败都保留现场。
+        try {
+          integrationAdmissionFacts({ workspaceId: lease.workspaceId, leaseId: lease.leaseId,
+            targetRef: lease.record.request.originRef, authorizedWorkspaceHead: inspection.headCommit }, integrationBinding(lease));
+          allowedDispositions.unshift("integrate");
+        } catch (error) { blockedReasons.push(error?.code ?? "integration-admission-rejected"); }
+      }
+    }
     const snapshotHash = managedWorkspaceSnapshotHash(inspection, proof);
     assertExpectedHead(inspection, expectedHead);
-    return { receipt: receipt(lease.record), inspection, terminalProof: proof, allowedActions, allowedDispositions: allowedActions, blockedReasons: [...new Set(blockedReasons)], snapshotHash };
+    return { receipt: receipt(lease.record), inspection, terminalProof: proof, allowedActions, allowedDispositions, blockedReasons: [...new Set(blockedReasons)], snapshotHash };
   }
 
   function issueActionForLease(lease, { action, terminalProof, expectedHead, snapshotHash }: any = {}) {
@@ -564,10 +588,12 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
     }
   }
 
-  function disposeForLease(lease, { terminalProof, expectedHead, disposition, strategy = "cherry-pick", reason, actionToken: suppliedToken }: Omit<DisposeInput, "workspaceId"> = {}) {
-    if (disposition === "integrate" && lease.record.request.policy.publication === "allowed") {
-      throw failure("CHILD_OWNS_INTEGRATION", "integration is owned by the child integration queue");
-    }
+  function integrationBinding(lease): IntegrationBinding {
+    return { workspaceId: lease.workspaceId, leaseId: lease.leaseId, runId: lease.record.run?.runId,
+      ownerScope: { kind: "standalone-subagent", rootSessionId: lease.record.request.owner.rootSessionId } };
+  }
+
+  function disposeForLease(lease, { terminalProof, expectedHead, disposition, strategy = "rebase-ff", reason, actionToken: suppliedToken }: Omit<DisposeInput, "workspaceId"> = {}) {
     if (lease.record.state === "disposing") {
       if (tokenHash(suppliedToken) !== lease.record.actionChallenge?.tokenHash) throw failure("MANAGED_WORKSPACE_ACTION", "action token does not own pending disposition");
       return receipt(recoverDisposition(lease).record);
@@ -585,6 +611,20 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
     if (!challenge.allowed.includes(disposition) || !snapshot.allowedDispositions.includes(disposition)) {
       throw failure("MANAGED_WORKSPACE_TERMINAL", "disposition is not allowed by the terminal and workspace snapshot");
     }
+    if (disposition === "integrate") {
+      if (!activeIntegrationFallback || strategy !== "rebase-ff") throw failure("MANAGED_WORKSPACE_INTEGRATE", "integration requires the coordinator rebase-ff fallback");
+      const revision = lease.revision;
+      lease = mutate(lease, record => {
+        if (record.revision !== revision || record.actionChallenge?.used
+            || record.actionChallenge?.tokenHash !== challenge.tokenHash) throw failure("MANAGED_WORKSPACE_CAS", "workspace changed before integration authorization");
+        record.actionChallenge.used = true;
+        record.terminalProof = structuredClone(snapshot.terminalProof);
+        return record;
+      });
+      // 正常路径仍由 child 发布；父侧只消费已终止 run 的一次性授权，实际集成与
+      // proof/release 全部交给同一 coordinator 队列，不调用 artifact apply。
+      return activeIntegrationFallback.execute(integrationBinding(lease), snapshot.terminalProof as TerminalProof);
+    }
     const normalizedDisposition = dispositionValue(disposition, { strategy, reason });
     lease = mutate(lease, (record) => {
       record.actionChallenge.used = true;
@@ -593,7 +633,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
       if (observed(snapshot.terminalProof)) record.terminalProof = structuredClone(snapshot.terminalProof);
       record.pendingAction = {
         disposition,
-        strategy: disposition === "integrate" ? strategy : null,
+        strategy: null,
         reason: disposition === "preserve" ? normalizedDisposition.reason : null,
         snapshotHash: snapshot.snapshotHash,
         proofHash: observed(snapshot.terminalProof) ? snapshot.terminalProof.proofId : null,
@@ -861,6 +901,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
       activeTerminalProofProvider = options.terminalProofProvider;
       activeFault = options.fault;
       activeAdmissionProbe = options.admissionProbe;
+      activeIntegrationFallback = options.integrationFallback;
     },
     reserve, ensureAllocated, bindRun, rebindRunForRecovery, recordTerminalProof, listOwned, readOwned, status, statusOwned, issueDisposition, issueOwnedDisposition, issueAction,
     prepareOwnedDisposition, readPreparedDisposition, applyPreparedDisposition, listPreparedDispositions, markDispositionSettled,

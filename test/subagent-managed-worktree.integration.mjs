@@ -113,7 +113,9 @@ function codingContract(originRoot) {
 }
 
 async function execute(tool, input, originRoot, toolCallId = "tool-call") {
-  return tool.execute(toolCallId, input, undefined, undefined, { cwd: originRoot, sessionManager: {} });
+  // fixture 的 RPC session 使用 realpath；Host ctx 必须提供同一个实际 cwd，
+  // macOS /var 与 /private/var 别名差异不能伪造 production 身份不匹配。
+  return tool.execute(toolCallId, input, undefined, undefined, { cwd: realpathSync(originRoot), sessionManager: {} });
 }
 
 function strictAuthorizationRegistrar(expectedKind, registered) {
@@ -262,8 +264,7 @@ test("typed coding facade allocates, binds, reports, discards, and releases thro
   git(spawned.details.dispatch_cwd, "add", "allowed.txt");
   git(spawned.details.dispatch_cwd, "commit", "-m", "child change");
   const status = await execute(tools.find(tool => tool.name === "managed_workspace_status"), { workspace_id: spawned.details.workspace_id }, f.originRoot);
-  // v2 workspaces own integration in the child queue; the root tool only
-  // offers destructive or preserving dispositions plus release.
+  // 本场景只有独立 service，未装配 coordinator，不能绕过 queue 集成。
   assert.equal(status.details.allowed_dispositions.includes("integrate"), false);
   assert.ok(status.details.allowed_dispositions.includes("discard"));
   assert.ok(status.details.allowed_dispositions.includes("preserve"));
@@ -273,7 +274,7 @@ test("typed coding facade allocates, binds, reports, discards, and releases thro
     action_token: status.details.action_token,
   }, f.originRoot);
   assert.equal(childOwned.isError, true);
-  assert.equal(childOwned.details.code, "CHILD_OWNS_INTEGRATION");
+  assert.equal(childOwned.details.code, "MANAGED_WORKSPACE_TERMINAL");
   const disposed = await execute(tools.find(tool => tool.name === "managed_workspace_dispose"), {
     workspace_id: spawned.details.workspace_id,
     disposition: "discard",

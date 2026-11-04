@@ -9,6 +9,8 @@ import test from "node:test";
 import { createManagedWorkspaceRequestV2 } from "../packages/pi-subagents-enhanced/src/workspace/contract.ts";
 import { createCoordinatorServer } from "../packages/pi-subagents-enhanced/src/workspace/coordinator-server.ts";
 import { connectRepositoryCoordinator } from "../packages/pi-subagents-enhanced/src/workspace/coordinator-client.ts";
+import { createWorkspaceOperationTools } from "../packages/pi-subagents-enhanced/src/workspace/operation-tools.ts";
+import { createManagedWorkspaceLedger } from "../packages/pi-subagents-enhanced/src/workspace/ledger.ts";
 import { createChildIntegrationLifecycle, resetChildIntegrationLifecyclesForTest } from "../packages/pi-subagents-enhanced/src/workspace/child-integration-lifecycle.ts";
 
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -149,6 +151,75 @@ test("real coordinator socket clients prepare idempotently, preserve FIFO waitin
   assert.equal(f.coordinator.internal.integrationQueue.getItem(firstPrepared.queueItem.queueItemId).admissionGeneration, 1);
   const secondAdmission = await secondClient.awaitIntegrationAdmission({ queueItemId: secondPrepared.queueItem.queueItemId, workspaceId: second.binding.workspaceId, leaseId: second.binding.leaseId, runId: second.binding.runId });
   assert.equal(secondAdmission.targetHead, first.head);
+
+  // 正常 child-owned 发布保持不变；父侧只在 observed proof 后接续第二项。
+  const service = f.coordinator.internal.workspaceService;
+  const proof = { state: "observed", conflict: false, runId: second.run.runId, rootSessionId: "root-b",
+    asyncDir: second.run.asyncDir, processInstance: "process-second", proofId: "d".repeat(64) };
+  service.recordTerminalProof({ ...second.binding, proof });
+  const secondStatus = await secondClient.issueOwnedDisposition({ workspaceId: second.receipt.workspaceId });
+  const secondReleased = await secondClient.disposeOwned({ workspaceId: second.receipt.workspaceId, disposition: "integrate", actionToken: secondStatus.actionToken });
+  assert.equal(secondReleased.state, "released");
+  assert.equal(f.coordinator.internal.integrationQueue.findByBinding(second.binding).state, "completed");
+  assert.equal(secondReleased.terminalProof.proofId, proof.proofId);
+
+  // 合法 allocation/bindRun + commit + 权威 proof，child 从未调用 integration 工具。
+  const fallback = await allocateCandidate({ ...f, baseCommit: git(f.originRoot, "rev-parse", "HEAD") }, "parent-fallback", "root-b", "fallback.txt");
+  const tools = Object.fromEntries(createWorkspaceOperationTools({ service: secondClient, resolveRootSessionId: () => "root-b" }).map(tool => [tool.name, tool]));
+  const call = (name, input) => tools[name].execute("fallback-call", input, undefined, undefined, {});
+  const status = () => call("managed_workspace_status", { workspace_id: fallback.receipt.workspaceId });
+  const integrate = token => call("managed_workspace_dispose", { workspace_id: fallback.receipt.workspaceId, disposition: "integrate", action_token: token });
+  assert.equal(f.coordinator.internal.integrationQueue.findByBinding(fallback.binding), null);
+  const pending = await status();
+  assert.equal(pending.details.allowed_dispositions.includes("integrate"), false);
+  assert.equal((await integrate(pending.details.action_token)).details.code, "MANAGED_WORKSPACE_TERMINAL");
+  const fallbackProof = { ...proof, runId: fallback.run.runId, asyncDir: fallback.run.asyncDir, proofId: "e".repeat(64) };
+  service.recordTerminalProof({ ...fallback.binding, proof: fallbackProof });
+  const ready = await status();
+  assert.deepEqual(ready.details.allowed_dispositions, ["integrate", "discard", "preserve"]);
+  await assert.rejects(() => reloaded.disposeOwned({ workspaceId: fallback.receipt.workspaceId, disposition: "integrate", actionToken: ready.details.action_token }), /owner|belong/i);
+  const dirtyOrigin = join(f.originRoot, "src", "user.txt");
+  await writeFile(dirtyOrigin, "用户修改\n");
+  assert.equal((await integrate(ready.details.action_token)).details.code, "MANAGED_WORKSPACE_ACTION");
+  const blockedOrigin = await status();
+  assert.ok(blockedOrigin.details.integrate_blocked_reasons.includes("origin-dirty"));
+  assert.equal((await integrate(blockedOrigin.details.action_token)).details.code, "MANAGED_WORKSPACE_TERMINAL");
+  await rm(dirtyOrigin);
+  await writeFile(join(fallback.receipt.path, "src", "fallback.txt"), "未提交修改\n");
+  const dirtyWorkspace = await status();
+  assert.ok(dirtyWorkspace.details.integrate_blocked_reasons.includes("workspace-dirty"));
+  assert.equal((await integrate(dirtyWorkspace.details.action_token)).details.code, "MANAGED_WORKSPACE_TERMINAL");
+  await writeFile(join(fallback.receipt.path, "src", "fallback.txt"), "parent-fallback\n");
+  const old = await status();
+  const current = await status();
+  assert.equal((await integrate(old.details.action_token)).details.code, "MANAGED_WORKSPACE_ACTION");
+  const before = git(f.originRoot, "rev-parse", "HEAD");
+  const released = await integrate(current.details.action_token);
+  assert.equal(released.isError, false, released.content[0].text);
+  assert.equal(released.details.state, "released");
+  const item = f.coordinator.internal.integrationQueue.findByBinding(fallback.binding);
+  assert.equal(item.state, "completed");
+  assert.equal(git(f.originRoot, "rev-parse", "HEAD"), item.candidateHead);
+  assert.notEqual(item.candidateHead, before);
+  assert.equal(git(f.originRoot, "status", "--porcelain"), "");
+  assert.equal(f.coordinator.internal.integrationQueue.listReceiptEvents().filter(event => event.queueItemId === item.queueItemId).length, 1);
+  const record = createManagedWorkspaceLedger({ stateRoot: f.stateRoot }).load(fallback.receipt.workspaceId).record;
+  assert.equal(record.integrationReceipt.receiptId, item.workspaceDispositionReceiptId);
+  assert.equal(record.terminalProof.proofId, fallbackProof.proofId);
+  await writeFile(join(f.originRoot, "src", "later.txt"), "后续用户修改\n");
+  git(f.originRoot, "add", "."); git(f.originRoot, "commit", "-m", "later user change");
+  const laterHead = git(f.originRoot, "rev-parse", "HEAD");
+  assert.equal((await integrate(current.details.action_token)).details.code, "MANAGED_WORKSPACE_STATE");
+  assert.equal(git(f.originRoot, "rev-parse", "HEAD"), laterHead);
+  // 第一项已由正常 child-owned 路径发布，但未回收。后续用户提交存在时仅
+  // 补原 receipt 对应的 proof/release，不能把主仓恢复到第一项候选。
+  service.recordTerminalProof({ ...first.binding, proof: { ...proof, rootSessionId: "root-a", runId: first.run.runId,
+    asyncDir: first.run.asyncDir, proofId: "f".repeat(64) } });
+  const published = await reloaded.issueOwnedDisposition({ workspaceId: first.receipt.workspaceId });
+  const publishedReleased = await reloaded.disposeOwned({ workspaceId: first.receipt.workspaceId, disposition: "integrate", actionToken: published.actionToken });
+  assert.equal(publishedReleased.state, "released");
+  assert.equal(git(f.originRoot, "rev-parse", "HEAD"), laterHead);
+  assert.equal(f.coordinator.internal.integrationQueue.listReceiptEvents().filter(event => event.queueItemId === firstPrepared.queueItem.queueItemId).length, 1);
 });
 
 test("non-LLM agent_end wiring advances enqueue through admission, rebase, publish and receipt", async (t) => {

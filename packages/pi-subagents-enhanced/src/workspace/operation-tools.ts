@@ -15,7 +15,7 @@ import { createSubagentWorkspaceTool } from "./tool.ts";
 
 const ID_MAX = 4096;
 const DISPOSITIONS = Object.freeze(["integrate", "discard", "preserve"]);
-const STRATEGIES = Object.freeze(["cherry-pick", "merge"]);
+const STRATEGIES = Object.freeze(["rebase-ff"]);
 
 function nonempty(value: unknown): boolean {
   return typeof value === "string" && value.length > 0 && value.length <= ID_MAX;
@@ -93,9 +93,10 @@ const OPERATIONS: readonly OperationSpec[] = Object.freeze([
     label: "Managed Workspace Dispose",
     description:
       "按一次性 token 处置托管工作区：必填 workspace_id、disposition（integrate|discard|preserve）与 managed_workspace_status 签发的 action_token。" +
-      "只执行 status 当前 allowed_dispositions 包含的处置；publication=allowed 的 coding 工作区 integrate 由子代理 integration queue 自主拥有，" +
-      "本调用会被拒（CHILD_OWNS_INTEGRATION）；其余工作区能否 integrate 同样以 status 实时返回为权威，不在此预判。" +
-      "strategy 为可选参数（cherry-pick|merge，缺省 cherry-pick），仅对 integrate 有效：schema 不保留顶层 allOf 条件早拒，" +
+      "只执行 status 当前 allowed_dispositions 包含的处置；coding 工作区正常由 child integration queue 自主发布。" +
+      "integrate 是 child 未完成集成时的受控兜底：必须具有权威 observed terminal proof、有效 owner/lease 与快照 token，origin 和 workspace 均 clean，且满足 queue 准入合同。" +
+      "沿同一 queue、receipt、proof 与释放路径完成；运行中、证明待定、dirty 或过期 token 均拒绝。" +
+      "strategy 为可选参数（rebase-ff，缺省 rebase-ff），仅对 integrate 有效：schema 不保留顶层 allOf 条件早拒，" +
       "非 integrate 携带 strategy 由原 runtime 以 INVALID_WORKSPACE_STRATEGY 拒绝，这是明确的 schema 早拒降级为 runtime 裁决，而非语义放宽。" +
       "preserve 的 reason 由 runtime 注入，不作为模型参数。",
     promptSnippet: "携带 status 签发的 action_token 处置工作区（integrate|discard|preserve）。",
@@ -184,7 +185,7 @@ export function createWorkspaceOperationTools(
   options: { service: unknown; resolveRootSessionId: (sessionManager: unknown) => string | undefined; renderCall?: unknown; renderResult?: unknown },
 ) {
   // 只构造一次旧 union 工具：其 execute 是唯一执行闭包（session 解析、owner 注入、
-  // service 路由、INVALID_WORKSPACE_STRATEGY/CHILD_OWNS_INTEGRATION 捕获、公开投影全部沿用）。
+  // service 路由、INVALID_WORKSPACE_STRATEGY 捕获、公开投影全部沿用）。
   const delegated = createSubagentWorkspaceTool(options as never);
   const delegatedExecute = delegated.execute;
   return Object.freeze(OPERATIONS.map((operation) => Object.freeze({
