@@ -70,9 +70,12 @@ if(scenario==='empty') {const childStart=events.find(e=>e.child&&e.type==='start
  if(scenario==='stop') { assert.notEqual(status.state,'complete','stop不能被误标成功');const f=join(root,'workspace/supervisor-control');const persisted=await Promise.all((await readdir(f)).filter(x=>x.endsWith('.json')).map(async x=>JSON.parse(await readFile(join(f,x),'utf8')).value));assert.equal(persisted.flatMap(x=>x.requests).find(x=>x.requestId===request.message.details.requestId).state,'failed','stop不能留下幽灵pending');assert.equal(events.some(e=>!e.child&&e.message?.toolName==='supervisor_request_reply'&&e.message.details?.replyTo),false);return; }
  if(scenario==='invalid-reply') {
    // 合同：Host在tool执行前做schema校验，第2/3次缺replyTo的调用不会进入控制面（details为空对象、无code）。按回执顺序断言，保留“schema非法调用不得投递”的覆盖。
+   // Pi 1.5 的 Host public validator 走 pi-schema：错误回执为 `Validation failed for tool "<name>":`
+   // 加 `  - <path>: missing`，缺字段一律表现为 `replyTo: missing`，不再是 1.4 的
+   // TypeBox locale 文案 `must have required properties replyTo`。
    const replies=events.filter(e=>!e.child&&e.message?.toolName==='supervisor_request_reply');assert.equal(replies.length,3);assert.ok(replies.every(e=>e.message.isError===true));
    assert.equal(replies[0].message.details?.code,'SUPERVISOR_REQUEST_NOT_PENDING');
-   for(const reply of replies.slice(1)){assert.equal(reply.message.details?.code,undefined,'Host校验失败的回执不应带控制面错误码');assert.match(reply.message.content[0].text,/must have required properties replyTo/);}
+   for(const reply of replies.slice(1)){assert.equal(reply.message.details?.code,undefined,'Host校验失败的回执不应带控制面错误码');assert.match(reply.message.content[0].text,/Validation failed for tool "supervisor_request_reply"/);assert.match(reply.message.content[0].text,/- replyTo: missing/);}
    assert.equal(childResult.message.isError,true);
    // 零投递：只读durable权威面，schema非法调用不得留下已消费receipt，请求最终为expired。
    const folder=join(root,'workspace/supervisor-control');const readPersisted=async()=>Promise.all((await readdir(folder)).filter(x=>x.endsWith('.json')).map(async x=>JSON.parse(await readFile(join(folder,x),'utf8')).value));

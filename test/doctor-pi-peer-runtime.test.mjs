@@ -69,7 +69,7 @@ test("official Host loader TS factory through native MJS preserves all four iden
   await writeFile(path, 'import * as identities from "./native-peers.mjs";\nexport default function(pi) { pi.registerCommand("peer-identity", { handler() { return identities; } }); }\n');
   const output = runOfficialNativeProbe(root, path, "native-identities");
   for (const [, name] of exportsToCheck) assert.ok(output.includes(`${name}: native === enhanced, native === Host`), output);
-  assert.match(output, /Host and enhanced Pi peer versions: all four 1\.4\.0/);
+  assert.match(output, /Host and enhanced Pi peer versions: all four 1\.5\.0/);
   t.diagnostic(output.trim());
 });
 
@@ -81,7 +81,7 @@ test("official Host loader through production compat/upstream watchdog returns e
   await writeFile(path, `import { upstreamSubagentRuntime } from ${JSON.stringify(compat)};\nexport default function(pi) { upstreamSubagentRuntime(pi); }\n`);
   const output = runOfficialNativeProbe(root, path, "watchdog-consumer");
   assert.match(output, /Box subclass === enhanced, Box subclass === Host; warning rendered/);
-  assert.match(output, /Host and enhanced Pi peer versions: all four 1\.4\.0/);
+  assert.match(output, /Host and enhanced Pi peer versions: all four 1\.5\.0/);
   t.diagnostic(output.trim());
 });
 

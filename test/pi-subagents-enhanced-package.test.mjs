@@ -104,17 +104,17 @@ test("pi-subagents-enhanced exposes a publishable pinned package contract", asyn
   const rootManifest = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8"));
   const manifest = await metadata();
   assert.equal(rootManifest.private, true);
-  // Pi 1.3.0 起四个核心包只声明精确版本（当前 pi-coding-agent -> pi-codemode@1.4.0），
+  // Pi 1.3.0 起四个核心包只声明精确版本（当前 pi-coding-agent -> pi-codemode@1.5.0），
   // 不再存在 ^1.0.4 漂移源，因此旧的 1.0.4 codemode override 已删除；
-  // 这里改为断言 override 不再存在，且干净闭包解析出的就是 1.4.0。
+  // 这里改为断言 override 不再存在，且干净闭包解析出的就是 1.5.0。
   assert.equal(Object.hasOwn(rootManifest, "overrides"), false);
   assert.equal(Object.hasOwn(manifest, "overrides"), false);
   const rootLock = JSON.parse(await readFile(join(repoRoot, "package-lock.json"), "utf8"));
   const lockedCodemode = Object.entries(rootLock.packages).filter(([path]) => path.endsWith("node_modules/@earendil-works/pi-codemode"));
   assert.ok(lockedCodemode.length > 0, "根 lock 必须记录 codemode 闭包");
   for (const [, entry] of lockedCodemode) {
-    assert.equal(entry.version, "1.4.0");
-    assert.equal(entry.resolved, "https://registry.npmjs.org/@earendil-works/pi-codemode/-/pi-codemode-1.4.0.tgz");
+    assert.equal(entry.version, "1.5.0");
+    assert.equal(entry.resolved, "https://registry.npmjs.org/@earendil-works/pi-codemode/-/pi-codemode-1.5.0.tgz");
     assert.match(entry.integrity, /^sha512-/);
   }
   assert.deepEqual({
@@ -143,7 +143,7 @@ test("pi-subagents-enhanced exposes a publishable pinned package contract", asyn
     "./workspace": "./src/workspace/service.ts",
     "./workspace/admin": "./src/workspace/administration.ts",
   });
-  assert.deepEqual(manifest.dependencies, { "pi-subagents": "0.80.0", typescript: "5.9.3" });
+  assert.deepEqual(manifest.dependencies, { "pi-subagents": "0.84.0", typescript: "5.9.3" });
   assert.deepEqual(manifest.optionalDependencies, { "fs-ext": "2.1.1" });
   const packageLock = JSON.parse(await readFile(join(packageRoot, "package-lock.json"), "utf8"));
   for (const [lock, entry] of [[rootLock, 'packages/pi-subagents-enhanced'], [packageLock, '']]) {
@@ -154,10 +154,10 @@ test("pi-subagents-enhanced exposes a publishable pinned package contract", asyn
     assert.equal(native.resolved, "https://registry.npmjs.org/fs-ext/-/fs-ext-2.1.1.tgz");
   }
   assert.deepEqual(manifest.devDependencies, {
-    "@earendil-works/pi-agent-core": "1.4.0",
-    "@earendil-works/pi-ai": "1.4.0",
-    "@earendil-works/pi-coding-agent": "1.4.0",
-    "@earendil-works/pi-tui": "1.4.0",
+    "@earendil-works/pi-agent-core": "1.5.0",
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@earendil-works/pi-tui": "1.5.0",
   });
   assert.deepEqual(manifest.bundleDependencies, ["pi-subagents"]);
   assert.equal(Object.hasOwn(manifest, "bundledDependencies"), false);
@@ -181,7 +181,7 @@ test("package setup and verify exercise the package-local upstream without patch
     run: async (...args) => { calls.push(args); },
   });
   assert.deepEqual(calls[0]?.[1], [
-    "--no-audit", "--no-fund", "install", "--prefix", packageRoot, "--ignore-scripts", "--omit=peer", "--save-exact", "--registry=https://registry.npmjs.org/", "pi-subagents@0.80.0",
+    "--no-audit", "--no-fund", "install", "--prefix", packageRoot, "--ignore-scripts", "--omit=peer", "--save-exact", "--registry=https://registry.npmjs.org/", "pi-subagents@0.84.0",
   ]);
   assert.deepEqual(calls[1]?.[1], ["rebuild", "fs-ext", "--prefix", packageRoot, "--ignore-scripts=false", "--registry=https://registry.npmjs.org/"]);
   assert.equal(calls[2]?.[0], process.execPath);
@@ -193,10 +193,16 @@ test("package setup and verify exercise the package-local upstream without patch
   assert.deepEqual({ name: report.name, version: report.version, upstreamVersion: report.upstreamVersion }, {
     name: "pi-subagents-enhanced",
     version: "0.1.0",
-    upstreamVersion: "0.80.0",
+    upstreamVersion: "0.84.0",
   });
   assert.ok(report.tarball.fileCount > 0);
   assert.ok(report.tarball.unpackedSize > 0);
+  // T1 新增的发布闭包门禁：四个公开 specifier 的 runtime/types target 与 bundle/chunk 闭包必须真实存在。
+  assert.deepEqual(report.upstreamExports.specifiers.map((entry) => entry.specifier), [
+    "pi-subagents", "pi-subagents/agents", "pi-subagents/required-child-extensions", "pi-subagents/capability-ceiling",
+  ]);
+  assert.ok(report.upstreamExports.specifiers.every((entry) => entry.runtime.startsWith("bundle/")), JSON.stringify(report.upstreamExports.specifiers));
+  assert.ok(report.upstreamExports.closure.files > 0 && report.upstreamExports.closure.edges > 0, JSON.stringify(report.upstreamExports.closure));
 });
 
 test("npm dry-run tarball contains the complete runtime closure and no repository-private files", async () => {
@@ -256,7 +262,7 @@ test("npm dry-run tarball contains the complete runtime closure and no repositor
 
 test("package setup installs Pi core typings as development dependencies", async () => {
   for (const peer of forbiddenLocalPeers) {
-    assert.equal((await metadata(join(await preparedPackageFixture(), "node_modules", peer))).version, "1.4.0", peer);
+    assert.equal((await metadata(join(await preparedPackageFixture(), "node_modules", peer))).version, "1.5.0", peer);
 
   }
   const root = await preparedPackageFixture();
@@ -278,7 +284,7 @@ test("published upstream uses package exports and loads in plain Node", async ()
   const command = 'import("pi-subagents").then(() => process.stdout.write("loaded"))';
   assert.equal(execFileSync("node", ["--input-type=module", "-e", command], { cwd: root, encoding: "utf8" }), "loaded");
   const upstream = JSON.parse(await readFile(join(root, "node_modules/pi-subagents", "package.json"), "utf8"));
-  assert.equal(upstream.version, "0.80.0");
+  assert.equal(upstream.version, "0.84.0");
   assert.ok(upstream.exports["."]);
 });
 
@@ -296,7 +302,7 @@ test("package verification rejects upstream drift, missing patch, and escaping e
   const drift = await fixture("drift");
   await mkdir(join(drift, "node_modules/pi-subagents"), { recursive: true });
   await writeFile(join(drift, "node_modules/pi-subagents/package.json"), JSON.stringify({ name: "pi-subagents", version: "0.63.0" }));
-  await assert.rejects(() => verifyEnhancedPackage({ packageRoot: drift }), /0\.80\.0|version/i);
+  await assert.rejects(() => verifyEnhancedPackage({ packageRoot: drift }), /0\.84\.0|version/i);
 
   const escaping = await fixture("escape");
   const escapingManifest = await metadata(escaping);
@@ -325,7 +331,7 @@ test("package verification rejects upstream drift, missing patch, and escaping e
   await mkdir(join(escapingImport, "node_modules/pi-subagents"), { recursive: true });
   await writeFile(join(escapingImport, "extensions/subagent-runtime.ts"), 'export * from "../../../outside.ts";\n');
   await writeFile(join(escapingImport, "extensions/custom-footer.ts"), "export default function footer() {}\n");
-  await writeFile(join(escapingImport, "node_modules/pi-subagents/package.json"), JSON.stringify({ name: "pi-subagents", version: "0.80.0" }));
+  await writeFile(join(escapingImport, "node_modules/pi-subagents/package.json"), JSON.stringify({ name: "pi-subagents", version: "0.84.0" }));
   await assert.rejects(
     () => verifyEnhancedPackage({ packageRoot: escapingImport, runPack: async () => ({ files: [], bundled: ["pi-subagents"] }) }),
     /import|escape|outside|package root|controlled files differ/i,

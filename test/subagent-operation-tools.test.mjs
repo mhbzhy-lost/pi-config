@@ -6,8 +6,10 @@
 // steer/resume message 不触回调、raw 引用不变。
 import assert from "node:assert/strict";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 import { Compile } from "../pi/npm/node_modules/typebox/build/compile/index.mjs";
+import { resolvePiHostPaths } from "./helpers/pi-host.mjs";
 import {
   SUBAGENT_START_PARAMETERS,
   SUBAGENT_RUN_STATUS_PARAMETERS,
@@ -17,6 +19,19 @@ import {
   SUBAGENT_RUN_STOP_PARAMETERS,
   createSubagentOperationTools,
 } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/operation-tools.ts";
+
+// Pi 1.5 把工具参数校验从 TypeBox 迁到 @earendil-works/pi-schema（官方 CHANGELOG Breaking Changes 与
+// docs/extensions.md「Tool parameter schemas and TypeBox」）；Host public root 不再导出
+// validateToolArguments（dist/index.js/index.d.ts 均无该符号，只有内部 bundle chunk 才有）。
+// 因此 Host 层复用官方发布包 pi-schema，并按 Host 内部 getValidator 的同一配置复核：
+// compile(schema, { formats, coerce: true, unresolvedRefs: "reject" }) → parse() 先 coercion 再校验。
+const { piHostAliases } = resolvePiHostPaths();
+const piSchema = await import(pathToFileURL(piHostAliases["@earendil-works/pi-schema"]).href);
+const piSchemaFormats = await import(pathToFileURL(piHostAliases["@earendil-works/pi-schema/formats"]).href);
+
+function hostToolValidator(parameters) {
+  return piSchema.compile(parameters, { formats: piSchemaFormats.formats, coerce: true, unresolvedRefs: "reject" });
+}
 
 const TOOL_NAMES = [
   "subagent_start",
@@ -119,6 +134,32 @@ test("each schema validates its frozen field surface and rejects unknown fields"
   for (const [name, input] of invalid) {
     assert.equal(validators[name].Check(input), false, `${name} should reject ${JSON.stringify(input)}`);
   }
+  // Host 层必须使用真实工具定义（createSubagentOperationTools 的 tool.parameters），不复用单独导出的
+  // 常量抄本。同一 schema 上 TypeBox.Check 与 Host parse() 的差异只来自官方 coercion，必须逐条记录，
+  // 不假设两套校验一致，也不为求得通过而放宽 production schema。
+  const hostTools = createSubagentOperationTools({ executeStart: () => {}, executeControl: () => {} });
+  const hostValidators = Object.fromEntries(hostTools.map((tool) => [tool.name, hostToolValidator(tool.parameters)]));
+  for (const [name, input] of valid) {
+    const parsed = hostValidators[name].parse(structuredClone(input));
+    assert.equal(parsed.ok, true, `${name} Host validator should accept ${JSON.stringify(input)}`);
+  }
+  const hostAccepted = [];
+  for (const [name, input] of invalid) {
+    const parsed = hostValidators[name].parse(structuredClone(input));
+    if (parsed.ok) hostAccepted.push({ name, input, value: parsed.value });
+    else assert.ok(parsed.errors.length > 0, `${name} Host validator must explain rejection of ${JSON.stringify(input)}`);
+  }
+  // 已知差异恰为两条文档化 coercion（pi-schema README「Coercion」第 2 段：数字/布尔转其文本、
+  // integer 截断；pi 1.5 docs/extensions.md 同样声明 numeric strings、"true"、单值数组、optional null）：
+  //   index: 1.5 → 1（integer 截断）      output: 3 → "3"（string 转换）
+  // 其余 invalid 输入（缺 agent/task、缺 message、跨面/未知字段、空 message、负数 index）在 Host 层仍被拒。
+  // 生产 schema 不因此放宽：TypeBox.Check 层仍拒绝这两条输入，公开边界只在 Host coercion 后收窄为合法值。
+  // 数字字符串、字符串布尔、单值数组、optional null 四类差异在本文件既有输入集合中“无既有自动化覆盖”，
+  // 未在此新增用例。
+  assert.deepEqual(hostAccepted, [
+    { name: "subagent_run_steer", input: { message: "go", index: 1.5 }, value: { message: "go", index: 1 } },
+    { name: "subagent_run_resume", input: { message: "x", output: 3 }, value: { message: "x", output: "3" } },
+  ], "Host coercion 与 TypeBox.Check 的差异必须逐条登记，不接受其它未知放行");
 });
 
 test("start does not expose context or runtime-only fields at the schema layer", () => {

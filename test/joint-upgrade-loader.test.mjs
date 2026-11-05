@@ -21,7 +21,7 @@ if (process.argv[2] === '--probe') {
   const component = renderer({ customType: 'subagent_watchdog_warning', content: details.summary, display: true, details }, { expanded: true }, { fg: (_, s) => s, bold: s => s });
   // 0.79.2 的 watchdog 渲染器返回 SubagentMessageBlock extends Host Box（不再是直接 Container）。
   const hostTui = await import(pathToFileURL(path.join(h, '..', 'pi-tui', 'dist', 'index.js')).href);
-  console.log(JSON.stringify({ core: '1.3.0', upstream: '0.79.2', node: process.versions.node, containerEqualsHost: ids.host.Container === hostTui.Container, watchdogBoxSubclass: component instanceof hostTui.Box && component.constructor !== hostTui.Box, nativeSessionEqualsHost: ids.native.SessionManager === ids.host.SessionManager }));
+  console.log(JSON.stringify({ core: '1.5.0', upstream: '0.84.0', node: process.versions.node, containerEqualsHost: ids.host.Container === hostTui.Container, watchdogBoxSubclass: component instanceof hostTui.Box && component.constructor !== hostTui.Box, nativeSessionEqualsHost: ids.native.SessionManager === ids.host.SessionManager }));
   loaded.runtime.invalidate();
   assert.equal(ids.host.Container, hostTui.Container, 'Host Container仍须与Host pi-tui模块同源');
   assert.equal(component instanceof hostTui.Box, true, '实际watchdog必须是physical Host Box子类');

@@ -15,6 +15,9 @@ const PUBLIC_SPECIFIERS = [
   "@earendil-works/pi-coding-agent",
   "@earendil-works/pi-ai",
   "@earendil-works/pi-agent-core",
+  // Pi 1.5 起工具参数校验由 Host 内部 pi-schema validator 执行；公开 subpath 为 "." 与 "./formats"。
+  "@earendil-works/pi-schema",
+  "@earendil-works/pi-schema/formats",
 ];
 
 const repoRoot = resolve(import.meta.dirname, "..", "..");
@@ -78,6 +81,17 @@ async function createPiHostFixture({ piAiCompatEntry = "./dist/compat.js" } = {}
     exports: { ".": { types: "./dist/index.d.ts", import: "./dist/index.js" } },
   });
   await writeFixtureFile(parent, join("node_modules", "@earendil-works", "pi-agent-core", "dist", "index.js"));
+  // Pi 1.5 的 pi-schema 与 pi-coding-agent 同级 hoist，且声明 "." 与 "./formats" 两个公开 subpath。
+  await writeFixtureManifest(parent, join("node_modules", "@earendil-works", "pi-schema"), {
+    name: "@earendil-works/pi-schema",
+    version: "1.5.0",
+    exports: {
+      ".": { types: "./dist/index.d.ts", import: "./dist/index.js" },
+      "./formats": { types: "./dist/formats/index.d.ts", import: "./dist/formats/index.js" },
+    },
+  });
+  await writeFixtureFile(parent, join("node_modules", "@earendil-works", "pi-schema", "dist", "index.js"));
+  await writeFixtureFile(parent, join("node_modules", "@earendil-works", "pi-schema", "dist", "formats", "index.js"));
   return { parent, candidateRoot, sharedPiTuiEntry };
 }
 
@@ -107,6 +121,14 @@ test("host aliases keep every public Pi specifier and resolve them under the exp
     paths.piHostAliases["@earendil-works/pi-tui"],
     realpathSync(sharedPiTuiEntry),
     "pi-tui entry must be reported as its real path",
+  );
+  assert.equal(
+    paths.piHostAliases["@earendil-works/pi-schema"],
+    realpathSync(join(parent, "node_modules", "@earendil-works", "pi-schema", "dist", "index.js")),
+  );
+  assert.equal(
+    paths.piHostAliases["@earendil-works/pi-schema/formats"],
+    realpathSync(join(parent, "node_modules", "@earendil-works", "pi-schema", "dist", "formats", "index.js")),
   );
   assert.equal(paths.piHostModuleUrl, pathToFileURL(paths.piHostAliases["@earendil-works/pi-coding-agent"]).href);
 });

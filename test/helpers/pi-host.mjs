@@ -20,6 +20,11 @@ const PI_HOST_PACKAGE_SPECIFIERS = [
   "@earendil-works/pi-coding-agent",
   "@earendil-works/pi-ai",
   "@earendil-works/pi-agent-core",
+  // Pi 1.5 起工具参数校验由 Host 内部的 pi-schema validator 执行（Host 不再从 public root 导出
+  // validateToolArguments）：该包是 official 发布依赖，公开 subpath 为 "." 与 "./formats"，
+  // 测试必须按 Host 声明解析同一份实现，不能硬编码 dist 布局或另装一份。
+  "@earendil-works/pi-schema",
+  "@earendil-works/pi-schema/formats",
 ];
 
 const ESM_ENTRY_CONDITIONS = ["node", "import", "default"];

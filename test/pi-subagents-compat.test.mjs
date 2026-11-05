@@ -215,11 +215,12 @@ test("public Pi module loader rejects an empty module root", async () => {
   await assert.rejects(loadPublicPiModule({ resolveGlobalNodeModules: async () => "   " }), /non-empty npm global module root/);
 });
 
-test("compat probe plan harness version gate pins Pi 1.4.0 precisely", () => {
+test("compat probe plan harness version gate pins Pi 1.5.0 and upstream 0.84.0 precisely", () => {
   // 纯合成报告：除 piVersion 外全部满足探针其余契约，隔离出版本门禁单一变量。
+  // typeboxVersion 仍是 scheduler/plan harness 的 1.1.38（不随 Host TypeBox 1.3.27 变化）。
   const compliant = {
-    piVersion: "1.4.0",
-    version: "0.80.0",
+    piVersion: "1.5.0",
+    version: "0.84.0",
     typeboxVersion: "1.1.38",
     typeboxCompileResolvable: true,
     rpcVersion: 1,

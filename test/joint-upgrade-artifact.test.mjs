@@ -40,19 +40,19 @@ function localFilePackages(lockRoot) {
 test('目标四核心包与实际CLI一致，旧shrinkwrap未复用', () => {
   for (const name of ['pi-agent-core', 'pi-ai', 'pi-coding-agent', 'pi-tui']) {
     const file = path.resolve(host, "..", name, "package.json");
-    assert.equal(JSON.parse(readFileSync(file)).version, '1.4.0');
+    assert.equal(JSON.parse(readFileSync(file)).version, '1.5.0');
   }
   assert.equal(existsSync(path.join(host, 'npm-shrinkwrap.json')), false);
   const result = spawnSync(process.execPath, [path.join(host, 'dist/bundle/cli.js'), '--version'], {
     env: candidateEnvironment({ candidateRoot: root, hostRoot: host, nodeBin: process.execPath }), encoding: 'utf8', timeout: 15000,
   });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout.trim(), '1.4.0');
+  assert.equal(result.stdout.trim(), '1.5.0');
 });
-test('Host TypeBox三个公开入口完整，上游安装为0.80.0', () => {
+test('Host TypeBox三个公开入口完整，上游安装为0.84.0', () => {
   for (const specifier of ['typebox', 'typebox/compile', 'typebox/value']) assert.ok(require.resolve(specifier));
   const upstream = JSON.parse(readFileSync(path.resolve(import.meta.dirname, '../packages/pi-subagents-enhanced/node_modules/pi-subagents/package.json')));
-  assert.equal(upstream.version, '0.80.0');
+  assert.equal(upstream.version, '0.84.0');
 });
 test('候选环境拒绝相对路径并不继承认证环境', () => {
   assert.throws(() => candidateEnvironment({ candidateRoot: 'relative', hostRoot: host, nodeBin: process.execPath }), TypeError);
@@ -66,7 +66,7 @@ test('候选明确绑定physical CLI而非bundle，同时不依赖ambient入口'
   assert.equal(env.T8_PI_REAL_BIN, path.join(host, 'dist/cli.js'));
   const run = spawnSync(process.execPath, [env.PI_REAL_BIN, '--version'], { env, encoding: 'utf8', timeout: 15000 });
   assert.equal(run.status, 0, run.stderr);
-  assert.equal(run.stdout.trim(), '1.4.0');
+  assert.equal(run.stdout.trim(), '1.5.0');
 });
 test('所有候选lock可移植，不含tmp路径或file-link污染', () => {
   const scopes = manifest
