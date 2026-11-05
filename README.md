@@ -12,7 +12,7 @@ Pi Coding Agent 的独立配置与周边运行时。仓库内 `pi/` 是 Pi 全�
 
 ## 安装 Pi
 
-新机器唯一入口是 `./init-pi.sh`（见下节）：它在本仓 root 安装 Pi 四核心包 `1.4.0` 的物理 `node_modules`，运行时通过仓库内 dist CLI 启动；`packages/pi-subagents-enhanced` 的 peer 依赖消费同一 root 的物理包。本仓不推荐、也不需要全局 `npm install -g` 安装 Pi。机器上可能残留历史全局安装的旧版 `pi`（如 0.87.x），它与本仓运行时无关；版本判定以物理 `package.json` 为准，勿混用。升级 Pi 前必须重新运行单元测试、Doctor、真实 `pi-subagents` 兼容门禁和 Goal Engine 回归。
+新机器唯一入口是 `./init-pi.sh`（见下节）：它在本仓 root 安装 Pi 四核心包 `1.5.0` 的物理 `node_modules`，运行时通过仓库内 dist CLI 启动；`packages/pi-subagents-enhanced` 的 peer 依赖消费同一 root 的物理包。本仓不推荐、也不需要全局 `npm install -g` 安装 Pi。机器上可能残留历史全局安装的旧版 `pi`（如 0.87.x），它与本仓运行时无关；版本判定以物理 `package.json` 为准，勿混用。升级 Pi 前必须重新运行单元测试、Doctor、真实 `pi-subagents` 兼容门禁和 Goal Engine 回归。
 
 ## 初始化
 
@@ -22,8 +22,9 @@ Pi Coding Agent 的独立配置与周边运行时。仓库内 `pi/` 是 Pi 全�
 
 `init-pi.sh` 是新机器的唯一初始化入口，重复执行安全。它会：
 
-- 安装并固定 Pi `1.4.0`。
-- 通过 `npm ci` 与 `npm run setup:subagents-enhanced` 准备运行时与本仓 package（含受控 `pi-subagents@0.80.0` 依赖闭包；`pi/npm` 的 `@amaster.ai/pi-task-scheduler`、`@amaster.ai/pi-shared`、`croner` 保持 `0.1.9`/`0.1.9`/`10.0.1`）。
+- 安装并固定 Pi `1.5.0`（四核心与内部 Pi 闭包同为 `1.5.0`，新增传递依赖 `pi-schema@1.5.0`）。
+- 通过 `npm ci` 与 `npm run setup:subagents-enhanced` 准备运行时与本仓 package（含受控 `pi-subagents@0.84.0` 依赖闭包；`pi/npm` 的 `@amaster.ai/pi-task-scheduler`、`@amaster.ai/pi-shared`、`croner` 保持 `0.1.9`/`0.1.9`/`10.0.1`）。
+- 根 `package.json` 显式声明 `typebox@1.3.27`，与物理 Host 使用的 TypeBox 同一版本，避免依赖偶然 hoist；scheduler 的 `typebox@1.1.38` 属另一 package root，不合并版本。
 - 在 `~/.zshrc` 写入受控区块，加载 `scripts/pi-shell.zsh`。
 - 运行单元测试、doctor 和真实 Pi RPC 集成测试。
 
@@ -85,7 +86,7 @@ node --test test/repository-merge-queue-acceptance-probe.test.mjs
 node scripts/probes/repository-merge-queue-acceptance.ts
 ```
 
-真实 probe 必须设置 `PI_REAL_BIN` 指向 Pi 1.3.0，并使用真实 `executor` child model；不得用 fake 或 deterministic model 替代。probe 使用独立临时 repo、session、state、socket roots，失败时保留现场并报告路径；本任务不运行五 child 真实验收或全量 `npm test`。
+真实 probe 必须设置 `PI_REAL_BIN` 指向 Pi 1.5.0，并使用真实 `executor` child model；不得用 fake 或 deterministic model 替代。probe 使用独立临时 repo、session、state、socket roots，失败时保留现场并报告路径；本任务不运行五 child 真实验收或全量 `npm test`。
 
 合同测试还校验 trusted `run/cwd/HEAD/PID` barrier ready、Git 冲突证据（非零 rebase、unmerged、sequencer、digest）、public receipt 生命周期计数，以及统一的 `ACCEPTANCE_OVERALL_TIMEOUT_MS` 门禁。失败现场不得 force cleanup；真实五-child 命令仅在 T11 完成后运行。
 
@@ -102,6 +103,14 @@ PowerShell 当前不启用，属于非目标；未来启用前必须覆盖 Secur
 fresh Host 的 main 模型工具按操作拆分为 `subagent_start`、`subagent_run_status/steer/interrupt/resume/stop`、`managed_workspace_list/status/dispose/release` 与 `supervisor_request_pending/status/reply`。`subagent_roster` 已退役，旧 union 工具名与 roster 只保留历史记录显示，不在 fresh runtime 注册，也没有隐藏、codemode 或别名替代入口；操作工具继续复用既有 dispatcher、workspace service、supervisor adapter 和权限/receipt 门禁。clear/inspect 分支因上游 absence 不可证保持 blocked。详见 `docs/architecture/subagent-operation-tools.md`。
 
 每个 session/runtime generation 初始化一次当前准入角色名册；同一结构化 `advertised_subagents` section 在每次模型请求持续声明，compaction 后下一请求继续声明，不依赖普通历史消息。新建/恢复 session、reload 或 cwd 导致 runtime 替换时重新初始化，profile 修改需 reload 才生效。名册条目仅含 canonical name 与完整 description，并声明默认省略 model、仅用户显式指定才传 model；真实 `subagent_start` 仍逐次执行准入、可用模型及 authority 校验，名册不授予权限。准入未就绪、快照失效或未启用 `subagent_start` 时撤回该 section。实现复用既有 admission，不新增发现器或 exports，也不启用原生旧 `subagent` union 或 `advertise`。fresh child 不新增父级编排名册；旧 transcript/tool result 与历史 roster 渲染映射保留。源码修改需 fresh Host 或 reload 生效，已经运行的旧 Host 不会自动卸载 roster。生命周期与边界见 `docs/architecture/subagent-catalog-injection.md`。
+
+### 上游兼容边界与自动恢复
+
+`pi-subagents` 固定 `0.84.0`，全部 upstream 内部 API 仍只经 `packages/pi-subagents-enhanced/src/compat/pi-subagents-0.75.ts` 消费，不新增 `pi-subagents/src/*` 深层 import，也不因 0.81 起 root/subpath 改为 bundle 发布而改公开 specifier：`pi-subagents`、`/agents`、`/required-child-extensions`、`/capability-ceiling` 四个公开入口由 `verify:subagents-enhanced` 核对 types/runtime target 与 bundle/chunk 闭包。`verify:subagents-enhanced` 还会 `npm pack` 官方包做逐文件 SHA-256 比对，属网络校验，不属离线测试。
+
+0.82 起上游新增默认开启的 workflow 自动恢复。本仓在 `pi/extensions/subagent/config.json` 顶层显式写 `"autoResume": false`，在任何 reopened/reloaded session 启动前生效，保持既有行为；按需 typed resume（`subagent_run_resume`）与既有 owner/required/terminal-proof 授权不变。该配置只关闭自动恢复，不用于伪造 spawn 参数。
+
+受控测试入口：全仓 `npm test` 与 `test:all-integration` 会加载 MCP/外部服务，本仓禁止执行。按需运行既有的具名检查，例如 `node --test --test-concurrency=1 <显式文件清单>`、`node scripts/run-integration-gate.ts` 的已审计子集与 `node scripts/probes/physical-host.ts`；排除项与计数必须逐项记录，skip 不计为通过。
 
 ## 统一后台活动区（TUI footer）
 

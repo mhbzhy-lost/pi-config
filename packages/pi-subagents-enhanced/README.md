@@ -2,7 +2,7 @@
 
 `pi-subagents-enhanced` 是 `pi-config` monorepo 内维护和发行的 Pi package。源码、发布配置与问题跟踪均归属同一个 `pi-config` 仓库，不另建 GitHub 仓库。
 
-该 package 固定封装 `pi-subagents@0.80.0`，提供项目自有的 typed `subagent` runtime、Root broker、统一 managed workspace service、child extensions，以及 footer、browser 和 transcript renderer。所有 upstream 内部 API 必须经 `src/compat/pi-subagents-0.75.ts` 导入。
+该 package 固定封装 `pi-subagents@0.84.0`，提供项目自有的 typed `subagent` runtime、Root broker、统一 managed workspace service、child extensions，以及 footer、browser 和 transcript renderer。所有 upstream 内部 API 必须经 `src/compat/pi-subagents-0.75.ts` 导入。
 
 工具与消息的显示层统一由 `src/tui/tool-renderers.ts` 的纯 renderer 工厂提供，主入口与 child preview 共同消费；原生工具只从公开 `create*ToolDefinition` 消费渲染字段，未知工具返回 `undefined` 回退原生显示。所有精简、折叠、摘要只发生在 TUI renderer 层，不改写 agent 实际收到的消息、tool result、session 内容或结构化 `details`；结构化数据契约（如 `apply_patch` 与 `context_usage` 的 `structuredContent`/`outputSchema`）是显式程序数据通道，不是展示改写；model-only 的 subagent/supervisor 工具未因此新增 `outputSchema`。
 
@@ -79,13 +79,13 @@ npm:pi-subagents-enhanced@0.1.0
 
 ## Repository merge-queue acceptance probe
 
-T9 的聚焦验收入口是 `node scripts/probes/repository-merge-queue-acceptance.ts`。它只接受 `PI_REAL_BIN` 指向的真实 Pi 1.3.0 physical Host；合同测试使用 `node --test test/repository-merge-queue-acceptance-probe.test.mjs`，不会运行五 child 验收或全量 `npm test`。
+T9 的聚焦验收入口是 `node scripts/probes/repository-merge-queue-acceptance.ts`。它只接受 `PI_REAL_BIN` 指向的真实 Pi 1.5.0 physical Host；合同测试使用 `node --test test/repository-merge-queue-acceptance-probe.test.mjs`，不会运行五 child 验收或全量 `npm test`。
 
 Probe 使用独立 temporary repo、session、state 和 socket roots。失败时保留现场并在 receipt 中记录路径；不要手动删除失败现场，需先检查两个 Host、queue、worktree 和 terminal proof。barrier fixture 位于 `test/fixtures/repository-merge-queue-acceptance/`，仅可通过 `subagentOnlyExtensions` 注入测试 Host。
 
 合同层同时验证 trusted `run/cwd/HEAD/PID` barrier、来自 Git 事实的冲突 digest（含非零 rebase、unmerged entries、sequencer）和 public `agent_end`/follow-up/next `agent_start` 计数；`agent_settled` 不是 Auto Integration 成功信号。`ACCEPTANCE_OVERALL_TIMEOUT_MS` 覆盖 barrier、child settlement 与 public audit settlement，失败时保留 repository/worktree/receipts。
 
-两种来源互斥，同一 Pi 配置中只能启用一种。不得同时安装或启用 standalone `npm:pi-subagents@0.80.0`，否则会形成重复 runtime、tool、message renderer 或模块身份。
+两种来源互斥，同一 Pi 配置中只能启用一种。不得同时安装或启用 standalone `npm:pi-subagents@0.84.0`，否则会形成重复 runtime、tool、message renderer 或模块身份。
 
 ## DurableStorage 锁协议
 
@@ -107,6 +107,10 @@ npm run verify:subagents-enhanced
 
 升级后启动 fresh Host。原地替换期间若保留旧 Host，须暂停其子代理派发与 `/reload`，避免后续操作读取被替换的依赖；独立安装与独立状态根可以并行使用。普通 TypeScript/MJS 源码修改不需要重新安装 package，在匹配依赖版本的 Host 中执行 `/reload` 即可生效。
 
-Pi `1.4.0` 的四个核心包只声明精确版本（`pi-coding-agent` 精确依赖 `pi-agent-core`/`pi-ai`/`pi-tui`/`pi-codemode` 的 `1.4.0`），不再存在 `1.0.4` 时期 `^1.0.4` 造成的 codemode 漂移源，因此根与本 package 已删除 `overrides: {"@earendil-works/pi-codemode":"1.0.4"}` 这条冗余约束；干净闭包直接解析到 `1.4.0`，由 `test/pi-subagents-enhanced-package.test.mjs` 断言 lock 中的 codemode 版本与 tarball。所有下载只使用官方 `https://registry.npmjs.org/`。外部 Host 安装根同样需要 `1.4.0` 四核心精确版本（以及其自身 lock），否则本 package 的已验收隔离安装不能代表外部 Host 闭包兼容。仅同步 lock 不会改变已运行 Host 内存中的模块，也不能保证其后续派发或重载仍使用旧依赖。
+Pi `1.5.0` 的四个核心包只声明精确版本（`pi-coding-agent` 精确依赖 `pi-agent-core`/`pi-ai`/`pi-tui`/`pi-codemode` 的 `1.5.0`），不再存在 `1.0.4` 时期 `^1.0.4` 造成的 codemode 漂移源，因此根与本 package 已删除 `overrides: {"@earendil-works/pi-codemode":"1.0.4"}` 这条冗余约束；干净闭包直接解析到 `1.5.0`，由 `test/pi-subagents-enhanced-package.test.mjs` 断言 lock 中的 codemode 版本与 tarball。根 `package.json` 另显式声明 `typebox@1.3.27`：Pi 1.5 起 `pi-ai` 不再依赖 TypeBox，`pi-coding-agent` 仍精确要求 `1.3.27`，本仓根源码直接从 `typebox` 导入 builder，因此不依赖偶然 hoist。所有下载只使用官方 `https://registry.npmjs.org/`。外部 Host 安装根同样需要 `1.5.0` 四核心精确版本（以及其自身 lock），否则本 package 的已验收隔离安装不能代表外部 Host 闭包兼容。仅同步 lock 不会改变已运行 Host 内存中的模块，也不能保证其后续派发或重载仍使用旧依赖。
 
-npm 发行清单只使用 canonical `bundleDependencies: ["pi-subagents"]`，发行包已经包含经过 registry 受控比较验证的 upstream 依赖闭包。发行前在 package 目录使用 `npm pack --dry-run --json --ignore-scripts` 检查内容；不要用非 dry-run pack 代替验证。
+npm 发行清单只使用 canonical `bundleDependencies: ["pi-subagents"]`，发行包已经包含经过 registry 受控比较验证的 upstream 依赖闭包。`scripts/verify-package.ts` 除逐文件 SHA-256 比较外，还按已安装 upstream manifest 核对本仓消费的四个公开 specifier（`pi-subagents`、`/agents`、`/required-child-extensions`、`/capability-ceiling`）的 types/runtime target，并走完 runtime 的相对 import 闭包（0.81 起 root/subpath 为 bundle + chunk，child 仍用 unbundled 文件）；发行前在 package 目录使用 `npm pack --dry-run --json --ignore-scripts` 检查内容；不要用非 dry-run pack 代替验证。该验证会访问官方 registry（`npm pack`），不属离线测试。
+
+## 上游自动恢复配置
+
+`pi-subagents` 0.82 起新增默认开启的 workflow 自动恢复（`<agent-dir>/extensions/subagent/config.json` 顶层 `autoResume`，默认 `true`）。本仓保持既有行为，在该文件顶层显式 `"autoResume": false`，在任何 reopened/reloaded session 启动前生效；按需 typed resume 与既有 owner/required/terminal-proof 授权不变。该字段只关闭上游自动恢复，不用于伪造 spawn/leaf 参数，也不作为绕过授权的手段。

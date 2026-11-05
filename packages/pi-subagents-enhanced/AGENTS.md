@@ -8,7 +8,9 @@
 
 所有 `pi-subagents/src/*` 深层 import 必须集中在 `src/compat/pi-subagents-0.75.ts`。其他文件只能从该兼容入口消费 upstream API，不得扩散新的深层 import。
 
-`pi-subagents` 版本固定为 `0.80.0`；升级版本前必须同步更新兼容入口、完整验收。
+`pi-subagents` 版本固定为 `0.84.0`；升级版本前必须同步更新兼容入口、完整验收。
+
+0.81 起 upstream root/subpath exports 发布为 bundle，child 仍执行 unbundled 文件；这不改变本仓的导入边界：只消费 `pi-subagents`、`pi-subagents/agents`、`pi-subagents/required-child-extensions`、`pi-subagents/capability-ceiling` 四个公开 specifier，不因 bundle 形状新增深层 import，也不假定同版本 registry 键跨进程共享 authority。发布闭包（types/runtime target 与 bundle/chunk/child 文件）由 `scripts/verify-package.ts` 逐项核对。
 
 ## TypeScript 文件边界
 
