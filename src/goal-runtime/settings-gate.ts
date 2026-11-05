@@ -23,7 +23,8 @@ export type GoalEngineGate = {
 
 export type GoalEngineGateInput = {
   /**
-   * 设置快照。可以是 Pi 1.4 `SettingsManager` 实例（duck-typed：调用其 `getSettings()`），
+   * 设置快照。可以是 Pi 1.5 `SettingsManager` 实例（duck-typed：调用其 `getSettings()`，
+   * 该方法在 1.5.0 仍为公开 API，dist/core/settings-manager.d.ts:76），
    * 也可以是通过 `getSettings()` 取好的设置对象；缺省按“无设置”处理。
    */
   settings?: unknown;

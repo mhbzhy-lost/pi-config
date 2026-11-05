@@ -1,4 +1,4 @@
-import { Type, type Static, type TSchema } from "@earendil-works/pi-ai";
+import { Type, type Static, type TSchema } from "typebox";
 import { defineTool, type ExtensionAPI, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 const MAX_OUTPUT_BYTES = 50 * 1024;

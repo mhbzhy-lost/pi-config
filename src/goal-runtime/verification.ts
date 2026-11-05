@@ -476,7 +476,7 @@ async function runCheck(
   const shellCommand = composeCheckCommand(repositoryRoot, check.command);
   let outcome: ToolCallOutcome;
   try {
-    // Pi 1.4 真实签名：签名档位为 (name, args, {signal})；bash schema 只有 command/timeout。
+    // Pi 1.5.0 真实签名（dist/core/extensions/types.d.ts:299）：`executeTool(name, args, {signal})`；bash schema 只有 command/timeout（dist/core/tools/bash.d.ts:7-8）。
     outcome = await ctx.executeTool(
       "bash",
       { command: shellCommand, timeout: check.command.timeoutSeconds },

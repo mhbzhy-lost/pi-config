@@ -7,8 +7,9 @@
  * Pi session 的 custom entry，并只从**当前分支 + 同一 session 文件**恢复。
  *
  * 关键边界（不可放宽）：
- * - `appendEntry()` 返回 `void`，Pi 1.4 可能先更新 SessionManager 内存索引再落盘（甚至因尚无
- *   conversation 而完全不落盘）。所以「branch 上出现条目」只证明身份，不证明写盘：
+ * - `appendEntry()` 返回 `void`，不确认盘上事实；Pi 1.5.0 已修复“写失败但内存已更新”的错位
+ *   （CHANGELOG 1.5.0 Fixed #11460），但仍不提供“已落盘”回执，且尚无 conversation 时可能不落盘。
+ *   所以「branch 上出现条目」只证明身份，不证明写盘：
  *   必须先唯一匹配到条目 ID，再读同一 session 文件确认该 ID/内容/父链存在，才发布新快照。
  * - append 或核验失败即对**本实例**设置不可写 latch，`assertWritable()` 拒绝派发/修复/完成；
  *   不通过重读同一 branch 清除 latch，不改写 SessionManager 内部状态，不补写补偿记录，
@@ -1443,7 +1444,8 @@ class GoalStateStoreImpl implements GoalStateStore {
     try {
       this.appendEntry(customType, payload);
     } catch (error) {
-      // Pi 1.4 可能已在抛错前更新内存索引，因此一律 latch，不做补偿写入。
+      // Pi 1.5.0 已修复“写失败但内存索引已更新”（#11460），但异常仍不保证内存与盘一致，
+      // 因此一律 latch，不做补偿写入。
       throw this.block(
         "APPEND_FAILED",
         `写入 session 条目 ${customType} 失败：${describeError(error)}；本实例已停止写入`,

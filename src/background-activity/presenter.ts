@@ -102,7 +102,7 @@ function createOpenShellComponent(shell: ActivityDetailShell): {
     handleInput: (data: string) => {
       shell.handleInput(data);
     },
-    // Pi 1.3 fullscreen 下 `TuiAltScreen` 只向 overlay 组件分发归一化 mouse 事件，
+    // Pi 1.5 fullscreen 下 `TuiAltScreen`（pi-tui dist/tui-alt-screen.js:516-531）只向 overlay 组件分发归一化 mouse 事件，
     // 滚轮不会进 handleInput；此处仅转发给壳，消费语义与滚动状态仍归壳。
     handleMouse: (event: TuiMouseEvent) => shell.handleMouse(event),
     invalidate: () => {
@@ -276,11 +276,11 @@ export function createActivityPresenter(
   /**
    * 详情 overlay 挂载参数：row 0/col 0/全宽/maxHeight 100%，margin.bottom 为动态 getter。
    *
-   * 与安装版 pi-tui 1.4.0 核对依据（不按旧假设）：
+   * 与安装版 pi-tui / pi-coding-agent 1.5.0 核对依据（不按旧假设；1.4 → 1.5 该项语义未变，仅宿主行号位移）：
    * - `node_modules/@earendil-works/pi-tui/dist/tui.js:861-870` `resolveOverlayLayout`
    *   每次调用都重读 `opt.margin.bottom`（`Math.max(0, margin.bottom ?? 0)`），不缓存；
    * - 同文件 `:1001`/`:1009` 在每次 render 合成 overlay 前各解析一次布局，getter 每帧被求值；
-   * - `node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js:2325-2333`
+   * - `node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/interactive-mode.js:2419-2430`
    *   的 `resolveOptions()` 只在挂载时调用一次：`overlayOptions: () => ...` 函数拿不到逐帧
    *   动态，逐帧动态只能靠选项对象上的 getter。
    * 所以 margin.bottom = shell.footerReservedBottomRows()（footer 实际行数 + separator），
