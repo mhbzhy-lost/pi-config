@@ -6,6 +6,10 @@
 
 未经用户明确授权，agent 严禁主动新增测试。
 
+## 拒绝语义与恢复出口（INV-EXIT）
+
+每个新增拒绝码或失败落点必须与它的恢复 owner（自动泵 / 工具化收敛操作 / 文档化运维路径，三选一）在同一变更内落地，且拒绝回执要同时写明触发条件与 `next:` 指引——只说「为什么不行」而不说「下一步去哪」的回执不算完成。格式以托管工作区的 `MANAGED_WORKSPACE_STATE` 为范本（`packages/pi-subagents-enhanced/src/workspace/service.ts` 的 `managedWorkspaceStateFailure`：`<message>; state=…; allowed actions: …; next: …`）；无状态机的域至少保持 `<message>; next: …`，依据见 `docs/investigations/2026-11-04-lifecycle-recovery-ownership-audit.md` 的拒绝语义 × 恢复 owner 矩阵。
+
 ## 敏感信息
 
 密钥、凭据和证书不得直接访问，可用临时脚本间接访问。
