@@ -10,7 +10,18 @@ const execFile = promisify(execFileCallback);
 const scriptPath = fileURLToPath(import.meta.url);
 const defaultPackageRoot = resolve(import.meta.dirname, "..");
 const defaultNpmCache = resolve(defaultPackageRoot, "../..", "var/tmp/npm-cache");
-const UPSTREAM_VERSION = "0.80.0";
+const UPSTREAM_VERSION = "0.84.0";
+// 本仓唯一消费的上游公开 specifier：root runtime、agents 注册、required child 扩展与 capability ceiling。
+// 0.81 起 root/subpath 改为 bundle 发布，因此门禁必须同时核对 types 与 runtime target，
+// 并完整走完 runtime 的相对 import 闭包（bundle → chunk），不能只看 manifest 里还有 subpath。
+const upstreamPublicSpecifiers = [
+  "pi-subagents",
+  "pi-subagents/agents",
+  "pi-subagents/required-child-extensions",
+  "pi-subagents/capability-ceiling",
+];
+// 只匹配模块说明符；new URL(...) 是运行时资源路径计算，不属于模块打包闭包。
+const relativeModulePattern = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+(?:type\s+)?|\brequire\s*\(\s*)["']([^"']+)["']/g;
 const expectedExtensions = ["./extensions/subagent-runtime.ts", "./extensions/custom-footer.ts"];
 const expectedFiles = ["AGENTS.md", "README.md", "extensions", "child-extensions", "scripts", "src"];
 const expectedExports = {
@@ -144,6 +155,78 @@ async function verifyControlledUpstream(packageRoot: string) {
   }
 }
 
+async function upstreamShippedFile(upstreamRoot: string, value: unknown, label: string) {
+  const target = assertPackagePath(upstreamRoot, value, label);
+  try {
+    const info = await lstat(target);
+    if (!info.isFile()) throw new Error(`${label} 不是文件: ${String(value)}`);
+  } catch (error) {
+    if (error?.code === "ENOENT") throw new Error(`${label} is missing from the installed upstream payload: ${String(value)}`);
+    throw error;
+  }
+  return target;
+}
+
+/** 走完 runtime target 的相对 import 闭包（bundle + chunk），任何未随包发布的文件都必须 fail closed。 */
+async function verifyUpstreamRuntimeClosure(upstreamRoot: string, entries: string[]) {
+  const visited = new Set<string>();
+  let edgeCount = 0;
+  async function visit(file: string) {
+    if (visited.has(file)) return;
+    visited.add(file);
+    const source = await readFile(file, "utf8");
+    for (const match of source.matchAll(relativeModulePattern)) {
+      const specifier = match[1];
+      if (!specifier.startsWith(".")) continue;
+      const target = fileURLToPath(new URL(specifier, `file://${file}`));
+      const label = `upstream relative import ${relative(upstreamRoot, file)} -> ${specifier}`;
+      assertPackagePath(upstreamRoot, target, label);
+      try {
+        await lstat(target);
+      } catch {
+        throw new Error(`${label} is not shipped in the bundled payload.`);
+      }
+      edgeCount += 1;
+      await visit(target);
+    }
+  }
+  for (const entry of entries) await visit(entry);
+  return { files: visited.size, edges: edgeCount };
+}
+
+/** 按已安装 upstream manifest 核对四个公开 specifier 的 types/runtime target 与 bundle/chunk/child 闭包。 */
+export async function verifyUpstreamPublicExports(packageRoot: string) {
+  const upstreamRoot = resolve(packageRoot, "node_modules/pi-subagents");
+  const manifest = await json(resolve(upstreamRoot, "package.json"));
+  const exportMap = manifest.exports;
+  if (!exportMap || typeof exportMap !== "object" || Array.isArray(exportMap)) throw new Error(`pi-subagents ${UPSTREAM_VERSION} must declare an exports map.`);
+  const entries: { specifier: string; runtime: string; types: string }[] = [];
+  const runtimeTargets: string[] = [];
+  for (const specifier of upstreamPublicSpecifiers) {
+    const subpath = specifier === "pi-subagents" ? "." : `.${specifier.slice("pi-subagents".length)}`;
+    const entry = exportMap[subpath];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error(`pi-subagents ${UPSTREAM_VERSION} is missing the public export ${specifier}.`);
+    const runtime = entry.default ?? entry.import;
+    const runtimeTarget = await upstreamShippedFile(upstreamRoot, runtime, `pi-subagents export ${specifier} runtime target`);
+    const typesTarget = await upstreamShippedFile(upstreamRoot, entry.types, `pi-subagents export ${specifier} types target`);
+    runtimeTargets.push(runtimeTarget);
+    entries.push({
+      specifier,
+      runtime: controlledRelative(relative(upstreamRoot, runtimeTarget)),
+      types: controlledRelative(relative(upstreamRoot, typesTarget)),
+    });
+  }
+  const childExtensions = manifest.pi?.extensions;
+  if (!Array.isArray(childExtensions) || childExtensions.length === 0) throw new Error(`pi-subagents ${UPSTREAM_VERSION} must declare the child extension entries.`);
+  const childExtensionEntries: string[] = [];
+  for (const [index, value] of childExtensions.entries()) {
+    const target = await upstreamShippedFile(upstreamRoot, value, `pi-subagents pi.extensions[${index}]`);
+    childExtensionEntries.push(controlledRelative(relative(upstreamRoot, target)));
+    runtimeTargets.push(target);
+  }
+  return { specifiers: entries, childExtensionEntries, closure: await verifyUpstreamRuntimeClosure(upstreamRoot, runtimeTargets) };
+}
+
 function verifyTarball(pack: any) {
   if (!pack || !Array.isArray(pack.files)) throw new Error("npm pack dry-run did not return a file list.");
   const paths = pack.files.map((file: any) => file.path);
@@ -170,7 +253,7 @@ export async function npmPackDryRun(packageRoot: string) {
 export async function verifyEnhancedPackage({ packageRoot = defaultPackageRoot, runPack = npmPackDryRun } = {}) {
   const manifest = await json(resolve(packageRoot, "package.json"));
   if (manifest.name !== "pi-subagents-enhanced" || manifest.version !== "0.1.0") throw new Error("Enhanced package identity must be pi-subagents-enhanced@0.1.0.");
-  if (manifest.dependencies?.["pi-subagents"] !== UPSTREAM_VERSION || manifest.dependencies?.typescript !== "5.9.3" || JSON.stringify(manifest.bundleDependencies) !== JSON.stringify(["pi-subagents"]) || Object.hasOwn(manifest, "bundledDependencies")) throw new Error("Enhanced package must declare pi-subagents@0.80.0 and canonical bundleDependencies.");
+  if (manifest.dependencies?.["pi-subagents"] !== UPSTREAM_VERSION || manifest.dependencies?.typescript !== "5.9.3" || JSON.stringify(manifest.bundleDependencies) !== JSON.stringify(["pi-subagents"]) || Object.hasOwn(manifest, "bundledDependencies")) throw new Error(`Enhanced package must declare pi-subagents@${UPSTREAM_VERSION} and canonical bundleDependencies.`);
   if (JSON.stringify(manifest.pi?.extensions) !== JSON.stringify(expectedExtensions)) throw new Error("Enhanced package must declare exactly the runtime and footer extensions.");
   if (JSON.stringify(manifest.exports) !== JSON.stringify(expectedExports)) throw new Error("Enhanced package exports must expose only canonical dispatch, execution, Host, TUI, and workspace APIs.");
   if (JSON.stringify(manifest.files) !== JSON.stringify(expectedFiles)) throw new Error("Enhanced package files allowlist is incomplete or unexpected.");
@@ -181,10 +264,11 @@ export async function verifyEnhancedPackage({ packageRoot = defaultPackageRoot, 
   const upstream = await json(resolve(upstreamRoot, "package.json"));
   if (upstream.version !== UPSTREAM_VERSION) throw new Error(`Expected pi-subagents ${UPSTREAM_VERSION}, found ${upstream.version ?? "unknown"}.`);
   const controlled = await verifyControlledUpstream(packageRoot);
+  const upstreamExports = await verifyUpstreamPublicExports(packageRoot);
   for (const entry of manifest.pi.extensions) await lstat(resolve(packageRoot, entry));
   const importEdges = await verifyImportClosure(packageRoot);
   const tarball = verifyTarball(await runPack(packageRoot));
-  return { name: manifest.name, version: manifest.version, upstreamVersion: upstream.version, controlled, importEdges, tarball };
+  return { name: manifest.name, version: manifest.version, upstreamVersion: upstream.version, controlled, upstreamExports, importEdges, tarball };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === scriptPath) process.stdout.write(`${JSON.stringify(await verifyEnhancedPackage())}\n`);

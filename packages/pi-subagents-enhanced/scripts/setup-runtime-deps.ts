@@ -9,7 +9,7 @@ const scriptPath = fileURLToPath(import.meta.url);
 const packageRoot = resolve(import.meta.dirname, "..");
 
 export async function setupRuntimeDependencies({ root = packageRoot, env = process.env, run = execFile } = {}) {
-  await run("npm", ["--no-audit", "--no-fund", "install", "--prefix", root, "--ignore-scripts", "--omit=peer", "--save-exact", "--registry=https://registry.npmjs.org/", "pi-subagents@0.80.0"], { env });
+  await run("npm", ["--no-audit", "--no-fund", "install", "--prefix", root, "--ignore-scripts", "--omit=peer", "--save-exact", "--registry=https://registry.npmjs.org/", "pi-subagents@0.84.0"], { env });
   if (process.platform === "darwin" || process.platform === "linux") {
     // 仅放行锁依赖的原生构建，并用当前 Node 验证 ABI；失败不得报告准备成功。
     await run("npm", ["rebuild", "fs-ext", "--prefix", root, "--ignore-scripts=false", "--registry=https://registry.npmjs.org/"], { env });
@@ -22,5 +22,5 @@ export async function setupRuntimeDependencies({ root = packageRoot, env = proce
 
 if (process.argv[1] && resolve(process.argv[1]) === scriptPath) {
   const result = await setupRuntimeDependencies();
-  process.stdout.write(`Prepared pi-subagents 0.80.0 in ${result.upstreamRoot}\n`);
+  process.stdout.write(`Prepared pi-subagents 0.84.0 in ${result.upstreamRoot}\n`);
 }
