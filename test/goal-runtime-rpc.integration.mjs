@@ -35,8 +35,7 @@ const base = await openJointSession({ persistent: true, defaultTools: ['bash'], 
  for (const root of multi ? ['repoA','repoB','unused'].map(id=>join(cwd,id)) : [cwd]) {
   await mkdir(root,{recursive:true}); execFileSync('git',['init','-b','main'],{cwd:root,stdio:'ignore'});
  }
- await writeFile(join(agentDir,'settings.json'),JSON.stringify({goalEngine:{enabled},defaultTools:['bash'],defaultProjectTrust:'always',enableInstallTelemetry:false,compaction:{enabled:false},retry:{enabled:false}}));
- await writeFile(join(agentDir,'goal-runtime.json'),JSON.stringify({enabled:true,maxConcurrentTasks:2,maxNoProgressTurns:3}));
+ await writeFile(join(agentDir,'settings.json'),JSON.stringify({goalEngine:{enabled,maxConcurrentTasks:2,maxNoProgressTurns:3},defaultTools:['bash'],defaultProjectTrust:'always',enableInstallTelemetry:false,compaction:{enabled:false},retry:{enabled:false}}));
  await writeFile(join(cwd,'plan.md'),'<!-- goal-runtime-contract:start -->\\n'+'\`\`\`json\\n'+JSON.stringify(contract)+'\\n\`\`\`\\n<!-- goal-runtime-contract:end -->');
 }});
 process.stdout.write(JSON.stringify({type:'fixture_ready',temp:base.temp})+'\\n');

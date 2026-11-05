@@ -411,7 +411,6 @@ async function gateHost(t, snapshot, effective = snapshot) {
     execFileSync('git', ['init', '-b', 'main'], { cwd, stdio: 'ignore' });
     await writeFile(join(cwd, 'plan.md'), block(contract()));
     await writeFile(join(agentDir, 'settings.json'), JSON.stringify({ ...snapshot, defaultTools: ['bash'], defaultProjectTrust: 'always', enableInstallTelemetry: false, compaction: { enabled: false }, retry: { enabled: false } }));
-    await writeFile(join(agentDir, 'goal-runtime.json'), JSON.stringify(config));
   } });
   let session; let revoke; const execution = adapter();
   t.after(async () => {

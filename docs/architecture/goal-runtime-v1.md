@@ -252,7 +252,7 @@ TypeScript 7 在仓库存在 `tsconfig.json` 时显式指定文件必须带 `--i
 
 ### 9.1 启用边界
 
-`pi/extensions/goal-runtime.ts` 在 child 中直接退出。主 Host 必须同时满足可信 `PI_CODING_AGENT_DIR`、全局 `settings.json` 的 `goalEngine.enabled === true` 和 `goal-runtime.json` 的 `enabled:true`；两个配置默认均关闭。缺失、不可读、非法设置均 fail closed，不修改设置文件。
+`pi/extensions/goal-runtime.ts` 在 child 中直接退出。主 Host 必须满足可信 `PI_CODING_AGENT_DIR` 和全局 `settings.json` 的 `goalEngine.enabled === true`（运行参数 maxConcurrentTasks/maxNoProgressTurns 同块可选，缺省 2/3）；配置默认关闭。缺失、不可读、非法设置均 fail closed，不修改设置文件。
 
 Pi 1.4 的 extension loader 在 factory 阶段把 `getSettings` 绑定为 `notInitialized`。因此 factory 仅读取可信 agentDir 下的 `settings.json` 快照并调用 `resolveGoalEngineGate`：关闭时完全不注册工具、命令或 hook。开启后每次 `session_start` 用真实 `pi.getSettings()` 再核验有效设置；此时若关闭，不初始化 Goal session，已加载入口的 Goal 行为为 no-op。reload 重跑 factory；不在工具、context、通知或 tree 事件中读取开关，不承诺会话中途切换。T8 需覆盖两个阶段的 false、缺失、非法值及 true。
 
