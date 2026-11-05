@@ -51,6 +51,91 @@ export type SupervisorDiagnosticsV1 = {
   /** 任一组超过 50 条被截断时为 false。 */
   complete: boolean;
 };
+/**
+ * INV-EXIT（审计 §五、矩阵 #16）：每个 supervisor 拒绝码都必须能被调用方归因并
+ * 找到下一步，格式对齐 `MANAGED_WORKSPACE_STATE` 范本（service.ts：
+ * `<message>; state=...; allowed actions: ...; next: ...`）——本域没有状态机状态，
+ * 因此回执为 `<code> … <触发条件/观测事实>; next: <可执行指引>`。
+ *
+ * 该表是「拒绝码 → next 指引」的唯一权威：`blocked()` 与扩展侧 controlFailure 都
+ * 从这里取值，新增拒绝码必须同变更补一条，不得留下无 next 的拒绝码。表内容只影响
+ * 回执文案，不参与任何判定。
+ */
+export const SUPERVISOR_CONTROL_NEXT: Readonly<Record<string, string>> = Object.freeze({
+  SUPERVISOR_INTENT_INVALID: "用当前控制面版本重新构造 intent（schemaVersion 与 kind 一致，steer 必须带 childIndex），不要复用上一次的 intent 片段。",
+  SUPERVISOR_PERSISTENCE_CORRUPT: "控制面 durable state 校验失败：不要重试同一动作；先用 subagent_run_status 取只读诊断快照（availability=unavailable 即同一损坏），需要修 state 文件时按阻断上报并保留现场。",
+  SUPERVISOR_PERSISTENCE_CONFLICT: "控制面 state 写入持续冲突：稍后重试一次；仍冲突按阻断上报并保留 state 文件现场，不要绕过控制面投递。",
+  SUPERVISOR_STALE_OWNER: "owner 已换代或 root session 不一致：先用 subagent_run_status 取当前 run 身份，再按当前 owner/root session 重新发起；workspace 场景以 workspace 记录里的 owner run 为准，不要沿用旧 ownerGeneration。",
+  SUPERVISOR_OWNER_UNAVAILABLE: "owner receipt 当前不可读（broker 未就绪或存储不可用），这不等于非受管：稍后重试一次；仍不可用时按阻断上报，不要绕过控制面直接投递。",
+  SUPERVISOR_REQUEST_IDENTITY_UNAVAILABLE: "上游 native request 缺 id/runId/reason 之一：属上游回执缺陷，按阻断上报并保留现场，不要补造身份字段后重试。",
+  SUPERVISOR_REQUEST_NOT_PENDING: "该 request 已不在待回复集合（已回复/已过期/身份不符）：用 subagent_run_status 取 pending 列表核对；仍需干预时改用 subagent_run_steer，需要继续工作则 fresh 派发。",
+  SUPERVISOR_REQUEST_EXPIRED: "request 已超时（TTL 20 分钟）：不要重放同一 reply；用 subagent_run_status 确认 run 状态，需要继续对话改用 subagent_run_steer，已终态则 fresh 派发。",
+  SUPERVISOR_REQUEST_SCOPE_UNVERIFIED: "request 与 child 的关联不可证：先用 subagent_run_status 核对 pending 项与 child 目录，再按已证实的 child 重新发起，不要猜测 childIndex。",
+  SUPERVISOR_RECEIPT_IDENTITY_MISMATCH: "同一幂等键的既有 receipt 属于别的 root/run/owner：不要复用该 payload；核对 run 身份后重新发起。",
+  SUPERVISOR_CONSUMPTION_MISMATCH: "消费观察与已提交 receipt 不匹配：保持现场，用 subagent_run_status 取诊断快照，不要重复 reply 或 steer。",
+  SUPERVISOR_STEER_CHILD_AMBIGUOUS: "显式提供 `$.index`（0 基 child 下标）后重试；本层不推断 child、不默认 0、不广播。",
+  SUPERVISOR_REPLY_REQUIRED: "该 child 仍有未回复的 supervisor request：先用 supervisor_request_reply 回复该 requestId/child，再 steer。",
+  STEER_DUPLICATES_REPLY: "该 child 已收到正文相同的 reply：改用语意不同的指导内容重发，不要重复同一 payload。",
+  SUPERVISOR_DELIVERY_IDEMPOTENT: "同一控制动作已投递过相同 payload（幂等命中）：不要重试；按既有 receipt 继续，需要新指导请改正文。",
+  SUPERVISOR_DELIVERY_COMPENSATION_BLOCKED: "投递失败后的补偿也失败：用 subagent_run_status 取诊断快照定位，按阻断上报并保留现场，不要重复投递同一 payload。",
+  SUPERVISOR_REQUEST_INVALID: "request 记录形状非法：保持现场并按阻断上报，不要改写记录后重试。",
+  SUPERVISOR_CLASSIFICATION_TIME_INVALID: "控制面未取得合法时钟：属内部缺陷，按阻断上报，不要用重试规避。",
+  SUPERVISOR_RECEIPT_INVALID: "receipt 集合含非法条目：按阻断上报并用 subagent_run_status 保留快照现场。",
+});
+
+/** 拒绝码 → next 指引的只读查询（未登记的码返回 undefined，不做任何推断）。 */
+export function supervisorControlNext(code: unknown): string | undefined {
+  return typeof code === "string" ? SUPERVISOR_CONTROL_NEXT[code] : undefined;
+}
+
+/**
+ * steer 门拒绝的归因事实（矩阵 #16）：三条件坍缩曾导致「运行中 run 被拒且无法
+ * 归因」。这里只把判定结果与观测到的 runtime 事实暴露出去，条件表达式与阈值
+ * 逐条保持原样（见 resolveSupervisorControl 的调用点）。
+ */
+export type SupervisorSteerGateRejectionV1 = {
+  trigger: "non_running" | "not_steerable" | "live_run_epoch_mismatch";
+  running: boolean | null; steerable: boolean | null;
+  liveRunEpoch: number | null; expectedLiveRunEpoch: number | null;
+  /** 主判定源的显式 state；null = 主源没有显式 state（缺源）而非「已终态」。 */
+  explicitState: string | null; childIndex: number;
+};
+
+const STEER_GATE_NEXT: Readonly<Record<SupervisorSteerGateRejectionV1["trigger"], string>> = Object.freeze({
+  non_running: "刚确认过 running 的瞬时判定失败可原样重试一次；重试仍拒时用 subagent_run_status 核对 run 是否已进入终态，需要继续对话改用 supervisor_request_reply，已终态则 fresh 派发。",
+  not_steerable: "run 在跑但上游 steerable=false：用 subagent_run_status 确认状态；不要重复 steer，先 supervisor_request_reply 回复待回复请求，run 结束后处理回执或 fresh 派发。",
+  live_run_epoch_mismatch: "调用方携带的 liveRunEpoch 已过期（run 重启或换代）：用 subagent_run_status 重新取得当前 liveRunEpoch 后重试一次；不要手工构造或沿用旧 epoch。",
+});
+
+const numeric = (v: unknown): number | null => (Number.isSafeInteger(v) ? (v as number) : null);
+const flag = (v: unknown): boolean | null => (typeof v === "boolean" ? v : null);
+const text = (v: unknown): string => (v === null ? "null" : String(v));
+
+/**
+ * 生成 steer 门拒绝的回执载荷：触发条件 + 观测到的 runtime 事实 + next 指引。
+ * 允许 steer 时返回 undefined（调用方继续走原有判定，本函数不改变任何条件）。
+ */
+function steerGateRejection(
+  intent: SupervisorControlIntent, runtime: SupervisorRunIdentity["runtime"] | undefined, childIndex: number,
+): { trigger: SupervisorSteerGateRejectionV1["trigger"]; observations: SupervisorSteerGateRejectionV1; facts: string; hint: string } | undefined {
+  let trigger: SupervisorSteerGateRejectionV1["trigger"];
+  if (!runtime?.running) trigger = "non_running";
+  else if (runtime?.steerable !== true) trigger = "not_steerable";
+  else if (intent.liveRunEpoch !== undefined && runtime.liveRunEpoch !== intent.liveRunEpoch) trigger = "live_run_epoch_mismatch";
+  else return undefined;
+  const observations: SupervisorSteerGateRejectionV1 = {
+    trigger,
+    running: flag(runtime?.running),
+    steerable: flag(runtime?.steerable),
+    liveRunEpoch: numeric(runtime?.liveRunEpoch),
+    expectedLiveRunEpoch: numeric(intent.liveRunEpoch),
+    explicitState: typeof runtime?.explicitState === "string" ? runtime.explicitState : null,
+    childIndex,
+  };
+  const facts = `trigger=${trigger}; observed running=${text(observations.running)}, steerable=${text(observations.steerable)}, liveRunEpoch=${text(observations.liveRunEpoch)}${trigger === "live_run_epoch_mismatch" ? ` (expected ${text(observations.expectedLiveRunEpoch)})` : ""}, explicitState=${text(observations.explicitState)}, childIndex=${observations.childIndex}`;
+  return { trigger, observations, facts, hint: STEER_GATE_NEXT[trigger] };
+}
+
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const isObject = (v: unknown): v is Record<string, any> => !!v && typeof v === "object" && !Array.isArray(v);
@@ -166,12 +251,13 @@ export type SupervisorOwnerState = "owned" | "unowned" | "unavailable";
 export type SupervisorRunIdentity = {
   owner: unknown;
   ownerState: SupervisorOwnerState;
-  runtime: { runId?: string; ownerGeneration?: number; liveRunEpoch?: number; running?: boolean; steerable?: boolean } | undefined;
+  /** explicitState 只用于拒绝归因，不参与任何判定。 */
+  runtime: { runId?: string; ownerGeneration?: number; liveRunEpoch?: number; running?: boolean; steerable?: boolean; explicitState?: string } | undefined;
 };
 
 export type SupervisorControlPlaneOptions = {
   readOwnerReceipt?: (runId: string) => unknown | Promise<unknown>;
-  readRuntime?: (runId: string) => { runId?: string; ownerGeneration?: number; liveRunEpoch?: number; running?: boolean; steerable?: boolean } | Promise<any>;
+  readRuntime?: (runId: string) => { runId?: string; ownerGeneration?: number; liveRunEpoch?: number; running?: boolean; steerable?: boolean; explicitState?: string } | Promise<any>;
   now?: () => number; randomId?: () => string; persistenceRoot?: string; diagnosticSink?: (entry: unknown) => void;
 };
 export function createSupervisorControlPlane(options: SupervisorControlPlaneOptions = {}) {
@@ -250,7 +336,13 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
       return await operation();
     } finally { lockedRoots.delete(root); await release(); }
   }
-  const blocked = (code: string, extra: Record<string, unknown> = {}) => ({ status: "blocked" as const, code, ...extra });
+  // INV-EXIT：拒绝回执统一携带 hint（next 指引）与可选 diagnostic（触发条件/观测事实）。
+  // extra 可覆盖 hint；未显式给出时取 SUPERVISOR_CONTROL_NEXT 的登记值。
+  const blocked = (code: string, extra: Record<string, unknown> = {}, next?: string) => ({
+    status: "blocked" as const, code,
+    ...(next !== undefined || supervisorControlNext(code) !== undefined ? { hint: next ?? supervisorControlNext(code) } : {}),
+    ...extra,
+  });
   // owner 读取三态：依赖缺失或抛异常一律 unavailable（无法证明非受管），
   // 只有成功查询且确认无 receipt 才是 unowned。“读不到”绝不等同于“不受管”。
   async function readOwnerState(runId: string): Promise<{ state: SupervisorOwnerState; receipt: any }> {
@@ -298,8 +390,10 @@ export function createSupervisorControlPlane(options: SupervisorControlPlaneOpti
     // child身份仅用于steer隔离；reply旧合同和终局消费继续按精确request身份处理。
     if (intent.kind === "steer") {
       if (childIndex === undefined) return blocked("SUPERVISOR_STEER_CHILD_AMBIGUOUS");
-      if (!runtime?.running || runtime?.steerable !== true
-        || (intent.liveRunEpoch !== undefined && runtime.liveRunEpoch !== intent.liveRunEpoch)) return blocked("SUPERVISOR_STEER_NOT_ALLOWED");
+      const steerRejection = steerGateRejection(intent, runtime, childIndex);
+      if (steerRejection) return blocked("SUPERVISOR_STEER_NOT_ALLOWED", {
+        diagnostic: { reason: steerRejection.trigger, facts: steerRejection.facts, observations: steerRejection.observations, fields: ["runtime.running", "runtime.steerable", "runtime.liveRunEpoch", "runtime.explicitState"] },
+      }, steerRejection.hint);
     }
     const pending = intent.kind === "reply" ? findPending(intent) : undefined;
     if (pending && childIndex !== undefined && requestChild(pending) !== childIndex) return blocked("SUPERVISOR_REQUEST_SCOPE_UNVERIFIED");

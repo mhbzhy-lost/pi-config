@@ -4,6 +4,10 @@ import test from "node:test";
 import { Compile } from "../pi/npm/node_modules/typebox/build/compile/index.mjs";
 import { TYPED_SUBAGENT_PARAMETERS } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
 
+// 同 subagent-dispatch-schema-coercion.test.mjs：TYPED_SUBAGENT_PARAMETERS 是旧的宽松路由层，
+// 不是 Pi 公开工具 schema；字段集合与分支互斥由 compileDispatchIR/runtime 路由裁决，
+// 公开工具的真实 Host 校验（Pi 1.5 = @earendil-works/pi-schema）另见
+// test/subagent-operation-tools.test.mjs，不在此处代替。
 const validator = Compile(TYPED_SUBAGENT_PARAMETERS);
 
 function codingInput() {

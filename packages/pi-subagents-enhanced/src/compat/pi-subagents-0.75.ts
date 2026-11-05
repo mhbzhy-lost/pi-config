@@ -1,10 +1,10 @@
 /**
- * upstream 兼容入口（文件名为历史命名，当前固定封装 `pi-subagents@0.80.0`）。
+ * upstream 兼容入口（文件名为历史命名，当前固定封装 `pi-subagents@0.84.0`）。
  *
- * 0.79.2 与 0.75.0 的公开 exports 集合一致：本文件只消费 root 注册、`./agents` 注册与
- * 本地 transcript 投影，不做深层 `pi-subagents/src/*` import。文件名与公开导出保持不变，
- * 以免破坏 `extensions/`、`scripts/verify-package.ts` 与 TUI renderer 的既有消费链；
- * upstream 版本仍由 `package.json`、`scripts/verify-package.ts` 与 Doctor 精确门禁。
+ * 0.84.0 仍保持 0.75/0.79/0.80 以来的公开 exports 集合：本文件只消费 root 注册、
+ * `pi-subagents/agents` 注册与本地 transcript 投影，不做深层 `pi-subagents/src/*` import。
+ * 文件名与公开导出保持不变，以免破坏 `extensions/`、`scripts/verify-package.ts` 与 TUI renderer
+ * 的既有消费链；upstream 版本仍由 `package.json`、`scripts/verify-package.ts` 与 Doctor 精确门禁。
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { MarkdownTheme } from "@earendil-works/pi-tui";
@@ -15,7 +15,7 @@ import type { RuntimeAgentDefinition, RuntimeAgentRegistration } from "pi-subage
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-/** 0.71 root registration is the only upstream runtime surface used here (contract §2.1, index.d.ts:1-2). */
+/** 官方 root 默认导出仍是唯一上游 runtime 面（0.84.0 index.d.ts：`export default function registerSubagentExtension(pi)`）。 */
 export function upstreamSubagentRuntimeForwarder(pi: ExtensionAPI): void {
   upstreamSubagentRuntime(pi);
 }
@@ -224,7 +224,6 @@ export function readFleetTranscript(filePath: string, options: FleetTranscriptRe
   return { path: filePath, events, truncated: omitted, ...(malformed ? { warning: `Skipped ${malformed} malformed transcript record${malformed === 1 ? "" : "s"}.` } : {}) };
 }
 
-function plainTheme(theme: ExtensionContext["ui"]["theme"]): any { return theme; }
 export function renderFleetTranscript(transcript: FleetTranscript, width: number, theme: ExtensionContext["ui"]["theme"], _markdownTheme: MarkdownTheme, options: { expandedTools?: boolean } = {}): string[] {
   if (width <= 0) return [];
   const lines: string[] = [];
@@ -242,4 +241,3 @@ export function renderFleetTranscript(transcript: FleetTranscript, width: number
   }
   return lines;
 }
-void plainTheme;

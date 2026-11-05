@@ -6,7 +6,6 @@
 //   - startup recovery 完成后才以 temp+rename 原子登记 metadata；
 //   - 退出清理以 metadata.instanceId 比对守卫，防止旧实例误删新实例产物。
 import { appendFileSync, chmodSync, closeSync, ftruncateSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { unlink } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { captureProcessBirthIdentity } from "../subagent-dispatch/process-birth-identity.ts";
@@ -118,6 +117,34 @@ export async function runCoordinatorDaemon(options: CoordinatorDaemonOptions): P
   if (options.logToFile !== false) {
     redirectConsoleToLog(path.join(canonicalStateRoot, "logs", `coordinator-${options.repositoryId.slice(0, 16)}.log`));
   }
+  // 本实例的出生身份只采集一次并缓存：它既是 metadata 登记事实，也是退出守卫的
+  // 比对依据（守卫必须在同一个同步块内完成「比对 → 删除」，不得中间 await）。
+  let selfBirthIdentity: string | undefined;
+  async function ownBirthIdentity() {
+    selfBirthIdentity ??= await captureProcessBirthIdentity(process.pid);
+    return selfBirthIdentity;
+  }
+  /** 原子登记 durable owner 事实（temp + rename）；重入幂等（内容相同）。 */
+  function registerMetadata() {
+    if (!metadataDir || !metadataPath) return;
+    const metadata = {
+      protocol: COORDINATOR_DAEMON_PROTOCOL,
+      kind: COORDINATOR_DAEMON_METADATA_KIND,
+      instanceId: server.instanceId,
+      pid: process.pid,
+      birthIdentity: selfBirthIdentity,
+      repositoryId: options.repositoryId,
+      storageRepositoryId: options.storageRepositoryId ?? options.repositoryId,
+      canonicalStateRoot,
+      endpoint: options.endpoint,
+    };
+    mkdirSync(metadataDir, { recursive: true, mode: 0o700 });
+    chmodSync(metadataDir, 0o700);
+    const temp = `${metadataPath}.${process.pid}.${Date.now().toString(16)}.tmp`;
+    writeFileSync(temp, `${JSON.stringify(metadata)}\n`, { mode: 0o600 });
+    renameSync(temp, metadataPath);
+    chmodSync(metadataPath, 0o600);
+  }
   // recovery 事件投递：daemon 无 pi.sendMessage 快路径，一律落 durable 并记
   // delivery debt，由 Host 侧 recovery.status 轮询通道等价消费（D7）。
   const server = createCoordinatorServer({
@@ -127,6 +154,12 @@ export async function runCoordinatorDaemon(options: CoordinatorDaemonOptions): P
     instanceId: options.instanceId,
     stateRoot: canonicalStateRoot,
     recoveryEventSink: async () => ({ state: "debt", reason: "coordinator daemon durable-only delivery; hosts poll recovery.status" }),
+    // 审计 #18：endpoint 一绑定就发布 durable owner 事实。既有「startup recovery
+    // 完成后才登记」在「daemon 已存活并已开始恢复」的整个窗口里让 registry 报告
+    // “本仓无 coordinator”：拉起器已删掉死 owner 的 metadata，而新 daemon 尚未
+    // 重登记（实测 0.4–2s），期间的 proof replay 已写出回执却读不到 owner。
+    // readiness 仍是独立事实（startup.ping.ready），由拉起器等待。
+    onListening: async () => { await ownBirthIdentity(); registerMetadata(); },
     diagnosticSink: (entry) => { try { console.error(`[coordinator-daemon] ${JSON.stringify(entry)}`); } catch { /* 已被重定向或失败时忽略 */ } },
   });
   let shuttingDown = false;
@@ -138,16 +171,21 @@ export async function runCoordinatorDaemon(options: CoordinatorDaemonOptions): P
       // 退出清理守卫：仅当 metadata 可验证且 instanceId+pid+birthIdentity 全部
       // 属于本实例时才删除 socket/metadata；不可验证或已属新实例时一律不动，
       // 防止旧进程误删新实例产物。
+      //
+      // 判定与删除必须同在一个同步块：既有实现先 readFileSync 比对，再
+      // `await captureProcessBirthIdentity(process.pid)`（ps 子进程，实测可达
+      // 400ms 级），最后才 unlink——期间新实例（或拉起器）可原子覆盖
+      // metadata，旧进程随后删掉的是**新实例的登记**。缓存出生身份后不再跨
+      // await，检查与动作之间不再有 JS 可调度的窗口。
       let unlinkEndpoint = false;
       if (metadataPath) {
         let current: { instanceId?: unknown; pid?: unknown; birthIdentity?: unknown } | undefined;
         try { current = JSON.parse(readFileSync(metadataPath, "utf8")); } catch { current = undefined; }
-        let selfBirth: string | undefined;
-        try { selfBirth = await captureProcessBirthIdentity(process.pid); } catch { selfBirth = undefined; }
         if (current && typeof current.instanceId === "string" && current.instanceId === server.instanceId
-          && current.pid === process.pid && typeof current.birthIdentity === "string" && selfBirth !== undefined && current.birthIdentity === selfBirth) {
+            && current.pid === process.pid && typeof current.birthIdentity === "string"
+            && selfBirthIdentity !== undefined && current.birthIdentity === selfBirthIdentity) {
           unlinkEndpoint = true;
-          await unlink(metadataPath).catch(() => undefined);
+          try { unlinkSync(metadataPath); } catch { /* 已被替换或删除：绝不动他人登记 */ }
         }
       } else {
         // 无 metadata 管理（env wrapper 兼容形态）：endpoint 归本进程所有。
@@ -168,26 +206,9 @@ export async function runCoordinatorDaemon(options: CoordinatorDaemonOptions): P
     return (error as { code?: string })?.code === "EADDRINUSE" ? 3 : 1;
   }
   if (shuttingDown) return await shutdownResult!;
-  // startup recovery 完成后才登记 metadata（temp+rename 原子写）。
-  if (metadataDir && metadataPath) {
-    const metadata = {
-      protocol: COORDINATOR_DAEMON_PROTOCOL,
-      kind: COORDINATOR_DAEMON_METADATA_KIND,
-      instanceId: server.instanceId,
-      pid: process.pid,
-      birthIdentity: await captureProcessBirthIdentity(process.pid),
-      repositoryId: options.repositoryId,
-      storageRepositoryId: options.storageRepositoryId ?? options.repositoryId,
-      canonicalStateRoot,
-      endpoint: options.endpoint,
-    };
-    mkdirSync(metadataDir, { recursive: true, mode: 0o700 });
-    chmodSync(metadataDir, 0o700);
-    const temp = `${metadataPath}.${process.pid}.${Date.now().toString(16)}.tmp`;
-    writeFileSync(temp, `${JSON.stringify(metadata)}\n`, { mode: 0o600 });
-    renameSync(temp, metadataPath);
-    chmodSync(metadataPath, 0o600);
-  }
+  // 不再二次登记：durable owner 事实已在 endpoint 绑定时（onListening）原子发布，
+  // 这里重写只是同一个事实的重复写入，反而在 fixture 拆除与写入重叠时制造
+  // ENOTEMPTY 类噪声。早登记失败会直接使 listen() 失败，走 fail-closed。
   originalStdoutWrite(`${JSON.stringify({
     protocol: COORDINATOR_DAEMON_PROTOCOL,
     ...(metadataPath ? { kind: COORDINATOR_DAEMON_METADATA_KIND } : {}),

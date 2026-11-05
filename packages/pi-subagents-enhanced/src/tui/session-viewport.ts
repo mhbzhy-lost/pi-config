@@ -111,8 +111,8 @@ export class SubagentTranscriptViewport implements Component {
   }
 
   /**
-   * Pi 1.3 fullscreen：`TuiAltScreen` 先把滚轮解析成归一化 mouse wheel 事件并只调用组件
-   * `handleMouse`，raw SGR 不会进入 `handleInput`；因此 overlay 必须在此按事件真实
+   * Pi 1.5 fullscreen（`@earendil-works/pi-tui` dist/tui-alt-screen.js:516-531）：`TuiAltScreen` 先把滚轮解析成归一化 mouse wheel 事件、
+   * 优先 `dispatchMouseToOverlay` 并调用组件 `handleMouse`，raw SGR 不会进入 `handleInput`；因此 overlay 必须在此按事件真实
    * `wheelDelta` 行数滚动，并返回 handled 阻止渲染器把同一滚轮再交给底层 primary
    * ScrollView（否则底层 transcript 会被双滚）。非 wheel 事件不消费，交还宿主处理。
    */

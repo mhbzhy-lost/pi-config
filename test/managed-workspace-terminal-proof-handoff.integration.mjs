@@ -104,11 +104,40 @@ async function handoffFixture(t) {
   await writeFile(path.join(originRoot, "README.md"), "base\n");
   execFileSync("git", ["add", "."], { cwd: originRoot, stdio: "ignore" });
   execFileSync("git", ["commit", "-m", "base"], { cwd: originRoot, stdio: "ignore" });
-  t.after(() => rm(root, { recursive: true, force: true }));
+  // 拆除顺序：node:test 按注册顺序执行 after，本 hook 先于 handoffRuntime 的
+  // runtime.close() 注册，因此被 respawn 的 coordinator daemon 可能仍在写
+  // integration-queue/outbox（启动恢复期间）→ rm 报 ENOTEMPTY，随后残留
+  // daemon 句柄又会把文件级 after 拖成挂死（实测 file 级用例 8 分钟未结束）。
+  // 所以拆除必须自己先终止本 fixture 登记的 daemon，再做有界重试；不把清理競态
+  // 当成产品失败，但也不默默吞掉：超过窗口只放弃剩余临时目录。
+  t.after(async () => {
+    await stopFixtureDaemon(originRoot);
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      try { await rm(root, { recursive: true, force: true }); return; }
+      catch (error) { if (attempt === 39) return; }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  });
   return {
     root, originRoot, stateRoot,
     baseCommit: execFileSync("git", ["rev-parse", "HEAD"], { cwd: originRoot, encoding: "utf8" }).trim(),
   };
+}
+
+/** 只终止本 fixture 登记的 daemon（不碰其它 fixture/真实 Host 的 coordinator）。 */
+async function stopFixtureDaemon(originRoot) {
+  try {
+    const raw = await readFile(path.join(originRoot, ".git", ".pi-coordinator", "coordinator.json"), "utf8");
+    const metadata = JSON.parse(raw);
+    if (typeof metadata?.pid === "number" && metadata.pid > 0) {
+      try { process.kill(metadata.pid, "SIGKILL"); } catch { return; }
+      // 有界等待死亡：只用于保证后续 rm 不再与 daemon 写入竞争。
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        try { process.kill(metadata.pid, 0); } catch (error) { if (error?.code === "ESRCH") return; }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    }
+  } catch { /* 无登记（懒加载形态）/ 已不可读：无需清理 */ }
 }
 
 async function handoffRuntime(t, fixture, rootSessionId) {

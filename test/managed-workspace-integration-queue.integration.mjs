@@ -16,7 +16,9 @@ import { createChildIntegrationLifecycle, resetChildIntegrationLifecyclesForTest
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 
 async function fixture(t, options = {}) {
-  const root = await mkdtemp(join(tmpdir(), "managed-integration-queue-"));
+  // 临时根前缀刻意保持短：macOS 的 UNIX socket 路径上限为 104 字节，候选 TMPDIR
+  // 比系统 TMPDIR 长，长前缀会让本 fixture 的 coordinator endpoint 超出上限并 `listen EINVAL`。
+  const root = await mkdtemp(join(tmpdir(), "miq-"));
   const originRoot = join(root, "origin");
   const stateRoot = join(root, "state");
   await mkdir(join(originRoot, "src"), { recursive: true });
@@ -546,13 +548,16 @@ test("released orphan queue items are reconciled to preserved at coordinator sta
   const preserved = queue.getItem(orphanItem.queueItemId);
   assert.equal(preserved.state, "preserved", "released 孤儿项在启动对账转 preserved");
   assert.ok(preserved.preserveReason.includes("released"), "preserve 原因留痕");
-  assert.equal(queue.getItem(activeItem.queueItemId).state, "queued", "active workspace 的队列项不被误动");
+  // 启动对账在孤儿解除阻塞后覆盖剩余非终态项（审计 #14 接线）：active 项按准入
+  // 事实被推进到 completed，而不是被当成孤儿误 preserve，也不再永久留在 queued。
+  const activeAfter = queue.getItem(activeItem.queueItemId);
+  assert.equal(activeAfter.state, "completed", `active workspace 的队列项在启动对账被推进（实际 ${activeAfter.state}）`);
   const events = queue.listReceiptEvents().filter((event) => event.queueItemId === orphanItem.queueItemId);
   assert.equal(events.length, 1);
   assert.equal(events[0].state, "preserved");
-  // FIFO 队首已推进到 active 项。
+  // FIFO 不再残留无人推进的 queued 头。
   const queuedHeads = queue.listQueue().filter((entry) => entry.state === "queued");
-  assert.deepEqual(queuedHeads.map((entry) => entry.queueItemId), [activeItem.queueItemId]);
+  assert.deepEqual(queuedHeads.map((entry) => entry.queueItemId), []);
 });
 
 test("parent fallback integrate admits additional authorized write paths and persists the authorization", async (t) => {

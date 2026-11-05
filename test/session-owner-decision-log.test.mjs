@@ -10,6 +10,17 @@ import { fileURLToPath } from "node:url";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 import { dirname } from "node:path";
 
+/**
+ * 子会话标记必须从被测进程环境剔除：`scripts/pi-session-owner.ts` 对
+ * `PI_SUBAGENT_CHILD=1` / `PI_SUBAGENT_FANOUT_CHILD=1` 按设计直接写 `bypass`（子会话
+ * 不得抢 root owner），而本用例断言的是 root 侧 blocked 决策。若测试自身从 agent 会话
+ * 继承这两个标记，断言会稳定得到 bypass 而与被测逻辑无关（1.4 基线与候选同样复现）。
+ * 与 test/session-owner-wrapper.test.mjs 的 childSafeEnv 同一既有约定。
+ */
+function childSafeEnv(overrides) {
+  return { ...process.env, PI_SUBAGENT_CHILD: undefined, PI_SUBAGENT_FANOUT_CHILD: undefined, ...overrides };
+}
+
 async function publishOwnerRecord(registryDir, { ownerId, pid, cwd, sessionId = null, sessionFile = null }) {
   // 复用真实 registry 代码发布记录，避免手拼结构触发 registry 层校验失败
   const registry = await import("../src/session-owner/registry.ts");
@@ -59,7 +70,7 @@ test("blocked 决策写入 registry 的 decisions.log 审计日志", async () =>
       "--", "-c",
     ], {
       encoding: "utf8",
-      env: { ...process.env, PI_SESSION_OWNER_REGISTRY: registryDir, PI_CODING_AGENT_SESSION_DIR: targetDir },
+      env: childSafeEnv({ PI_SESSION_OWNER_REGISTRY: registryDir, PI_CODING_AGENT_SESSION_DIR: targetDir }),
     });
 
     assert.equal(result.error, undefined, result.error?.message);

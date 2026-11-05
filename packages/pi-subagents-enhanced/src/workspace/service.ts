@@ -24,6 +24,7 @@ import {
   allowedActionsFor,
   createManagedWorkspaceLedger,
 } from "./ledger.ts";
+import { withManagedWorkspaceNext } from "./rejection-guidance.ts";
 
 class ManagedWorkspaceError extends Error {
   code: string;
@@ -42,16 +43,32 @@ type IntegrationFallback = {
   blockedReasons: (binding: IntegrationBinding) => string[];
   execute: (binding: IntegrationBinding, proof: TerminalProof, additionalWritePaths?: readonly string[]) => unknown;
 };
-type ServiceOptions = { stateRoot?: string; storageRepositoryId?: string; terminalProofProvider?: (input: { workspaceId: string; run: unknown }) => unknown; fault?: ServiceFault; admissionProbe?: () => void; diagnosticSink?: (entry: unknown) => void; integrationFallback?: IntegrationFallback };
+type ServiceOptions = { stateRoot?: string; storageRepositoryId?: string; terminalProofProvider?: (input: { workspaceId: string; run: unknown; rootSessionId: string }) => unknown; fault?: ServiceFault; admissionProbe?: () => void; diagnosticSink?: (entry: unknown) => void; integrationFallback?: IntegrationFallback };
 export type WorkspaceOwnerScope = Readonly<{ kind: "standalone-subagent"; rootSessionId: string }>;
 type StatusInput = { workspaceId?: string; terminalProof?: unknown; expectedHead?: string };
 type DisposeInput = StatusInput & { disposition?: "integrate" | "discard" | "preserve"; strategy?: "cherry-pick" | "merge" | "rebase-ff"; reason?: string; actionToken?: string; additionalWritePaths?: readonly string[] };
 type ReleaseInput = { workspaceId?: string; terminalProof?: unknown; actionToken?: string };
 type ReconcileInput = { originRoot?: string };
 
-function failure(code: string, message: string, cause?: unknown): ManagedWorkspaceError {
-  return new ManagedWorkspaceError(code, message, cause);
+function failure(code: string, message: string, cause?: unknown, next?: string): ManagedWorkspaceError {
+  // INV-EXIT（审计 §五、矩阵 #1–#9）：拒绝回执必须携带可归因事实与 next 指引，
+  // 格式对齐 MANAGED_WORKSPACE_STATE 范本（见 managedWorkspaceStateFailure：
+  // `<message>; state=...; allowed actions: ...; next: ...`）。next 文案取唯一权威表
+  // （rejection-guidance.ts，与 git-worktree.ts 共用），不参与任何判定；
+  // 各站点可用 next 参数覆盖为更精确的语义（同一 code 多语义时不猜）。
+  return new ManagedWorkspaceError(code, withManagedWorkspaceNext(message, code, next), cause);
 }
+
+// 同一 code 下语义明显不同的站点使用的精确 next 文案（矩阵 #8/#9 的证明链例外）。
+const TERMINAL_PROOF_RELEASE_NEXT = "release 只接受权威 observed 证明：coordinator 侧按 durable 事实（run.asyncDir 下官方 process-terminal.json）解析，Host 侧按 broker 异步事实解析；证明缺失说明 child 未产出官方终局制品——确认 run 已终止后重跑 service.reconcile 或等 auto-integration 补齐，仍缺失按阻断上报并保留 worktree 现场，不要伪造 proof。";
+const TERMINAL_PROOF_SETTLE_DEBT_NEXT = "cleanup-debt 只能用 observed 权威证明解锁：先确认 run 已终止并产出官方 process-terminal.json，再补记证明；否则按阻断上报。";
+const TERMINAL_PROOF_SUPPLIED_NEXT = "本次随请求提交的证明不是本次签发的证明：重新 status/issueDisposition 取得与新证明匹配的 action_token 后重试。";
+const TERMINAL_PROOF_IDENTITY_NEXT = "确认证明来自该 workspace 绑定的 run（runId/asyncDir/rootSessionId 全等）；跨 run 的证明不得用于该 workspace。";
+const TERMINAL_PROOF_PROVIDER_SYNC_NEXT = "provider 必须是同步函数（参考 durable-terminal-proof.ts 的 readDurableObservedTerminalProof）：这是接线缺陷，修好前按阻断上报，不要用异步 provider 绕过。";
+const TERMINAL_DISPOSITION_ALLOWED_NEXT = "以 status 返回的 allowed_dispositions 为准选择动作；terminal-unobserved / workspace-dirty 等 blocked 原因需先消除。";
+const INTEGRATE_FALLBACK_NEXT = "coordinator 不可用或 strategy 非 rebase-ff：确认 coordinator daemon 在跑（status 的 blocked 原因会显示集成协调不可用），或改用 preserve 后人工处置。";
+const INTEGRATE_EXISTING_INTENT_NEXT = "同一 workspace 只能有一个 integration intent：先 complete 或 abandon 既有 intent 收口，再发起新的。";
+const INTEGRATE_ABANDON_LEASE_NEXT = "只有持有该 intent 的 queue lease 能放弃它：用 queue audit 核对 lease，不要跨 lease 清理。";
 
 const STATE_NEXT_ACTION: Record<string, string> = {
   reserved: "稍后重试 status；若长期停留说明 allocation 未完成。",
@@ -282,7 +299,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
     let lease = loadOwned(workspaceId, ownerScope);
     const accepted = resolveProof(lease.record, proof);
     if (lease.record.state === "cleanup-debt") {
-      if (!observed(accepted)) throw failure("MANAGED_WORKSPACE_TERMINAL", "authoritative terminal proof is required to settle proof debt");
+      if (!observed(accepted)) throw failure("MANAGED_WORKSPACE_TERMINAL", "authoritative terminal proof is required to settle proof debt", undefined, TERMINAL_PROOF_SETTLE_DEBT_NEXT);
       lease = mutate(lease, (record) => { record.state = "active"; record.cleanupDebt = null; record.terminalProof = structuredClone(accepted); return record; });
     } else if (observed(accepted)) {
       lease = mutate(lease, (record) => { record.terminalProof = structuredClone(accepted); return record; });
@@ -328,7 +345,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
     const existing = lease.record.integrationIntent;
     if (existing) {
       const comparable = { ...existing, createdAt: intent.createdAt };
-      if (!same(comparable, intent)) throw failure("MANAGED_WORKSPACE_INTEGRATE", "workspace already has a different integration intent");
+      if (!same(comparable, intent)) throw failure("MANAGED_WORKSPACE_INTEGRATE", "workspace already has a different integration intent", undefined, INTEGRATE_EXISTING_INTENT_NEXT);
       return structuredClone(existing);
     }
     const facts = inspectManagedIntegrationAdmission(lease.record, input.targetRef);
@@ -409,7 +426,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
     const intent = lease.record.integrationIntent;
     if (!intent) return null;
     if (lease.record.integrationReceipt || intent.queueItemId !== input.queueItemId || intent.queueLeaseId !== input.queueLeaseId) {
-      throw failure("MANAGED_WORKSPACE_INTEGRATE", "integration intent cannot be abandoned by this queue lease");
+      throw failure("MANAGED_WORKSPACE_INTEGRATE", "integration intent cannot be abandoned by this queue lease", undefined, INTEGRATE_ABANDON_LEASE_NEXT);
     }
     lease = mutate(lease, record => {
       record.integrationHistory.push({ intent: record.integrationIntent, disposition: "preserved", closedAt: new Date().toISOString() });
@@ -423,13 +440,15 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
     let value = supplied;
     if (value === undefined && record.terminalProof?.state === "observed") value = record.terminalProof;
     if (value === undefined && activeTerminalProofProvider) {
-      value = activeTerminalProofProvider({ workspaceId: record.workspaceId, run: structuredClone(record.run) });
-      if (value && typeof value.then === "function") throw failure("MANAGED_WORKSPACE_TERMINAL", "terminalProofProvider must be synchronous");
+      // provider 收到 ledger record 自己的 owner scope：任何 provider 都必须能
+      // 把「解析到的证明」与 record.run/owner 对齐，service 随后再做一次同一核对。
+      value = activeTerminalProofProvider({ workspaceId: record.workspaceId, run: structuredClone(record.run), rootSessionId: record.request.owner.rootSessionId });
+      if (value && typeof value.then === "function") throw failure("MANAGED_WORKSPACE_TERMINAL", "terminalProofProvider must be synchronous", undefined, TERMINAL_PROOF_PROVIDER_SYNC_NEXT);
     }
     const result = proofValue(value);
     if (result.state === "observed") {
       const owner = record.request.owner;
-      if (result.runId !== record.run?.runId || result.asyncDir !== record.run?.asyncDir || result.rootSessionId !== owner.rootSessionId) throw failure("MANAGED_WORKSPACE_TERMINAL", "terminal proof identity does not match workspace run");
+      if (result.runId !== record.run?.runId || result.asyncDir !== record.run?.asyncDir || result.rootSessionId !== owner.rootSessionId) throw failure("MANAGED_WORKSPACE_TERMINAL", "terminal proof identity does not match workspace run", undefined, TERMINAL_PROOF_IDENTITY_NEXT);
     }
     return result;
   }
@@ -498,7 +517,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
     const challenge = lease.record.v2Action;
     if (!challenge || challenge.used || challenge.action !== action || tokenHash(token) !== challenge.tokenHash) throw failure("MANAGED_WORKSPACE_ACTION", "action token is stale or replayed");
     const proof = resolveProof(lease.record, terminalProof);
-    if (!observed(proof) || proof.proofId !== challenge.proofId) throw failure("MANAGED_WORKSPACE_TERMINAL", "terminal proof is not the issued proof");
+    if (!observed(proof) || proof.proofId !== challenge.proofId) throw failure("MANAGED_WORKSPACE_TERMINAL", "terminal proof is not the issued proof", undefined, TERMINAL_PROOF_SUPPLIED_NEXT);
     return mutate(lease, record => { record.v2Action.used = true; return record; });
   }
 
@@ -637,10 +656,10 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
       throw failure("MANAGED_WORKSPACE_ACTION", "action token is stale, replayed, or does not match the workspace snapshot");
     }
     if (!challenge.allowed.includes(disposition) || !snapshot.allowedDispositions.includes(disposition)) {
-      throw failure("MANAGED_WORKSPACE_TERMINAL", "disposition is not allowed by the terminal and workspace snapshot");
+      throw failure("MANAGED_WORKSPACE_TERMINAL", "disposition is not allowed by the terminal and workspace snapshot", undefined, TERMINAL_DISPOSITION_ALLOWED_NEXT);
     }
     if (disposition === "integrate") {
-      if (!activeIntegrationFallback || strategy !== "rebase-ff") throw failure("MANAGED_WORKSPACE_INTEGRATE", "integration requires the coordinator rebase-ff fallback");
+      if (!activeIntegrationFallback || strategy !== "rebase-ff") throw failure("MANAGED_WORKSPACE_INTEGRATE", "integration requires the coordinator rebase-ff fallback", undefined, INTEGRATE_FALLBACK_NEXT);
       const revision = lease.revision;
       lease = mutate(lease, record => {
         if (record.revision !== revision || record.actionChallenge?.used
@@ -691,7 +710,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
   function issueReleaseForLease(lease, { terminalProof }: { terminalProof?: unknown } = {}) {
     if (lease.record.state !== "preserved" && lease.record.state !== "cleanup-debt") throw managedWorkspaceStateFailure(lease.record.state, "release authorization requires a preserved workspace");
     const proof = lease.record.run ? resolveProof(lease.record, terminalProof) : proofValue(terminalProof);
-    if (lease.record.run && !observed(proof)) throw failure("MANAGED_WORKSPACE_TERMINAL", "release requires an observed terminal proof");
+    if (lease.record.run && !observed(proof)) throw failure("MANAGED_WORKSPACE_TERMINAL", "release requires an observed terminal proof", undefined, TERMINAL_PROOF_RELEASE_NEXT);
     const token = actionToken();
     const next = mutate(lease, record => { record.actionChallenge = { tokenHash: tokenHash(token), snapshotHash: null, allowed: ["release"], proofHash: observed(proof) ? proof.proofId : null, used: false }; return record; });
     return { receipt: receipt(next.record), actionToken: token, terminalProof: proof };
@@ -704,7 +723,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
       throw managedWorkspaceStateFailure(lease.record.state, "only a preserved or cleanup-debt workspace can be released");
     }
     const proof = lease.record.run ? resolveProof(lease.record, terminalProof) : proofValue(terminalProof);
-    if (lease.record.run && !observed(proof)) throw failure("MANAGED_WORKSPACE_TERMINAL", "release requires an observed terminal proof");
+    if (lease.record.run && !observed(proof)) throw failure("MANAGED_WORKSPACE_TERMINAL", "release requires an observed terminal proof", undefined, TERMINAL_PROOF_RELEASE_NEXT);
     // 无显式 token 的公开回收也必须经过同一证明校验和内部一次性授权。
     if (suppliedToken === undefined) {
       const authorization = issueReleaseForLease(lease, { terminalProof: proof });
@@ -769,7 +788,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
     } else if (operation === "release") {
       if (!["preserved", "cleanup-debt"].includes(lease.record.state)) throw managedWorkspaceStateFailure(lease.record.state, "release requires preserved or cleanup-debt state");
       proof = lease.record.run ? resolveProof(lease.record, input.terminalProof) : proofValue(input.terminalProof);
-      if (lease.record.run && !observed(proof)) throw failure("MANAGED_WORKSPACE_TERMINAL", "release requires an observed terminal proof");
+      if (lease.record.run && !observed(proof)) throw failure("MANAGED_WORKSPACE_TERMINAL", "release requires an observed terminal proof", undefined, TERMINAL_PROOF_RELEASE_NEXT);
       if (suppliedToken === undefined) {
         suppliedToken = issueReleaseForLease(lease, { terminalProof: proof }).actionToken;
         lease = loadOwned(input.workspaceId, input.ownerScope);
@@ -781,7 +800,7 @@ function createManagedWorkspaceServiceInternal({ stateRoot = process.env.PI_CODI
       proof = snapshot.terminalProof;
       inspection = snapshot.inspection;
       snapshotHash = snapshot.snapshotHash;
-      if (!snapshot.allowedDispositions.includes(operation)) throw failure("MANAGED_WORKSPACE_TERMINAL", "disposition is not allowed by the current terminal proof");
+      if (!snapshot.allowedDispositions.includes(operation)) throw failure("MANAGED_WORKSPACE_TERMINAL", "disposition is not allowed by the current terminal proof", undefined, TERMINAL_DISPOSITION_ALLOWED_NEXT);
       assertExpectedHead(inspection, input.expectedHead);
     }
     const challenge = lease.record.actionChallenge;

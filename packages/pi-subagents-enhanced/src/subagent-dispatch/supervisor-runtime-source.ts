@@ -132,6 +132,14 @@ export function summarizePrimarySource(runId: string, status: any, runtime: { ru
   };
 }
 
+/** 主判定源显式 state（details.state 优先，其次快照投影 state）；无显式 state 时返回 undefined。 */
+function primaryState(runId: string, status: any): string | undefined {
+  const details = status?.details ?? status ?? {};
+  const projected = status?.asyncSnapshot?.runs?.find((run: any) => run?.id === runId);
+  const state = typeof details.state === "string" ? details.state : projected?.state;
+  return typeof state === "string" ? state : undefined;
+}
+
 /**
  * 构造 supervisor 控制面的 readRuntime（双源判定版）。
  * 与既有内联实现的行为差异只有两类，其余逐分支保持原语义：
@@ -153,15 +161,19 @@ export function createSupervisorRuntimeReader({ brokerReady, broker, status: rea
       status = await readStatus({ id: runId });
       const owner = broker() ? await broker()!.readOwnerReceipt(runId) : undefined;
       const runtime = runtimeFromStatus(runId, status);
+      // INV-EXIT（矩阵 #16）：主源若有显式 state，随 runtime 一并暴露给控制面，
+      // 使 SUPERVISOR_STEER_NOT_ALLOWED 的可归因回执能区分「显式终态」与「缺源」。
+      // 判定完全不含该字段：没有显式 state 时不出现（保持既有返回值形状）。
+      const explicitState = primaryState(runId, status);
       // 现有链判 running：原样返回，零行为变化（第二源不介入、不落诊断）。
       if (runtime.running) {
-        return { ...runtime, ...mergeOwnerGeneration(owner) };
+        return { ...runtime, ...(explicitState !== undefined ? { explicitState } : {}), ...mergeOwnerGeneration(owner) };
       }
       const primary = summarizePrimarySource(runId, status, runtime);
       if (primaryStatusExplicitTerminal(runId, status)) {
         // 上游链明确判出终态：不经 broker 覆盖，维持现有返回；落诊断便于拒绝归因。
         emitDivergence({ runId, primarySource: primary, brokerView: brokerLifecycleView(broker(), runId), resolvedBy: "primary" });
-        return { ...runtime, ...mergeOwnerGeneration(owner) };
+        return { ...runtime, ...(explicitState !== undefined ? { explicitState } : {}), ...mergeOwnerGeneration(owner) };
       }
       // 缺源场景：主链判非 running 只是「证据缺席」。broker 登记在册且无 terminal
       // proof 时按 running 处理；否则维持现有返回。

@@ -70,6 +70,12 @@ async function ptyFixture(t) {
   const store = createRegistryStore(join(root, "registry"));
   const cwd = join(root, "cwd");
   await Promise.all(["home", "agent", "sessions", "tmp", "registry", "cwd"].map((name) => mkdir(join(root, name), { recursive: true, mode: 0o700 })));
+  // 候选隔离把 HOME 指到 fixture（root/home），而 Pi 的项目信任门禁按 cwd 祖先中的
+  // .agents/skills 判定（core/trust-manager.js:157-177）：真实用户 /Users/leshi.zhy/.agents/skills
+  // 与 fixture 的 userAgentsSkillsDir 不同名，于是被当作祖先项目资源，交互 Host 先弹
+  // “Trust project folder?” 阻塞会话。既有 goal-runtime fixture 同样用 defaultProjectTrust=always
+  // 表达「本 fixture 项目受信」，这里对齐同一既有写法，不放宽任何 session-owner 断言。
+  await writeFile(join(fixture.agentDir, "settings.json"), JSON.stringify({ defaultProjectTrust: "always" }));
   const piBinary = process.env.T8_PI_REAL_BIN ?? repoLocalPi;
   const piVersion = spawnSync(piBinary, ["--version"], {
     encoding: "utf8", timeout: 10_000, env: { PATH: process.env.PATH ?? "", HOME: join(root, "home"), TMPDIR: join(root, "tmp") },

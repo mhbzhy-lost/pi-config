@@ -99,6 +99,21 @@ async function readDaemonLogTail(stateRoot: string, repositoryId: string, lines 
 }
 
 /**
+ * 早登记窗口的 ready 等待：daemon 在 endpoint 绑定时就登记 durable owner 事实，但
+ * startup recovery 可能尚未完成。等待只读 ping（不接管、不清理、不抢占锁），
+ * 保证调用方拿到的是已就绪的引用而不是 COORDINATOR_RECOVERY_NOT_READY。
+ */
+async function awaitCoordinatorReady(endpoint: string, timeoutMs: number): Promise<{ instanceId: string; ready: boolean } | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const ping = await pingStartup(endpoint, 1000);
+    if (ping?.ready) return ping;
+    if (Date.now() >= deadline) return undefined;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+/**
  * 取得 spawn 排他锁，只返回本次成功 open 得到的句柄。
  * 循环内只解释 open 自身的 EEXIST（竞争者语义）：没有取得锁的调用不得 close 或
  * unlink 他人的锁。持锁后的初始化异常不属于竞争者分支，由调用方在同一 finally
@@ -182,13 +197,35 @@ export async function ensureCoordinatorDaemon(input: EnsureCoordinatorDaemonInpu
   }
   if (existing) {
     validateScope(existing);
-    const state = await classifyCoordinatorOwner(existing, diagnosticSinkLocal);
+    let state = await classifyCoordinatorOwner(existing, diagnosticSinkLocal);
     const connectable = await probeEndpoint(input.endpoint);
     if (state === "alive") {
-      if (connectable) return { metadata: existing };
-      // owner 活着但 endpoint 连不上：可能仍是旧 in-process coordinator 收缩形态，
-      // fail-closed 提示重启该 Host，绝不覆盖活进程。
-      throw failure("COORDINATOR_LOCKED_BY_LIVE_OWNER", `coordinator owner pid ${existing.pid} 存活但 endpoint 不可用；请重启该 Host 后重试`);
+      if (connectable) {
+        const readiness = await pingStartup(input.endpoint, 1000);
+        if (readiness === undefined) {
+          // 连接可建但握手无效：可能是旧 in-process coordinator 收缩形态或非
+          // coordinator listener，fail-closed 提示重启该 Host，绝不覆盖活进程。
+          throw failure("COORDINATOR_LOCKED_BY_LIVE_OWNER", `coordinator owner pid ${existing.pid} 存活但 endpoint 无法握手确认；请重启该 Host 后重试`);
+        }
+        if (readiness.ready) return { metadata: existing };
+        // 已登记但 startup recovery 未完成（早登记窗口）：等 ready 再交引用。
+        const ready = await awaitCoordinatorReady(input.endpoint, spawnTimeoutMs);
+        if (ready) {
+          const fresh = await registry.read();
+          validateScope(fresh);
+          if (fresh.instanceId === ready.instanceId) return { metadata: fresh };
+          throw failure("COORDINATOR_SPAWN_FAILED", "daemon 登记的 instanceId 与握手结果不一致");
+        }
+        // 等待超时：重新做四态判定。owner 仍活则 fail-closed（不抢占），owner
+        // 已死在 recovery 中崩溃，则落回下方锁内清理 + 拉起重试。
+        const recheck = await classifyCoordinatorOwner(existing, diagnosticSinkLocal);
+        if (recheck === "alive") throw failure("COORDINATOR_LOCKED_BY_LIVE_OWNER", `coordinator owner pid ${existing.pid} 尚未完成 startup recovery；请重试`);
+        if (recheck !== "dead") throw failure("COORDINATOR_OWNER_UNDETERMINED", `coordinator owner 活性无法确认（pid ${existing.pid}，${recheck}）；请人工核对后清理 ${registry.metadataPath}`);
+        state = "dead";
+      } else {
+        // owner 活着但 endpoint 连不上：fail-closed 提示重启该 Host，绝不覆盖活进程。
+        throw failure("COORDINATOR_LOCKED_BY_LIVE_OWNER", `coordinator owner pid ${existing.pid} 存活但 endpoint 不可用；请重启该 Host 后重试`);
+      }
     }
     if (state === "undetermined" || state === "mismatch") {
       throw failure("COORDINATOR_OWNER_UNDETERMINED", `coordinator owner 活性无法确认（pid ${existing.pid}，${state}）；请人工核对后清理 ${registry.metadataPath}`);

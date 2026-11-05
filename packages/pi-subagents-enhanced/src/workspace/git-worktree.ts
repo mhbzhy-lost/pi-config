@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createPublishedArtifact, validatePublishedArtifact, type PublishedArtifact } from "./published-artifact.ts";
+import { withManagedWorkspaceNext } from "./rejection-guidance.ts";
 
 const LEGACY_PATHS = [
   ".pi",
@@ -40,7 +41,9 @@ type ManagedWorkspaceRecord = { path: string; dispatchCwd: string; branchRef: st
 type GitInspection = { headCommit: string; baseCommit: string; descendant: boolean; aheadCommits: string[]; aheadCount: number; hasCommits: boolean; changedFiles: string[]; clean: boolean; originRef: string | null; originHead: string | null; originClean: boolean; originError: string | null };
 
 function failure(code: string, message: string, cause?: unknown, detail?: GitFailureDetail): ManagedWorkspaceError {
-  return new ManagedWorkspaceError(code, message, cause, detail);
+  // INV-EXIT（GAP-2）：本模块自带 failure()，不经过 service 的拒绝路径。next 指引统一取
+  // 同一权威表（rejection-guidance.ts），不再另建第二张表；只补文案，不参与任何判定。
+  return new ManagedWorkspaceError(code, withManagedWorkspaceNext(message, code), cause, detail);
 }
 
 export type GitFailureCategory = "locked" | "sequencer-in-progress" | "path-missing" | "unmerged-entries" | "submodule-dirty" | "dirty-worktree" | "untracked-files" | "ignored-runtime-artifacts" | "unknown";

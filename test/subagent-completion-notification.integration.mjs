@@ -66,13 +66,23 @@ function notifyProviderSource(contract) {
     const contract = ${JSON.stringify(contract)};
     const childReport = ${JSON.stringify(childAcceptanceReport())};
     const childDoneMarker = ${JSON.stringify(CHILD_DONE_MARKER)};
-    // 目标版本（pi-subagents@0.79.2）已发布文案，固定在本 fixture 内作为既有目标合同：
+    // 目标版本（pi-subagents@0.84.0）的模型可见文案，固定在本 fixture 内作为既有目标合同：
     //  - 完成通知头：src/runs/background/notify.js formatSingleCompletion；
-    //  - 父唤醒文案：src/shared/parent-wake.js PARENT_WAKE_TEXT —— createParentWake 在父空闲时
-    //    先 sendMessage(通知, { triggerTurn: false })，再 sendUserMessage(PARENT_WAKE_TEXT, { deliverAs: "steer" })。
+    //  - 父唤醒：0.84.0 src/shared/parent-wake.js 在父空闲时直接用通知本身
+    //    sendMessage(通知, { triggerTurn: true })，0.79.2 的 PARENT_WAKE_TEXT steer 文案已不存在，
+    //    本 fixture 保留该前缀分支仅用于兼容两段唤醒形态；
+    //  - 模型可见包裹：0.84.0 src/extension/index.js context_with_system 把每条 custom message 包成
+    //    <pi_subagents_notice type="…" origin="…"> 开头、</pi_subagents_notice> 结尾的包裹，因此先剥掉该标记。
     // 仅作为测试侧识别合同，不引入任何上游 deep import，也不向 production 扩散。
     const NOTICE_HEADER = "Background task completed: ";
     const PARENT_WAKE_PREFIX = "Inspect subagent updates above.";
+    const NOTICE_MARKER_OPEN = "<pi_subagents_notice";
+    const NOTICE_MARKER_CLOSE = "</pi_subagents_notice>";
+    function unwrapNoticeMarker(message) {
+      if (!message.startsWith(NOTICE_MARKER_OPEN)) return message;
+      const body = message.slice(message.indexOf(">") + 1).replace(/^\\n/, "");
+      return body.endsWith(NOTICE_MARKER_CLOSE) ? body.slice(0, -NOTICE_MARKER_CLOSE.length).replace(/\\n$/, "") : body;
+    }
     function text(message) {
       return typeof message?.content === "string" ? message.content
         : message?.content?.filter((part) => part?.type === "text").map((part) => part.text).join("\\n") ?? "";
@@ -89,7 +99,7 @@ function notifyProviderSource(contract) {
         streamSimple(model, context) {
           const stream = createAssistantMessageEventStream();
           const messages = context?.messages ?? [];
-          const users = messages.filter((message) => message?.role === "user").map(text);
+          const users = messages.filter((message) => message?.role === "user").map(text).map(unwrapNoticeMarker);
           const toolResults = messages.filter((message) => message?.role === "toolResult");
           const lastUser = users.at(-1) ?? "";
           const dispatched = toolResults.find((message) => message.toolName === "subagent_start" && /Started /.test(text(message)));
@@ -110,9 +120,9 @@ function notifyProviderSource(contract) {
           } else if (dispatched) {
             // 派发后的父会话回合有两种，必须区分：
             //  1) 初次 dispatch 回合：工具结果入上下文后模型续跑，lastUser 仍是父 prompt，尚未发生唤醒。
-            //  2) 真实后续父回合：上游 notify 先以 triggerTurn=false 追加通知（convertToLlm 转成 user
-            //     消息），随后 createParentWake 以 PARENT_WAKE_TEXT 起新回合；父不空闲时则由通知本身
-            //     （triggerTurn=true）起回合。两种入口都必须已有本次 run 的通知，否则不算父被唤醒。
+            //  2) 真实后续父回合：0.84.0 由通知本身（triggerTurn=true）起回合，通知经 convertToLlm 成为
+            //     user 消息（已剥掉 pi_subagents_notice 标记）；旧两段唤醒形态由 PARENT_WAKE_TEXT 起回合。
+            //     两种入口都必须已有本次 run 的通知，否则不算父被唤醒。
             const parentWoken = (lastUser.startsWith(PARENT_WAKE_PREFIX) && runNoticeIndex !== -1 && runNoticeIndex < users.length - 1)
               || (lastUser.startsWith(NOTICE_HEADER) && runNoticeIndex === users.length - 1);
             if (parentWoken) output = "NOTIFY_PARENT_NOTIFIED";

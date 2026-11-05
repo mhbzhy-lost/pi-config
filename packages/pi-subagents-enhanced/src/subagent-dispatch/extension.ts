@@ -20,7 +20,7 @@ import { createSupervisorAdapter, createSupervisorTool } from "./supervisor-adap
 import { createSubagentOperationTools } from "./operation-tools.ts";
 import { createAdmittedAgentCatalog } from "./agent-catalog.ts";
 import { createSupervisorOperationTools } from "./supervisor-operation-tools.ts";
-import { supervisorCanonicalDigest, type SupervisorDiagnosticsRequestV1, type SupervisorDiagnosticsV1 } from "./supervisor-control-plane.ts";
+import { supervisorCanonicalDigest, supervisorControlNext, type SupervisorDiagnosticsRequestV1, type SupervisorDiagnosticsV1 } from "./supervisor-control-plane.ts";
 import { createSupervisorIntentId } from "./supervisor-intent-id.ts";
 import { findGoalRunCoordinator } from "./root-broker-registry.ts";
 import { resolveModelCandidates, resolveModelSelection, type ModelSelectionWarning } from "./model-selection.ts";
@@ -1475,20 +1475,32 @@ function canonicalSteerTarget(params: Record<string, any>): SteerTarget {
   return { runId: canonical, code: undefined, hint: undefined, diagnostic: undefined };
 }
 
-// hint 只追加可执行提示：code 与 details 形状不变，未传 hint 的调用点文案逐字不变。
-// diagnostic 仅在参数校验路径使用，只新增 keypath/fields/reason 三个机器可读诊断字段，
+// hint 承载 next 指引（优先级：调用点显式文案 > 控制面 SUPERVISOR_CONTROL_NEXT 登记值），
+// diagnostic.facts 承载触发条件与观测事实，渲染进回执正文但不进 details。
+// INV-EXIT：拒绝回执必须统一带 `next:` 指引，格式对齐 MANAGED_WORKSPACE_STATE 范本；
+// 此处只改文案与 details 的附加字段，不改任何判定、阈值或投递路径。
+// diagnostic 仅在需要机器可读字段时使用：keypath/fields/reason 进 details（未给则不出现），
 // 既有 code/receiptId/requestId/runId 身份字段与 isError 保持不变。
 function controlFailure(code, receipt = undefined, hint = undefined, diagnostic = undefined) {
-  const hintText = typeof hint === "string" && hint.length > 0 ? ` ${hint}` : "";
+  const guidance = typeof hint === "string" && hint.length > 0 ? hint : supervisorControlNext(code);
+  const factsText = typeof diagnostic?.facts === "string" && diagnostic.facts.length > 0 ? ` ${diagnostic.facts}` : "";
+  const hintText = typeof guidance === "string" && guidance.length > 0 ? `${factsText ? ";" : ""} next: ${guidance}` : "";
   return {
-    content: [{ type: "text", text: `${code}: Supervisor control request blocked.${hintText}` }],
+    content: [{ type: "text", text: `${code}: Supervisor control request blocked.${factsText}${hintText}` }],
     isError: true,
     details: {
       code,
       ...(receipt?.receiptId ? { receiptId: receipt.receiptId } : {}),
       ...(receipt?.requestId ? { requestId: receipt.requestId } : {}),
       ...(receipt?.runId ? { runId: receipt.runId } : {}),
-      ...(diagnostic ? { keypath: diagnostic.keypath, fields: diagnostic.fields, reason: diagnostic.reason } : {}),
+      ...(diagnostic ? {
+        ...(diagnostic.keypath !== undefined ? { keypath: diagnostic.keypath } : {}),
+        ...(diagnostic.fields !== undefined ? { fields: diagnostic.fields } : {}),
+        ...(diagnostic.reason !== undefined ? { reason: diagnostic.reason } : {}),
+        // 触发条件对应的结构化观测事实（白名单字段：runtime 状态与 child 下标），
+        // 使主会话能在不回读上游 trace 的情况下归因拒绝。
+        ...(diagnostic.observations !== undefined ? { observations: diagnostic.observations } : {}),
+      } : {}),
     },
   };
 }
@@ -1564,7 +1576,7 @@ function createResumeBindingWaiter(events, expectedSessionId, expectedAgent, onB
       return;
     }
     if (runId === expectedRunId) {
-      const error = new Error("managed resume runner terminated before binding");
+      const error = new Error("managed resume runner terminated before binding: 新 run 在绑定 workspace 前已终止，续跑链路不可达；next: 用 subagent_run_status 核对终态与失败原因；需要继续工作请重新 resume 或 fresh 派发，不要自动重试同一 spawn。");
       error.code = "RESUME_BINDING_BLOCKED";
       finish(error, undefined);
     }
@@ -1573,7 +1585,7 @@ function createResumeBindingWaiter(events, expectedSessionId, expectedAgent, onB
     setExpectedRunId(runId) {
       expectedRunId = runId;
       if (bufferedTerminals.includes(runId)) {
-        const error = new Error("managed resume runner terminated before binding");
+        const error = new Error("managed resume runner terminated before binding: 新 run 在绑定 workspace 前已终止，续跑链路不可达；next: 用 subagent_run_status 核对终态与失败原因；需要继续工作请重新 resume 或 fresh 派发，不要自动重试同一 spawn。");
         error.code = "RESUME_BINDING_BLOCKED";
         finish(error, undefined);
         return;
@@ -1658,7 +1670,7 @@ async function executeControl(input, rpc, supervisorControlPlane, toolCallId, di
             };
             if (!nonempty(binding.runId) || typeof binding.asyncDir !== "string" || !path.isAbsolute(binding.asyncDir)
                 || !Number.isSafeInteger(binding.pid) || binding.pid <= 0) {
-              const error = new Error("managed resume runner binding is invalid");
+              const error = new Error("managed resume runner binding is invalid: 上游 started 事件缺 runId/asyncDir/sessionId/pid（不猜测、不自报）；next: 按阻断上报并保留事件现场，不要用推测值补 binding 后重试。");
               error.code = "RESUME_BINDING_BLOCKED";
               throw error;
             }
@@ -1720,7 +1732,7 @@ async function executeControl(input, rpc, supervisorControlPlane, toolCallId, di
         payloadDigest: supervisorCanonicalDigest(params.message), liveRunEpoch: runtime?.liveRunEpoch,
       }, hostRootSessionId);
       if (decision.status === "idempotent") return controlFailure("SUPERVISOR_DELIVERY_IDEMPOTENT", decision.receipt);
-      if (decision.status !== "allowed") return controlFailure(decision.code);
+      if (decision.status !== "allowed") return controlFailure(decision.code, decision.receipt, decision.hint, decision.diagnostic);
       try {
         const result = await rpc[action](params);
         if (result?.isError === true) {
@@ -1750,7 +1762,7 @@ async function executeControl(input, rpc, supervisorControlPlane, toolCallId, di
     const resumedRunId = reply?.details?.runId ?? reply?.details?.asyncId;
     if (!nonempty(resumedRunId)) {
       resumeBindingWaiter?.dispose();
-      return failure("RESUME_BINDING_BLOCKED", "resume reply did not provide the new run identity");
+      return failure("RESUME_BINDING_BLOCKED", "resume reply did not provide the new run identity: resume RPC 成功但回执没有 runId/asyncId，无法与 resume intent 绑定；next: 用 subagent_run_status 确认是否已生成新 run，确认后按公开回执继续；无法确认时按阻断上报，不要猜测新 run 身份。");
     }
     resumeBindingWaiter.setExpectedRunId(resumedRunId);
     try {
@@ -1833,7 +1845,7 @@ function createControlledSupervisorAdapter(adapter, supervisorControlPlane, regi
       try { hostRootSessionId = resolveRootSessionId?.(ctx?.sessionManager); } catch { /* owner receipt remains authoritative for managed runs. */ }
       const decision = await supervisorControlPlane.resolveSupervisorControl(intent, hostRootSessionId);
       if (decision.status === "idempotent") return controlFailure("SUPERVISOR_DELIVERY_IDEMPOTENT", decision.receipt);
-      if (decision.status !== "allowed") return controlFailure(decision.code);
+      if (decision.status !== "allowed") return controlFailure(decision.code, decision.receipt, decision.hint, decision.diagnostic);
       try {
         const result = await adapter.execute(toolCallId, params, signal, onUpdate, ctx);
         if (result?.isError === true) {

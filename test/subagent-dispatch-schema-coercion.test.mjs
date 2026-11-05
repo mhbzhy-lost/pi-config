@@ -6,6 +6,10 @@ import { pathToFileURL } from 'node:url';
 const { Compile } = await import(pathToFileURL(createRequire(new URL('../packages/pi-subagents-enhanced/package.json',import.meta.url)).resolve('typebox/compile')));
 import { TYPED_SUBAGENT_PARAMETERS } from "../packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts";
 
+// 该文件校验的是 TYPED_SUBAGENT_PARAMETERS：本仓旧的宽松路由层，不是 Pi 公开工具 schema。
+// 它刻意把必填/分支互斥留给 compileDispatchIR 与 runtime 路由（例如缺 task 在此层合法），
+// 因此这里的 TypeBox.Check 结论不能替代 subagent_* 公开工具的真实 Host 校验
+//（Pi 1.5 起为 @earendil-works/pi-schema，见 test/subagent-operation-tools.test.mjs）。
 // The v2 public schema is flat. Nested values are no longer part of the
 // dispatch contract; the schema accepts the flat coding shape and rejects the
 // retired v1 containers/fields before runtime compilation.

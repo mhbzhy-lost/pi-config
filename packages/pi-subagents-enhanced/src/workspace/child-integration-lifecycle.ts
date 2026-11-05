@@ -164,7 +164,9 @@ export function createChildIntegrationLifecycle(options: any = {}) {
     finally { record.running = false; }
   }
   const disposers = [
-    // Pi 0.85.1 awaits agent_end handlers before deciding whether a queued
+    // Pi 1.5.0 awaits agent_end handlers（dist/core/agent-session.js:917
+    // `await this._extensionRunner.emit({ type: "agent_end", ... })`）
+    // before deciding whether a queued
     // follow-up continues the child.  Therefore all trusted mechanical work,
     // including conflict continuation, must start here rather than at the
     // later agent_settled notification.

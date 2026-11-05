@@ -380,11 +380,13 @@ test("resume intent 按重启持久化并保持 owner scope 过滤", async (t) =
   const restored = coordinator2.internal.integrationQueue.listResumeIntents();
   assert.equal(restored.length, 1);
   assert.equal(restored[0].resumeIntentId, intents[0].resumeIntentId);
-  assert.equal(restored[0].state, "pending");
+  // 启动对账现在会推进剩余非终态项（审计 #14 接线）：队首已完成后 follower 的
+  // 机械集成在启动时闭环（即原测试后文手动 advanceAutoIntegration 做的事），
+  // intent 随之 completed，不再需要人工接管；持久化身份与 owner scope 过滤不变。
+  assert.equal(restored[0].state, "completed", "启动对账推进后 intent 收敛为 completed");
   assert.equal(restored[0].delivery.state, "delivered");
-  assert.equal(restartSink.length, 0, "已 delivered 的 intent 不重复投递");
-  // 同 Host 的前计划队首先完成，随后自动项的官方 proof 消费应接续机械集成。
-  // 保留上面的手动队列语义；先以原准入/发布入口闭合该手动项。
+  assert.equal(restartSink.length, 0, "已 delivered/已完成 的 intent 不重复投递");
+  // 原手动闭合入口保留且幂等：重复推进同一 binding 不改变终态。
   coordinator2.internal.advanceAutoIntegration({}, follower.binding);
   const nextFixture = { ...f, coordinator: coordinator2, baseCommit: git(f.originRoot, "rev-parse", "HEAD") };
   const nextHead = await allocateCandidate(nextFixture, "next-head", "root-a", "next-head.txt");

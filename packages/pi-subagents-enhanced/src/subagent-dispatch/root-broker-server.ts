@@ -18,6 +18,7 @@ import {
   ensureBrokerSocketDirectory,
   parseBrokerRequest,
   parseProcessTerminal,
+  terminalProofId,
   COORDINATOR_OPERATIONS,
   setBrokerSocketPermissions,
   writeBrokerGrant,
@@ -131,19 +132,9 @@ class TerminalDeadlineError extends Error {
   code = "ROOT_TERMINAL_DEADLINE";
 }
 
-function canonical(value: any): any {
-  if (Array.isArray(value)) return value.map(canonical);
-  if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
-}
-
-function proofId(value: any) {
-  return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
-}
-
 /** Canonical identity of an accepted official terminal; shared with the coordinator proof outbox. */
 export function rootBrokerTerminalProofId(proof: any): string {
-  return proofId(proof);
+  return terminalProofId(proof);
 }
 
 function frozen<T>(value: T): T {
@@ -643,7 +634,7 @@ export class RootBrokerServer {
     const { runId, ...terminal } = value;
     parseProcessTerminal(terminal);
     if (this.closed || runId !== run.runId || terminal.state !== "observed"
-        || terminal.runnerProcessInstanceId !== persisted.processInstance || proofId(value) !== persisted.proofId) {
+        || terminal.runnerProcessInstanceId !== persisted.processInstance || terminalProofId(value) !== persisted.proofId) {
       throw new Error("PLAN_PERSISTED_PROOF_MISMATCH");
     }
     return frozen({ proofId: persisted.proofId,
@@ -753,7 +744,7 @@ export class RootBrokerServer {
     const accepted = frozen(structuredClone({ runId: run.runId, ...terminal }));
     const existing = this.terminalProofs.get(run.runId);
     if (existing) {
-      if (proofId(existing) !== proofId(accepted)) {
+      if (terminalProofId(existing) !== terminalProofId(accepted)) {
         this.terminalConflicts.add(run.runId);
         this.notifyExecutionFacts(run.runId);
       }
@@ -837,7 +828,7 @@ export class RootBrokerServer {
     const run = this.facadeRuns.get(runId);
     if (!run) return null;
     const proof = this.terminalProofs.get(runId) ?? null;
-    return frozen({ runId, state: proof ? "observed" : "pending", proofHash: proof ? proofId(proof) : null, proof, conflict: this.terminalConflicts.has(runId) });
+    return frozen({ runId, state: proof ? "observed" : "pending", proofHash: proof ? terminalProofId(proof) : null, proof, conflict: this.terminalConflicts.has(runId) });
   }
 
   executorProofSnapshot(run: OwnedRun) {
@@ -853,7 +844,7 @@ export class RootBrokerServer {
       binding: { rootSessionId: run.rootSessionId, runId: run.runId, asyncDir: run.asyncDir, sessionId: run.sessionId, pid: run.pid, agentProfile: run.agentProfile },
       authorization: { state: authorized ? "verified" : "unavailable" },
       capabilities: [...run.capabilities].sort(),
-      terminal: proof ? { proofId: proofId(proof), observedAt: proof.observedAt, outcome: successful ? "succeeded" : "failed", proof } : null,
+      terminal: proof ? { proofId: terminalProofId(proof), observedAt: proof.observedAt, outcome: successful ? "succeeded" : "failed", proof } : null,
       terminalConflict: this.terminalConflicts.has(run.runId),
     });
   }

@@ -14,6 +14,7 @@ import {
   ToolExecutionComponent,
   UserMessageComponent,
   type EntryRenderer,
+  type EntryRenderOptions,
   type MessageRenderer,
   type Theme,
   type ToolRenderers,
@@ -21,6 +22,16 @@ import {
 import { Container, Spacer, Text, type MarkdownTheme } from "@earendil-works/pi-tui";
 
 const MAX_SESSION_BYTES = 64 * 1024 * 1024;
+
+// Pi 1.5.0 把 EntryRenderOptions 从 `{ expanded }` 改为 `extends KeybindingHints`
+// （Host dist/core/extensions/types.d.ts:1189-1191），渲染 entry 时 keyText/keyHint 成为必填。
+// 本处是子会话的离线投影：调用链上没有 Host KeybindingsManager，取不到真实按键配置，
+// 因此显式给出空提示——不输出任何按键文本，keyHint 只回描述原文。本仓唯一 entry renderer
+// （tool-renderers.ts 的 renderSupervisorReplyEntry）不消费这两个字段，展示文本与 1.4 一致，
+// 也不改写 entry payload、session 或结构化 details。
+function detachedEntryRenderOptions(expanded: boolean): EntryRenderOptions {
+  return { expanded, keyText: () => "", keyHint: (_keybinding, description) => description };
+}
 
 type RenderOptions = {
   sessionFile: string;
@@ -223,7 +234,7 @@ export class NativeChildConversationRenderer {
         const renderer = this.resolveEntryRenderer?.(item.customType);
         // entry 不转换成 custom message；未知类型保留明确的只读显示 fallback。
         const component = renderer && options.theme
-          ? renderer(item, { expanded: options.expandedTools }, options.theme)
+          ? renderer(item, detachedEntryRenderOptions(options.expandedTools), options.theme)
           : new Text(`[Custom entry: ${item.customType}]\n${typeof item.data === "string" ? item.data : JSON.stringify(item.data ?? "")}`, options.outputPad, 0);
         if (component) {
           container.addChild(new Spacer(1));

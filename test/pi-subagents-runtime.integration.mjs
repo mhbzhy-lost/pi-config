@@ -490,7 +490,7 @@ test("installed runtime resolves a supported Pi and exact dependency versions", 
   const piVersion = execFileSync(piBinary, ["--version"], { encoding: "utf8" }).trim();
   assert.ok(SUPPORTED_PI_VERSIONS.includes(piVersion), `unsupported Pi version: ${piVersion}`);
   const piSubagentsVersion = execFileSync("node", ["-p", `require(${JSON.stringify(join(upstreamPackageRoot, "package.json"))}).version`], { encoding: "utf8" }).trim();
-   assert.equal(piSubagentsVersion, "0.79.2");
+   assert.equal(piSubagentsVersion, "0.84.0");
   const requireFromExtension = createRequire(join(upstreamPackageRoot, "package.json"));
   assert.match(requireFromExtension.resolve("typebox/compile"), /typebox/);
   assert.ok(requireFromExtension.resolve('typebox/compile'));

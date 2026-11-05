@@ -19,6 +19,20 @@ const RESUME_ACTIVE_STATES = ["waiting-head", "pending", "starting", "activated"
 const RESUME_MAX_ATTEMPTS = 6;
 const RESUME_MAX_NO_PROGRESS = 2;
 
+/**
+ * INV-EXIT（审计 §五、矩阵 #12/#15）：队列层拒绝回执同样必须携带 next，
+ * 格式对齐 MANAGED_WORKSPACE_STATE 范本（`<message>; next: ...`）。
+ * qFail 只构造 Error，不改任何判定、阈值或状态机；四类 next 按拒绝语义分类。
+ */
+const Q_NEXT_GATE = "以 queue.audit 的最新 state/lease/revision 为准重新取号后重试；跨 lease 或已终态项不得强推，需要新集成请新建队列项（或按 durable resume intent 交接人工处置）。";
+const Q_NEXT_INTENT = "先用 recoveryStatus()/queue.audit 核对该 intent 当前 state；已被结算关闭的 intent 不可重开：该 workspace 已完成处置，如需继续工作请 fresh 派发新 run；歧义或身份不符按阻断上报。";
+const Q_NEXT_DATA = "按数据损坏上报并保留 queue/ledger 现场，不要手工改记录后重试；确认来源后由 reconcile 收敛。";
+const Q_NEXT_CANCEL = "cancel 需要明确的 root 授权：先取到授权事实再重试，不要绕过授权直接改队列状态。";
+
+function qFail(message: string, next: string): Error {
+  return new Error(`${message}; next: ${next}`);
+}
+
 export type ProcessAliveStatus = { state: "alive" | "dead" | "mismatch" | "undetermined"; reason?: "process-not-found" | "birth-identity-mismatch"; error?: unknown; errno?: string };
 
 /** 队列项终态回执事件：五个终态写入点在 ledger.withLock 临界区内追加的 durable 记录。 */
@@ -116,7 +130,7 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
   function markRecoveryDelivery(recoveryIntentId: string, delivery: any) {
     return ledger.withLock(() => {
       const current = recoveryLoad(`recovery-${recoveryIntentId}.json`);
-      if (!current) throw new Error("recovery intent not found");
+      if (!current) throw qFail("recovery intent not found", Q_NEXT_INTENT);
       const next = { ...current, delivery: { state: delivery?.state === "delivered" ? "delivered" : "debt", ...(delivery?.reason ? { reason: String(delivery.reason).slice(0, 256) } : {}), attempts: (current.delivery?.attempts ?? 0) + 1 }, updatedAt: new Date().toISOString() };
       ledger.write(`recovery-${recoveryIntentId}.json`, next); return structuredClone(next);
     });
@@ -143,7 +157,7 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
     id(input?.queueItemId, "queueItemId"); id(input.sourceRunId, "sourceRunId"); id(input.sourceAsyncDir, "sourceAsyncDir"); id(input.sourceProofId, "sourceProofId");
     return ledger.withLock(() => {
       const current = load(`${input.queueItemId}.json`);
-      if (!current || !RESUMABLE_QUEUE_STATES.includes(current.state)) throw new Error("queue item is not resumable");
+      if (!current || !RESUMABLE_QUEUE_STATES.includes(current.state)) throw qFail("queue item is not resumable", Q_NEXT_GATE);
       const existing = loadResumeIntentsUnlocked().filter((entry) => entry.queueItemId === input.queueItemId).sort((a, b) => a.attempt - b.attempt);
       const previous = existing.at(-1);
       if (previous?.state === "preserved") return structuredClone(previous);
@@ -184,7 +198,7 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
   function markResumeDelivery(resumeIntentId: string, delivery: any) {
     return ledger.withLock(() => {
       const current = resumeLoad(`resume-${id(resumeIntentId, "resumeIntentId")}.json`);
-      if (!current) throw new Error("resume intent not found");
+      if (!current) throw qFail("resume intent not found", Q_NEXT_INTENT);
       const next = { ...current, delivery: { state: delivery?.state === "delivered" ? "delivered" : "debt", ...(delivery?.reason ? { reason: String(delivery.reason).slice(0, 256) } : {}), attempts: (current.delivery?.attempts ?? 0) + 1 }, updatedAt: new Date().toISOString() };
       saveResumeIntentUnlocked(next); return structuredClone(next);
     });
@@ -192,12 +206,12 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
   function markResumeStarting(resumeIntentId: string, resumedRun?: any) {
     return ledger.withLock(() => {
       const current = resumeLoad(`resume-${id(resumeIntentId, "resumeIntentId")}.json`);
-      if (!current) throw new Error("resume intent not found");
+      if (!current) throw qFail("resume intent not found", Q_NEXT_INTENT);
       if (current.state === "starting" || current.state === "activated") {
-        if (resumedRun?.runId !== undefined && current.resumedRun?.runId !== resumedRun.runId) throw new Error("resume intent already targets another resumed run");
+        if (resumedRun?.runId !== undefined && current.resumedRun?.runId !== resumedRun.runId) throw qFail("resume intent already targets another resumed run", Q_NEXT_INTENT);
         return structuredClone(current);
       }
-      if (current.state !== "pending") throw new Error("resume intent is not pending");
+      if (current.state !== "pending") throw qFail("resume intent is not pending", Q_NEXT_INTENT);
       if (resumedRun !== undefined
           && (!resumedRun?.runId || typeof resumedRun.asyncDir !== "string" || !path.isAbsolute(resumedRun.asyncDir) || !resumedRun?.sessionId
             || !Number.isSafeInteger(resumedRun.pid) || resumedRun.pid < 1 || !resumedRun?.agentProfile)) throw new TypeError("resumed run identity is invalid");
@@ -210,14 +224,14 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
   function markResumeActivated(resumeIntentId: string, resumedRun?: any) {
     return ledger.withLock(() => {
       const current = resumeLoad(`resume-${id(resumeIntentId, "resumeIntentId")}.json`);
-      if (!current) throw new Error("resume intent not found");
+      if (!current) throw qFail("resume intent not found", Q_NEXT_INTENT);
       if (current.state === "activated") {
-        if (resumedRun?.runId !== undefined && current.resumedRun?.runId !== resumedRun.runId) throw new Error("resume intent already activated for another resumed run");
+        if (resumedRun?.runId !== undefined && current.resumedRun?.runId !== resumedRun.runId) throw qFail("resume intent already activated for another resumed run", Q_NEXT_INTENT);
         return structuredClone(current);
       }
-      if (current.state !== "starting") throw new Error("resume intent is not starting");
-      if (!current.resumedRun?.runId) throw new Error("resume intent has no resumed run");
-      if (resumedRun?.runId !== undefined && current.resumedRun.runId !== resumedRun.runId) throw new Error("resume activation does not match the starting resumed run");
+      if (current.state !== "starting") throw qFail("resume intent is not starting", Q_NEXT_INTENT);
+      if (!current.resumedRun?.runId) throw qFail("resume intent has no resumed run", Q_NEXT_INTENT);
+      if (resumedRun?.runId !== undefined && current.resumedRun.runId !== resumedRun.runId) throw qFail("resume activation does not match the starting resumed run", Q_NEXT_INTENT);
       const next = { ...current, state: "activated", activationConfirmed: true, updatedAt: new Date().toISOString() };
       saveResumeIntentUnlocked(next); return structuredClone(next);
     });
@@ -226,17 +240,17 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
   // queue lease/admission generation/sequencer；幂等重放不叠加 revision。
   function rebindChildRunForRecovery(input: any) {
     id(input?.queueItemId, "queueItemId"); id(input.resumeIntentId, "resumeIntentId"); id(input.sourceRunId, "sourceRunId"); id(input.resumedRunId, "resumedRunId");
-    if (input.sourceRunId === input.resumedRunId) throw new Error("resume rebind must change the child run");
+    if (input.sourceRunId === input.resumedRunId) throw qFail("resume rebind must change the child run", Q_NEXT_INTENT);
     return ledger.withLock(() => {
       const current = load(`${input.queueItemId}.json`);
-      if (!current || !RESUMABLE_QUEUE_STATES.includes(current.state)) throw new Error("queue item is not resumable");
+      if (!current || !RESUMABLE_QUEUE_STATES.includes(current.state)) throw qFail("queue item is not resumable", Q_NEXT_GATE);
       const intent = loadResumeIntentsUnlocked().find((entry) => entry.resumeIntentId === input.resumeIntentId);
-      if (!intent || intent.queueItemId !== current.queueItemId || intent.sourceRunId !== input.sourceRunId) throw new Error("resume intent does not match the queue item");
-      if (intent.state !== "starting" && intent.state !== "activated") throw new Error("resume intent is not starting");
-      if (intent.generation !== current.admissionGeneration) throw new Error("resume intent generation mismatch");
-      if (input.generation !== undefined && input.generation !== intent.generation) throw new Error("resume rebind generation mismatch");
+      if (!intent || intent.queueItemId !== current.queueItemId || intent.sourceRunId !== input.sourceRunId) throw qFail("resume intent does not match the queue item", Q_NEXT_INTENT);
+      if (intent.state !== "starting" && intent.state !== "activated") throw qFail("resume intent is not starting", Q_NEXT_INTENT);
+      if (intent.generation !== current.admissionGeneration) throw qFail("resume intent generation mismatch", Q_NEXT_INTENT);
+      if (input.generation !== undefined && input.generation !== intent.generation) throw qFail("resume rebind generation mismatch", Q_NEXT_INTENT);
       if (current.childRunId === input.resumedRunId) return structuredClone(current);
-      if (current.childRunId !== input.sourceRunId) throw new Error("queue item is bound to another child run");
+      if (current.childRunId !== input.sourceRunId) throw qFail("queue item is bound to another child run", Q_NEXT_GATE);
       const next = { ...current, childRunId: input.resumedRunId, revision: current.revision + 1 };
       save(`${current.queueItemId}.json`, next);
       return structuredClone(next);
@@ -245,9 +259,9 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
   function completeResumeIntent(resumeIntentId: string) {
     return ledger.withLock(() => {
       const current = resumeLoad(`resume-${id(resumeIntentId, "resumeIntentId")}.json`);
-      if (!current) throw new Error("resume intent not found");
+      if (!current) throw qFail("resume intent not found", Q_NEXT_INTENT);
       if (current.state === "completed") return structuredClone(current);
-      if (!RESUME_ACTIVE_STATES.includes(current.state)) throw new Error("resume intent is not active");
+      if (!RESUME_ACTIVE_STATES.includes(current.state)) throw qFail("resume intent is not active", Q_NEXT_INTENT);
       const next = { ...current, state: "completed", updatedAt: new Date().toISOString() };
       saveResumeIntentUnlocked(next); return structuredClone(next);
     });
@@ -255,9 +269,9 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
   function failResumeIntent(resumeIntentId: string) {
     return ledger.withLock(() => {
       const current = resumeLoad(`resume-${id(resumeIntentId, "resumeIntentId")}.json`);
-      if (!current) throw new Error("resume intent not found");
+      if (!current) throw qFail("resume intent not found", Q_NEXT_INTENT);
       if (current.state === "failed") return structuredClone(current);
-      if (!RESUME_ACTIVE_STATES.includes(current.state)) throw new Error("resume intent is not active");
+      if (!RESUME_ACTIVE_STATES.includes(current.state)) throw qFail("resume intent is not active", Q_NEXT_INTENT);
       const next = { ...current, ...(current.state === "activated" ? { activationConfirmed: true } : {}), state: "failed", updatedAt: new Date().toISOString() };
       saveResumeIntentUnlocked(next); return structuredClone(next);
     });
@@ -282,7 +296,7 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
         || event.state !== state || event.revision !== item.revision || event.ownerScope?.kind !== item.ownerScope?.kind
         || event.ownerScope?.rootSessionId !== item.ownerScope?.rootSessionId
         || !event.delivery || !["pending", "delivered", "debt"].includes(event.delivery.state)
-        || !Number.isSafeInteger(event.delivery.attempts) || event.delivery.attempts < 0) throw new Error("receipt event identity or delivery is invalid");
+        || !Number.isSafeInteger(event.delivery.attempts) || event.delivery.attempts < 0) throw qFail("receipt event identity or delivery is invalid", Q_NEXT_DATA);
     return event;
   }
   function findReceiptEventForItemUnlocked(item: any, state: IntegrationReceiptEvent["state"]) {
@@ -324,8 +338,8 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
       const updated: IntegrationReceiptEvent[] = [];
       for (const eventId of eventIds as string[]) {
         const current = loadReceiptEventsUnlocked().find((entry) => entry.eventId === eventId);
-        if (!current) throw new Error(`receipt event not found: ${eventId}`);
-        if (input.ownerRootSessionId !== undefined && current.ownerScope?.rootSessionId !== input.ownerRootSessionId) throw new Error("receipt event owner scope denied");
+        if (!current) throw qFail(`receipt event not found: ${eventId}`, Q_NEXT_DATA);
+        if (input.ownerRootSessionId !== undefined && current.ownerScope?.rootSessionId !== input.ownerRootSessionId) throw qFail("receipt event owner scope denied", Q_NEXT_DATA);
         const next: IntegrationReceiptEvent = { ...current, delivery: { state: input.state, ...(reason !== undefined ? { reason } : {}), attempts: (current.delivery?.attempts ?? 0) + 1 } };
         ledger.write(`receipt-event-${eventId}.json`, next);
         updated.push(structuredClone(next));
@@ -366,9 +380,9 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
   function mutateRecovery(input: any, action: string) {
     return ledger.withLock(() => {
       const current = recoveryLoad(`recovery-${input.recoveryIntentId}.json`);
-      if (!current || current.ownerScope?.rootSessionId !== input.ownerScope?.rootSessionId) throw new Error("recovery intent owner scope denied");
-      if (input.generation !== undefined && input.generation !== current.generation) throw new Error("recovery intent generation mismatch");
-      if (current.state !== "preserved" && action !== "status") throw new Error("recovery intent already settled");
+      if (!current || current.ownerScope?.rootSessionId !== input.ownerScope?.rootSessionId) throw qFail("recovery intent owner scope denied", Q_NEXT_INTENT);
+      if (input.generation !== undefined && input.generation !== current.generation) throw qFail("recovery intent generation mismatch", Q_NEXT_INTENT);
+      if (current.state !== "preserved" && action !== "status") throw qFail("recovery intent already settled", Q_NEXT_INTENT);
       const next = { ...current, state: action === "status" ? current.state : action, generation: action === "retry" ? current.generation + 1 : current.generation, updatedAt: new Date().toISOString() };
       ledger.write(`recovery-${current.recoveryIntentId}.json`, next); return structuredClone(next);
     });
@@ -377,13 +391,13 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
   const save = (name: string, value: any) => ledger.write(name, value);
   function enqueueIntegration(request: any) {
     id(request?.requestId, "requestId"); id(request.workspaceId, "workspaceId"); digest(request.repositoryId, "repositoryId");
-    if (request.repositoryId !== repositoryId) throw new Error("repository scope mismatch");
-    if (request.strategy !== "rebase-ff") throw new Error("unsupported integration strategy");
+    if (request.repositoryId !== repositoryId) throw qFail("repository scope mismatch", Q_NEXT_GATE);
+    if (request.strategy !== "rebase-ff") throw qFail("unsupported integration strategy", Q_NEXT_GATE);
     return ledger.withLock(() => {
       const names = files(); const existing = names.map(load).find((entry) => entry.requestId === request.requestId);
       const requestHash = createHash("sha256").update(JSON.stringify(request)).digest("hex");
-      if (existing) { if (existing.requestHash !== requestHash) throw new Error("requestId idempotency conflict"); return structuredClone(existing); }
-      if (names.map(load).some((entry) => entry.workspaceId === request.workspaceId && !["completed", "cancelled", "preserved"].includes(entry.state))) throw new Error("workspace is already queued");
+      if (existing) { if (existing.requestHash !== requestHash) throw qFail("requestId idempotency conflict", Q_NEXT_GATE); return structuredClone(existing); }
+      if (names.map(load).some((entry) => entry.workspaceId === request.workspaceId && !["completed", "cancelled", "preserved"].includes(entry.state))) throw qFail("workspace is already queued", Q_NEXT_GATE);
       const sequence = Number(ledger.read<any>(metaFile, { nextSequence: 1 }).nextSequence);
       const entry = { version: INTEGRATION_QUEUE_RECORD_VERSION, queueItemId: randomUUID(), requestId: request.requestId, requestHash, repositoryId, sequence,
         workspaceId: request.workspaceId, leaseId: id(request.leaseId, "leaseId"), ownerScope: structuredClone(request.ownerScope), strategy: request.strategy,
@@ -418,12 +432,12 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
     const paths = Array.isArray(input?.additionalWritePaths) ? [...input.additionalWritePaths] : [];
     return ledger.withLock(() => {
       const current = findByBinding({ workspaceId: input?.workspaceId, leaseId: input?.leaseId, runId: input?.runId, ownerScope: input?.ownerScope });
-      if (!current) throw new Error("auto integration queue item is absent");
-      if (["completed", "cancelled", "preserved"].includes(current.state)) throw new Error("queue item is terminal; additional write paths cannot be authorized");
+      if (!current) throw qFail("auto integration queue item is absent", Q_NEXT_GATE);
+      if (["completed", "cancelled", "preserved"].includes(current.state)) throw qFail("queue item is terminal; additional write paths cannot be authorized", Q_NEXT_GATE);
       if (paths.length === 0) return structuredClone(current);
       for (const candidate of paths) {
         const reason = invalidManagedWritePathReason(candidate);
-        if (reason) throw new Error(`additional write path is invalid: ${candidate} (${reason})`);
+        if (reason) throw qFail(`additional write path is invalid: ${candidate} (${reason})`, Q_NEXT_GATE);
       }
       const merged = [...new Set([...(current.additionalAuthorizedWritePaths ?? []), ...paths])];
       const next = { ...current, additionalAuthorizedWritePaths: merged,
@@ -437,7 +451,7 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
     id(input?.queueItemId, "queueItemId"); commit(input.authorizedWorkspaceHead, "authorizedWorkspaceHead");
     return ledger.withLock(() => {
       const current = load(`${input.queueItemId}.json`);
-      if (!current || current.state !== "queued" || current.autoManaged !== true) throw new Error("queue item is not refreshable");
+      if (!current || current.state !== "queued" || current.autoManaged !== true) throw qFail("queue item is not refreshable", Q_NEXT_GATE);
       if (current.authorizedWorkspaceHead === input.authorizedWorkspaceHead) return structuredClone(current);
       const next = { ...current, authorizedWorkspaceHead: input.authorizedWorkspaceHead, revision: current.revision + 1 };
       save(`${current.queueItemId}.json`, next);
@@ -464,10 +478,10 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
     return ledger.withLock(() => {
       const current = load(`${id(input.queueItemId, "queueItemId")}.json`);
       if (!current || !["admitted", "rebasing", "resolving-conflict", "prepared"].includes(current.state)
-          || current.queueLeaseId !== input.queueLeaseId || current.admissionGeneration !== input.admissionGeneration) throw new Error("queue lease, generation, or state mismatch");
+          || current.queueLeaseId !== input.queueLeaseId || current.admissionGeneration !== input.admissionGeneration) throw qFail("queue lease, generation, or state mismatch", Q_NEXT_GATE);
       commit(input.candidateHead, "candidateHead");
       if (current.state === "prepared") {
-        if (current.candidateHead !== input.candidateHead) throw new Error("prepared candidate is immutable");
+        if (current.candidateHead !== input.candidateHead) throw qFail("prepared candidate is immutable", Q_NEXT_GATE);
         return structuredClone(current);
       }
       const next = { ...current, state: "prepared", candidateHead: input.candidateHead, revision: current.revision + 1, preparedAt: new Date().toISOString() };
@@ -478,7 +492,7 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
     return ledger.withLock(() => {
       const current = load(`${id(input.queueItemId, "queueItemId")}.json`);
       if (!current || current.state !== "prepared" || current.queueLeaseId !== input.queueLeaseId
-          || current.candidateHead !== input.candidateHead) throw new Error("prepared queue lease or candidate mismatch");
+          || current.candidateHead !== input.candidateHead) throw qFail("prepared queue lease or candidate mismatch", Q_NEXT_GATE);
       const next = { ...current, state: "completed", integrationIntentId: id(input.integrationIntentId, "integrationIntentId"),
         workspaceDispositionReceiptId: id(input.workspaceDispositionReceiptId, "workspaceDispositionReceiptId"), revision: current.revision + 1, completedAt: new Date().toISOString() };
       save(`${current.queueItemId}.json`, next);
@@ -490,26 +504,40 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
       return structuredClone(next);
     });
   }
+  /**
+   * 冲突续轮记账。`noProgress` 表示本次冲突摘要与上次相同（没有进展）。
+   *
+   * `input.countNoProgress === true` 只由**无人认领**的推进（coordinator reconcile）传入：
+   * 该场景下「再次真实 rebase 仍得到同一冲突摘要」就是一次空转续轮，必须计入
+   * `continuationAttempt`，否则无进展上限（RESUME_MAX_NO_PROGRESS）永不触发、队列项
+   * 永久停在 resolving-conflict（审计 §五 INV-REACH GAP-1）。child 主动 continue 的
+   * 路径不传该标记，`noProgress` 语义与计数职责保持原样（guard 由 child 生命周期消费）。
+   * 达上限时返回 `exhausted: true`，由调用方按既有 preserve + recovery intent 形态收敛。
+   */
   function markResolvingConflict(input: any) {
     return ledger.withLock(() => {
       const current = load(`${id(input.queueItemId, "queueItemId")}.json`);
       if (!current || !["admitted", "rebasing", "resolving-conflict"].includes(current.state) || current.queueLeaseId !== input.queueLeaseId
-          || (input.admissionGeneration !== undefined && current.admissionGeneration !== input.admissionGeneration)) throw new Error("queue lease, generation, or state mismatch");
+          || (input.admissionGeneration !== undefined && current.admissionGeneration !== input.admissionGeneration)) throw qFail("queue lease, generation, or state mismatch", Q_NEXT_GATE);
       if (input.conflictDigest === undefined) {
         const next = { ...current, state: "resolving-conflict", revision: current.revision + 1 };
         save(`${current.queueItemId}.json`, next); return structuredClone(next);
       }
       digest(input.conflictDigest, "conflictDigest");
+      const countNoProgress = input.countNoProgress === true;
       const noProgress = current.conflictDigest === input.conflictDigest;
-      const continuationAttempt = noProgress ? (current.continuationAttempt ?? 0) : (current.continuationAttempt ?? 0) + 1;
+      const continuationAttempt = noProgress
+        ? (countNoProgress ? (current.continuationAttempt ?? 0) + 1 : (current.continuationAttempt ?? 0))
+        : (current.continuationAttempt ?? 0) + 1;
+      const exhausted = countNoProgress && noProgress && continuationAttempt >= RESUME_MAX_NO_PROGRESS;
       const next = { ...current, state: "resolving-conflict", conflictDigest: input.conflictDigest, continuationAttempt, revision: current.revision + 1 };
-      save(`${current.queueItemId}.json`, next); return structuredClone({ ...next, noProgress });
+      save(`${current.queueItemId}.json`, next); return structuredClone({ ...next, noProgress, exhausted });
     });
   }
   function completeItem(receipt: any) { return transition(receipt, "completed"); }
   function failItem(receipt: any) { return transition(receipt, "preserved"); }
   function cancelItem(receipt: any, authorization: any = {}) {
-    if (authorization.authorized !== true) throw new Error("authorized cancel is required");
+    if (authorization.authorized !== true) throw qFail("authorized cancel is required", Q_NEXT_CANCEL);
     return transition(receipt, "cancelled");
   }
   const settlementIndex = "disposition-settlement-index.json";
@@ -519,19 +547,19 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
         || !isPreparedWorkspaceDisposition(value.prepared) || name !== settlementFile(value.prepared.settlementId)
         || !["authorized", "workspace-committed", "queue-committed", "settled"].includes(value.phase)
         || value.workspaceReceiptRef !== (value.phase === "authorized" ? null : `wsr-${value.prepared.settlementId}`)
-        || value.queueReceiptRef !== (["queue-committed", "settled"].includes(value.phase) ? `qsr-${value.prepared.settlementId}` : null)) throw new Error("invalid settlement intent");
+        || value.queueReceiptRef !== (["queue-committed", "settled"].includes(value.phase) ? `qsr-${value.prepared.settlementId}` : null)) throw qFail("invalid settlement intent", Q_NEXT_DATA);
     return value;
   }
   function listDispositionIntents(): any[] {
     return ledger.read<string[]>(settlementIndex, []).map(name => {
-      if (typeof name !== "string" || !/^disposition-[A-Za-z0-9._-]+\.json$/.test(name) || name.includes("..")) throw new Error("invalid settlement index");
+      if (typeof name !== "string" || !/^disposition-[A-Za-z0-9._-]+\.json$/.test(name) || name.includes("..")) throw qFail("invalid settlement index", Q_NEXT_DATA);
       const value = ledger.read<any>(name, null);
       validateDispositionIntent(value, name);
       return structuredClone(value);
     });
   }
   function recordDispositionIntent(prepared: PreparedWorkspaceDispositionV1) {
-    if (!isPreparedWorkspaceDisposition(prepared)) throw new Error("invalid prepared disposition");
+    if (!isPreparedWorkspaceDisposition(prepared)) throw qFail("invalid prepared disposition", Q_NEXT_DATA);
     return ledger.withLock(() => {
       const name = settlementFile(prepared.settlementId);
       const existing = ledger.read<any>(name, null);
@@ -539,7 +567,7 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
         validateDispositionIntent(existing, name);
         const prior = existing.prepared;
         for (const field of ["settlementId", "operation", "reason", "binding", "authorizedRevision", "snapshotHash", "proofHash", "executorHead"]) {
-          if (JSON.stringify(prior?.[field]) !== JSON.stringify(prepared[field])) throw new Error("settlement intent identity mismatch");
+          if (JSON.stringify(prior?.[field]) !== JSON.stringify(prepared[field])) throw qFail("settlement intent identity mismatch", Q_NEXT_DATA);
         }
       }
       const next = existing ?? { schemaVersion: "workspace-queue-settlement-intent.v1", prepared: structuredClone(prepared), phase: "authorized", workspaceReceiptRef: null, queueReceiptRef: null };
@@ -554,17 +582,17 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
       const name = settlementFile(settlementId);
       const value = ledger.read<any>(name, null);
       const phases = ["authorized", "workspace-committed", "queue-committed", "settled"];
-      if (!value || !phases.includes(phase)) throw new Error("settlement intent is unavailable");
+      if (!value || !phases.includes(phase)) throw qFail("settlement intent is unavailable", Q_NEXT_DATA);
       validateDispositionIntent(value, name);
       if (phases.indexOf(value.phase) >= phases.indexOf(phase)) return value;
-      if (phases.indexOf(phase) !== phases.indexOf(value.phase) + 1) throw new Error("settlement phase cannot skip an effect");
+      if (phases.indexOf(phase) !== phases.indexOf(value.phase) + 1) throw qFail("settlement phase cannot skip an effect", Q_NEXT_DATA);
       const next = { ...value, phase, workspaceReceiptRef: `wsr-${settlementId}`, queueReceiptRef: ["queue-committed", "settled"].includes(phase) ? `qsr-${settlementId}` : null };
       ledger.write(name, next);
       return structuredClone(next);
     });
   }
   function verifyDispositionBinding(prepared: PreparedWorkspaceDispositionV1) {
-    if (!isPreparedWorkspaceDisposition(prepared)) throw new Error("invalid prepared disposition");
+    if (!isPreparedWorkspaceDisposition(prepared)) throw qFail("invalid prepared disposition", Q_NEXT_DATA);
     const b = prepared.binding;
     if (!b.queueItemId) return;
     const current = getItem(b.queueItemId);
@@ -573,7 +601,7 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
         || (current.queueLeaseId ?? null) !== b.queueLeaseId || current.admissionGeneration !== b.admissionGeneration
         || (current.dispositionSettlementId === prepared.settlementId
           ? current.dispositionReceiptRef !== `qsr-${prepared.settlementId}` || !["completed", "cancelled", "preserved"].includes(current.state)
-          : current.revision !== b.queueRevision)) throw new Error("settlement queue binding or revision mismatch");
+          : current.revision !== b.queueRevision)) throw qFail("settlement queue binding or revision mismatch", Q_NEXT_DATA);
   }
   function settleDispositionQueue(prepared: PreparedWorkspaceDispositionV1) {
     return ledger.withLock(() => {
@@ -583,15 +611,15 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
       const current = getItem(b.queueItemId);
       if (!current || current.workspaceId !== b.workspaceId || current.leaseId !== b.leaseId || current.childRunId !== b.runId
           || current.ownerScope?.rootSessionId !== b.rootSessionId || current.ownerScope?.kind !== "standalone-subagent"
-          || (current.queueLeaseId ?? null) !== b.queueLeaseId || current.admissionGeneration !== b.admissionGeneration) throw new Error("settlement queue binding mismatch");
+          || (current.queueLeaseId ?? null) !== b.queueLeaseId || current.admissionGeneration !== b.admissionGeneration) throw qFail("settlement queue binding mismatch", Q_NEXT_DATA);
       let settled = current;
       if (current.dispositionSettlementId !== prepared.settlementId) {
-        if (current.revision !== b.queueRevision) throw new Error("settlement queue revision changed");
+        if (current.revision !== b.queueRevision) throw qFail("settlement queue revision changed", Q_NEXT_DATA);
         const terminal = ["completed", "cancelled", "preserved"].includes(current.state);
         settled = { ...current, state: terminal ? current.state : prepared.operation === "preserve" ? "preserved" : "cancelled",
           revision: current.revision + 1, dispositionSettlementId: prepared.settlementId, dispositionReceiptRef: `qsr-${prepared.settlementId}` };
         save(`${current.queueItemId}.json`, settled);
-      } else if (current.dispositionReceiptRef !== `qsr-${prepared.settlementId}` || !["completed", "cancelled", "preserved"].includes(current.state)) throw new Error("settlement queue receipt mismatch");
+      } else if (current.dispositionReceiptRef !== `qsr-${prepared.settlementId}` || !["completed", "cancelled", "preserved"].includes(current.state)) throw qFail("settlement queue receipt mismatch", Q_NEXT_DATA);
       // 终态回执事件：首写与重放都经过这里，queueItemId+state 幂等去重，
       // 覆盖「队列项已写终态、事件尚未落盘」的崩溃窗口。
       appendReceiptEventUnlocked(settled, settled.state);
@@ -615,7 +643,7 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
   function retryItem(receipt: any) {
     return ledger.withLock(() => {
       const current = load(`${id(receipt.queueItemId, "queueItemId")}.json`);
-      if (!current || !["admitted", "blocked", "preserved"].includes(current.state) || current.queueLeaseId !== receipt.queueLeaseId || current.revision !== receipt.revision) throw new Error("queue lease or revision mismatch");
+      if (!current || !["admitted", "blocked", "preserved"].includes(current.state) || current.queueLeaseId !== receipt.queueLeaseId || current.revision !== receipt.revision) throw qFail("queue lease or revision mismatch", Q_NEXT_GATE);
       const names = files(); const sequence = Number(ledger.read<any>(metaFile, { nextSequence: 1 }).nextSequence);
       const next = { ...current, queueItemId: randomUUID(), requestId: `${current.requestId}:attempt-${current.attempt + 1}`, sequence, attempt: current.attempt + 1, admissionGeneration: 0, revision: 0, state: "queued" };
       for (const field of ["daemonClaim", "queueLeaseId", "childAdmissionLeaseId", "claimRevision", "claimedAt", "admittedTargetHead", "candidateHead", "preparedAt", "integrationIntentId", "workspaceDispositionReceiptId", "completedAt"]) delete next[field];
@@ -623,12 +651,45 @@ export function createIntegrationQueue({ stateRoot, repositoryId, storageReposit
       return structuredClone(next);
     });
   }
-  function transition(receipt: any, state: IntegrationReceiptEvent["state"]) { return ledger.withLock(() => { const current = load(`${id(receipt.queueItemId, "queueItemId")}.json`); const allowed = state === "preserved" ? ["admitted", "rebasing", "resolving-conflict", "prepared", "blocked"] : ["admitted"]; if (!current || !allowed.includes(current.state) || current.queueLeaseId !== receipt.queueLeaseId || current.revision !== receipt.revision) throw new Error("queue lease or revision mismatch"); const next = { ...current, state, revision: current.revision + 1 }; save(`${current.queueItemId}.json`, next); appendReceiptEventUnlocked(next, state); return structuredClone(next); }); }
-  function recoverClaims(instanceIdentity: any) { return ledger.withLock(() => { const recovered: any[] = []; for (const current of listQueue()) if (current.state === "admitted" && current.daemonClaim && current.daemonClaim.instanceId === instanceIdentity.instanceId) {
-    const status = processAliveStatus(instanceIdentity.pid ?? current.daemonClaim.pid, instanceIdentity.birthIdentity ?? current.daemonClaim.birthIdentity);
-    if (status.state === "undetermined") diagnose({ version: 1, phase: "integration-queue-owner-liveness-undetermined", state: status.state, error: status.error, cause: (status.error as any)?.cause, errno: status.errno, instanceId: instanceIdentity.instanceId });
-    if (status.state === "dead" || status.state === "mismatch") { const next = { ...current, state: "queued", revision: current.revision + 1, daemonClaim: undefined, queueLeaseId: undefined, childAdmissionLeaseId: undefined }; save(`${current.queueItemId}.json`, next); recovered.push(next); }
-  } return recovered; }); }
+  function transition(receipt: any, state: IntegrationReceiptEvent["state"]) { return ledger.withLock(() => { const current = load(`${id(receipt.queueItemId, "queueItemId")}.json`); const allowed = state === "preserved" ? ["admitted", "rebasing", "resolving-conflict", "prepared", "blocked"] : ["admitted"]; if (!current || !allowed.includes(current.state) || current.queueLeaseId !== receipt.queueLeaseId || current.revision !== receipt.revision) throw qFail("queue lease or revision mismatch", Q_NEXT_GATE); const next = { ...current, state, revision: current.revision + 1 }; save(`${current.queueItemId}.json`, next); appendReceiptEventUnlocked(next, state); return structuredClone(next); }); }
+  /**
+   * 回收 admitted claim（审计 #13 的恢复函数）。
+   *
+   * 两条判定格并存：
+   * 1) 同 instanceId 重入恢复：调用者显式声明的身份已死（既有语义）；
+   * 2) 孤儿恢复（启动接线消费）：不同 instanceId 的旧 daemon 留下的 claim，
+   *    以 **claim 自己记录的 daemon 身份** 做四态活性判定。旧实现只比较
+   *    instanceId，新 daemon（新 instanceId）永远无法回收死 daemon 的 claim，
+   *    孤儿就永久卡住 FIFO。
+   * undetermined 一律保持原样（不可证伪就不回收），only dead/mismatch 回收为
+   * queued 并清掉 claim/lease。
+   */
+  function recoverClaims(instanceIdentity: any) {
+    return ledger.withLock(() => {
+      const recovered: any[] = [];
+      for (const current of listQueue()) {
+        if (current.state !== "admitted" || !current.daemonClaim) continue;
+        const claim = current.daemonClaim;
+        const sameInstance = claim.instanceId === instanceIdentity?.instanceId;
+        const probe = sameInstance
+          ? { pid: instanceIdentity?.pid ?? claim.pid, birthIdentity: instanceIdentity?.birthIdentity ?? claim.birthIdentity }
+          : { pid: claim.pid, birthIdentity: claim.birthIdentity };
+        const status = processAliveStatus(probe.pid, probe.birthIdentity);
+        if (status.state === "undetermined") {
+          diagnose({ version: 1, phase: "integration-queue-owner-liveness-undetermined", state: status.state, error: status.error, cause: (status.error as any)?.cause, errno: status.errno, instanceId: claim.instanceId, queueItemId: current.queueItemId });
+          continue;
+        }
+        if (status.state === "alive") {
+          diagnose({ version: 1, phase: "integration-queue-claim-owner-alive", instanceId: claim.instanceId, queueItemId: current.queueItemId });
+          continue;
+        }
+        const next = { ...current, state: "queued", revision: current.revision + 1, daemonClaim: undefined, queueLeaseId: undefined, childAdmissionLeaseId: undefined };
+        save(`${current.queueItemId}.json`, next);
+        recovered.push(next);
+      }
+      return recovered;
+    });
+  }
   return Object.freeze({ enqueueIntegration, claimNext, getItem, findByBinding, preserveByBinding, authorizeAdditionalWritePaths, prepareCandidate, completePrepared, markResolvingConflict, completeItem, failItem, cancelItem, retryItem, recoverClaims, listQueue, recoveryIntent, listRecoveryIntents, mutateRecovery, markRecoveryDelivery, notificationDeliveryDebt,
     requestChildResume, promoteRecoverableHead, markResumeDelivery, markResumeStarting, markResumeActivated, completeResumeIntent, failResumeIntent, listResumeIntents, rebindChildRunForRecovery, refreshAuthorizedWorkspaceHead, listReceiptEvents, listPendingReceiptEvents, markReceiptEventDelivery,
     recordDispositionIntent, advanceDispositionIntent, listDispositionIntents, verifyDispositionBinding, settleDispositionQueue });

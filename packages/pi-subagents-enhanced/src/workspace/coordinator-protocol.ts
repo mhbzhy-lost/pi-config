@@ -1,4 +1,11 @@
 import { Type } from "typebox";
+// 协议校验交给官方 TypeBox 编译器（Host 公开 import 表里的 `typebox/compile`），
+// 不再自维护 JSON Schema 分支遍历：旧遍历只认 const/type/pattern/anyOf，新增关键字
+// （minLength/enum/items 约束等）会被静默忽略而误放行；Compile 一次编译成闭包，
+// 所有已声明关键字都生效，语义仍以 schema 为唯一权威。
+// pi-schema 是 Pi 1.5 的官方工具参数 validator，但增强包 manifest 未声明该依赖，
+// 引入会改 package.json/package-lock 与安装闭包证据，故本轮不动（见巡检报告）。
+import { Compile } from "typebox/compile";
 
 export const COORDINATOR_PROTOCOL_VERSION = "repository-workspace-coordinator.v1";
 export const INTEGRATION_QUEUE_RECORD_VERSION = "workspace-integration-queue-item.v1";
@@ -45,35 +52,25 @@ const RegistrationRequest = Type.Object({
   }, { additionalProperties: false }),
 }, { additionalProperties: false });
 
-function parse(schema: any, value: unknown, label: string) {
-  if (!strictCheck(schema, value)) throw new TypeError(`Coordinator ${label} contains unknown field or violates strict protocol schema`);
+// 每个协议 schema 只编译一次；Check 是官方编译器产出的纯闭包，不做额外缓存或改写。
+const RequestValidator = Compile(Request);
+const ParamsValidator = Compile(Params);
+const ReplyValidator = Compile(Reply);
+const RegistrationRequestValidator = Compile(RegistrationRequest);
+
+function parse(validator: { Check(value: unknown): boolean }, value: unknown, label: string) {
+  if (!validator.Check(value)) throw new TypeError(`Coordinator ${label} contains unknown field or violates strict protocol schema`);
   return structuredClone(value) as any;
 }
 
-function strictCheck(schema: any, value: any): boolean {
-  if (schema.const !== undefined) return value === schema.const;
-  if (schema.type === "object") {
-    if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-    if (!schema.properties) return true;
-    return Object.keys(value).every((key) => schema.properties[key] !== undefined)
-      && Object.entries(schema.properties).every(([key, child]: any) => value[key] === undefined ? schema.required?.includes(key) !== true : strictCheck(child, value[key]));
-  }
-  if (schema.type === "string") return typeof value === "string" && (!schema.pattern || new RegExp(schema.pattern).test(value));
-  if (schema.type === "number") return typeof value === "number" && Number.isFinite(value);
-  if (schema.type === "boolean") return typeof value === "boolean";
-  if (schema.type === "array") return Array.isArray(value) && value.every(item => strictCheck(schema.items, item));
-  if (schema.anyOf) return schema.anyOf.some((child: any) => strictCheck(child, value));
-  return true;
-}
-
 export function parseCoordinatorRequest(value: unknown) {
-  const result = parse(Request, value, "request");
-  if (result.method === "workspace.attach" && !strictCheck(Params, result.params)) throw new TypeError("Coordinator params contains unknown field or violates strict schema");
+  const result = parse(RequestValidator, value, "request");
+  if (result.method === "workspace.attach" && !ParamsValidator.Check(result.params)) throw new TypeError("Coordinator params contains unknown field or violates strict schema");
   return result;
 }
 
-export function parseCoordinatorReply(value: unknown) { return parse(Reply, value, "reply"); }
-export function parseCoordinatorRegistrationRequest(value: unknown) { return parse(RegistrationRequest, value, "registration request"); }
+export function parseCoordinatorReply(value: unknown) { return parse(ReplyValidator, value, "reply"); }
+export function parseCoordinatorRegistrationRequest(value: unknown) { return parse(RegistrationRequestValidator, value, "registration request"); }
 
 const permissions: Record<string, string[]> = {
   "root-broker": ["workspace.attach", "workspace.detach", "binding.register", "binding.revoke", "terminal.submit", "receipt.query", "queue.audit", "bind_run", "record_terminal_proof"],

@@ -571,7 +571,11 @@ export function createManagedWorkspaceLedger({ stateRoot = process.env.PI_CODING
         lockPath: path.join(repositoryDir, "ledger.lock"),
       });
     }
-    if (matches.length !== 1) throw failure(matches.length === 0 ? "MANAGED_WORKSPACE_NOT_FOUND" : "MANAGED_WORKSPACE_CONFLICT", matches.length === 0 ? "managed workspace record was not found" : "workspaceId is not globally unique");
+    // INV-EXIT：workspace_id 解析失败同样是拒绝语义，回执带 next（不存在的 id 用 list 核对；
+    // 跨仓库重复 id 属数据冲突，保留现场上报）。
+    if (matches.length !== 1) throw failure(matches.length === 0 ? "MANAGED_WORKSPACE_NOT_FOUND" : "MANAGED_WORKSPACE_CONFLICT", matches.length === 0
+      ? "managed workspace record was not found; next: 用 workspace list/status 核对 workspace_id（只接受派发回执里的完整 id）后重试；id 正确仍找不到即 ledger 记录缺失，按阻断上报并保留 state root 现场。"
+      : "workspaceId is not globally unique; next: 属 ledger 数据冲突，保持现场并按阻断上报，不要挑选其中一个仓库后重试。");
     const parsed = readPrivateJson(matches[0].recordPath, "managed workspace record");
     return { ...matches[0], originRoot: canonicalOrigin(parsed?.request?.originRoot), repositoryId: path.basename(matches[0].repositoryDir), storageRepositoryId: path.basename(matches[0].repositoryDir), repositoriesDir: path.join(root, "repositories") };
   }

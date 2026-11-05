@@ -31,6 +31,24 @@ const PROCESS_TERMINAL_REASONS = Object.freeze([
 
 export const BROKER_METHODS = METHODS;
 
+function canonicalProofValue(value: any): any {
+  if (Array.isArray(value)) return value.map(canonicalProofValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalProofValue(value[key])]));
+}
+
+/**
+ * 终局证明身份的唯一权威算法：canonical JSON + SHA-256。
+ *
+ * broker 内存事实、durable `process-terminal.json` 事实与 proof outbox 的
+ * debt/receipt 都以本函数的输出为同一个 proofId。任何一侧另写一份算法都会
+ * 制造「同一事实多个权威视角」（审计文档 P3/INV-OWNER-UNIQ），因此这里只允许
+ * 一个实现。
+ */
+export function terminalProofId(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(canonicalProofValue(value))).digest("hex");
+}
+
 export const BROKER_REGISTRATION_METHOD = "coordinator.register" as const;
 export const COORDINATOR_OPERATIONS = Object.freeze([
   "enqueue", "await_admission", "report_conflict", "publish", "fail",

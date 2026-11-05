@@ -352,12 +352,33 @@ test('F5 真实 append IO 故障已插入 Manager：compact cancel、无假锁�
   await rename(file, backup); await mkdir(file);
   try {
     const result = await h.session.extensionRunner.emit({ type: 'session_before_compact', reason: 'manual', willRetry: false });
-    assert.equal(result.cancel, true); assert.ok(h.session.sessionManager.getBranch().length > before);
-    assert.equal(h.bridge.getSession().compactPending, null); assert.equal(h.bridge.getSession().store.diagnose().writable, false);
-    const rejected = await h.execute(); assert.equal(rejected.isError, true); assert.equal(h.execution.calls.length, 1);
+    assert.equal(result.cancel, true);
+    // Pi 1.5.0 的 SessionManager._appendEntry 在 _persist 失败时回滚内存 entry/byId/leafId
+    // （dist/core/session-manager.js:817-831），1.4 的「内存 append 成功、磁盘失败」不再成立：
+    // 写入失败的取消记录不能留在内存分支里。实质断言（compact 被取消、无假锁、store 只读
+    // 降级、reload 不靠内存解锁）不变，这里改为断言回滚后分支长度与 leaf 均未前进。
+    assert.equal(h.session.sessionManager.getBranch().length, before);
+    assert.equal(h.bridge.getSession().compactPending, null);
+    const failed = h.bridge.getSession().store.diagnose();
+    // 写失败瞬间必须当场可见：store 置为不可写并携带 APPEND_FAILED 失败码，执行被拒。
+    assert.equal(failed.restored, true);
+    assert.equal(failed.writable, false);
+    assert.equal(failed.blockedCode, 'APPEND_FAILED');
+    const rejected = await h.execute(); assert.equal(rejected.isError, true);
+    assert.equal(rejected.details.error.code, 'APPEND_FAILED'); assert.equal(h.execution.calls.length, 1);
   } finally { await rm(file, { recursive: true, force: true }); await rename(backup, file); }
-  await h.session.reload(); assert.equal(h.bridge.getSession().store.diagnose().writable, false);
-  assert.equal((await h.execute()).isError, true);
+  // Pi 1.5.0 CHANGELOG：「Fixed failed session writes leaving entries in memory that were absent from
+  // disk, so later entries pointed to missing parents and resumed sessions lost earlier history and tools」
+  // （#11460）。1.4 的「写失败后内存幽灵条目」使故障窗口 reload 永久锁死，本用例曾据此断言「恢复文件后
+  // reload 仍不可写且拒执行」；1.5 已修复该缺陷，重载时重新核验磁盘，恢复文件后应重新可写并可继续执行。
+  // 产品语义：失败瞬间当场锁写（上段断言），恢复 + reload 重新核验通过即解锁，不保留永久锁死。
+  await h.session.reload();
+  const recovered = h.bridge.getSession().store.diagnose();
+  assert.equal(recovered.restored, true);
+  assert.equal(recovered.writable, true);
+  assert.equal(recovered.blockedCode, null);
+  ok(await h.execute());
+  assert.equal(h.execution.calls.length, 1);
   await h.session.extensionRunner.emit({ type: 'session_shutdown', reason: 'exit' });
   const fresh = await reopened(h);
   try {

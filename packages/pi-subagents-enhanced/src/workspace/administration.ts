@@ -114,9 +114,13 @@ export function auditManagedWorkspaces({ stateRoot = process.env.PI_CODING_WORKS
       if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") debts.push({ kind: "queue-schema", path: queueRoot, status: "unknown-schema" });
       continue;
     }
+    // 文件枚举只接受 queue item：索引、recovery/resume intent（分类呈现）与
+    // 终态回执事件（integration-queue 的 receiptEventIndexFile ＋ 每事件一文件）
+    // 都不是 queue item，误当 item 会让 audit 输出被未知 schema 债污染（审计 #17）。
     for (const name of names.filter((entry) => entry.endsWith(".json") && entry !== "queue-meta.json" && entry !== "queue-index.json"
         && entry !== "recovery-intent-index.json" && entry !== "resume-intent-index.json"
-        && !entry.startsWith("recovery-") && !entry.startsWith("resume-"))) {
+        && entry !== "queue-receipt-events.json"
+        && !entry.startsWith("recovery-") && !entry.startsWith("resume-") && !entry.startsWith("receipt-event-"))) {
       const item = readJsonFile(path.join(queueRoot, name));
       if (!item) { debts.push({ kind: "queue-schema", path: path.join(queueRoot, name), status: "unknown-schema" }); continue; }
       queue.push(item);

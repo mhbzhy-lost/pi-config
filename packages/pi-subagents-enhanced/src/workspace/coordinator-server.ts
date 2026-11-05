@@ -10,17 +10,19 @@ import { parseCoordinatorRequest, parseCoordinatorRegistrationRequest, authorize
 import type { TrustedBrokerRegistration } from "./coordinator-auth.ts";
 import { canonicalWorkspaceStateRoot } from "./coordinator-registry.ts";
 import { createManagedWorkspaceService } from "./service.ts";
-import { createIntegrationQueue } from "./integration-queue.ts";
+import { createManagedWorkspaceLedger } from "./ledger.ts";
+import { createIntegrationQueue, processAliveStatus } from "./integration-queue.ts";
 import { auditManagedWorkspaces } from "./administration.ts";
 import { toCoordinatorErrorInfo } from "./coordinator-errors.ts";
 import { createWorkspaceDispositionSettlement } from "./disposition-settlement.ts";
+import { readDurableObservedTerminalProof } from "./durable-terminal-proof.ts";
 
 type CoordinatorFault = (event: { operation: string; phase: string; queueItemId?: string; workspaceId?: string }) => void;
 type CoordinatorDiagnostic = (entry: unknown) => void;
 
 const RESUMABLE_PROOF_QUEUE_STATES = ["queued", "admitted", "resolving-conflict", "prepared"];
 
-export function createCoordinatorServer(options: { endpoint: string; repositoryId: string; storageRepositoryId?: string; stateRoot?: string; capability?: string; instanceId?: string; idleGraceMs?: number; handler?: (request: any) => unknown; challengeBroker?: typeof challengeRootBroker; recoveryEventSink?: (event: any) => Promise<any> | any; fault?: CoordinatorFault; diagnosticSink?: CoordinatorDiagnostic; admissionProbe?: () => void }) {
+export function createCoordinatorServer(options: { endpoint: string; repositoryId: string; storageRepositoryId?: string; stateRoot?: string; capability?: string; instanceId?: string; idleGraceMs?: number; handler?: (request: any) => unknown; challengeBroker?: typeof challengeRootBroker; recoveryEventSink?: (event: any) => Promise<any> | any; fault?: CoordinatorFault; diagnosticSink?: CoordinatorDiagnostic; admissionProbe?: () => void; onListening?: () => Promise<void> | void }) {
   const diagnose = (entry: unknown) => { try { options.diagnosticSink?.(entry); } catch (diagnosticError) { console.error("[coordinator-server] diagnostic sink failed", { entry, diagnosticError }); } };
   const instanceId = options.instanceId ?? randomUUID();
   const challengeBroker = options.challengeBroker ?? challengeRootBroker;
@@ -37,6 +39,12 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
   const storageRepositoryId = options.storageRepositoryId ?? options.repositoryId;
   const workspaceService = stateRoot
     ? createManagedWorkspaceService({ stateRoot, storageRepositoryId, fault: event => options.fault?.({ ...event }), admissionProbe: options.admissionProbe,
+      // 证明权威统一（审计 #9 / INV-OWNER-UNIQ）：coordinator 侧与 Host 侧消费同一
+      // durable 异步事实（run.asyncDir 下官方 process-terminal.json），同步解析为
+      // 同形 7 字段证明；事实缺失/不一致时返回 undefined，保持原 fail-closed。
+      // INV-EXIT：解析失败原因与 next 随诊断输出（durable-terminal-proof-unresolved），
+      // 使「release 被拒」能归因到具体缺失事实。
+      terminalProofProvider: ({ run, rootSessionId }) => readDurableObservedTerminalProof({ run, rootSessionId, onDiagnostic: diagnose }),
       integrationFallback: { blockedReasons: integrationFallbackBlockedReasons, execute: integrateTerminalWorkspace } })
     : undefined;
   const integrationQueue = workspaceService
@@ -287,8 +295,11 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
         queueLeaseId: admission.queueLeaseId,
         admissionGeneration: admission.admissionGeneration,
         conflictDigest,
+        // 只有无人认领的推进（reconcile）才把同一冲突摘要的重复计为一次空转续轮；
+        // child 主动 continue 的计数职责仍是它自己的 guard。
+        countNoProgress: input?.unattended === true,
       });
-      return { ...inspectAutoIntegration(binding), conflictDigest, continuationAttempt: conflict.continuationAttempt, noProgress: conflict.noProgress };
+      return { ...inspectAutoIntegration(binding), conflictDigest, continuationAttempt: conflict.continuationAttempt, noProgress: conflict.noProgress, exhausted: conflict.exhausted === true };
     }
     return publishRebasedCandidate({ queueItemId: item.queueItemId, queueLeaseId: admission.queueLeaseId, candidateHead: candidate.head }, binding);
   }
@@ -321,6 +332,22 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
     return inspectIntegrationState(binding);
   }
 
+  /**
+   * reconcile 是「无人认领」的推进：只有该项记录的 daemon claim 已不可用（死进程或被
+   * 复用的 pid）时，重复冲突才计入无进展上限。认领方仍活着的项由 child 自己继续
+   * rebase，reconcile 不得抢先判无进展；liveness 不可判定同样不计入（宁可空转也不误判）。
+   */
+  function claimOwnerUnavailable(item: any) {
+    const claim = item?.daemonClaim;
+    if (!claim || typeof claim.pid !== "number" || typeof claim.birthIdentity !== "string") return true;
+    const status = processAliveStatus(claim.pid, claim.birthIdentity);
+    if (status.state === "undetermined") {
+      diagnose({ version: 1, phase: "coordinator-reconcile-claim-liveness-undetermined", state: status.state, error: (status as any).error, errno: (status as any).errno, queueItemId: item.queueItemId, instanceId: claim.instanceId });
+      return false;
+    }
+    return status.state !== "alive";
+  }
+
   function reconcileIntegrations() {
     if (!integrationQueue || !workspaceService) return [];
     const results = [];
@@ -328,16 +355,147 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
       if (!["queued", "admitted", "rebasing", "resolving-conflict", "prepared"].includes(item.state)) continue;
       const binding = { workspaceId: item.workspaceId, leaseId: item.leaseId, ownerScope: item.ownerScope, runId: item.childRunId };
       try {
-        results.push(item.state === "prepared"
-          ? publishRebasedCandidate({ queueItemId: item.queueItemId, queueLeaseId: item.queueLeaseId, candidateHead: item.candidateHead }, binding)
-          : advanceAutoIntegration({}, binding));
+        if (item.state === "prepared") { results.push(publishRebasedCandidate({ queueItemId: item.queueItemId, queueLeaseId: item.queueLeaseId, candidateHead: item.candidateHead }, binding)); continue; }
+        const advance = advanceAutoIntegration({ unattended: claimOwnerUnavailable(item) }, binding);
+        // 无进展上限命中：与 resume intent 耗尽路径同一收敛形态（preserve + recovery intent /
+        // delivery debt），把静默空转变成可归因终态。preserve 自身失败仍走下面的 catch 分支。
+        if (advance?.exhausted === true) {
+          const preserved = preserveIntegrationDebt(binding, "resolving-conflict repeated without progress under coordinator reconcile");
+          results.push({ queueItemId: item.queueItemId, state: preserved?.queueState ?? "preserved", error: null, reason: "conflict-no-progress-exhausted" });
+          continue;
+        }
+        results.push(advance);
       }
       catch (error) {
-        try { preserveIntegrationDebt(binding, "coordinator-reconcile-rejected"); } catch (secondaryError) { diagnose({ version: 1, phase: "coordinator-reconcile-preserve-failed", error, cause: error?.cause, secondaryError, secondaryCause: secondaryError?.cause, queueItemId: item.queueItemId }); }
-        results.push({ queueItemId: item.queueItemId, state: "preserved", error: String((error as any)?.message ?? error) });
+        // preserve 本身也可能失败（workspace 已不在 active）：结果必须如实投影，
+        // 不能让「preserve 失败」被误报为「已 preserve」。
+        let preserved = false;
+        try { preserveIntegrationDebt(binding, "coordinator-reconcile-rejected"); preserved = true; }
+        catch (secondaryError) { diagnose({ version: 1, phase: "coordinator-reconcile-preserve-failed", error, cause: error?.cause, secondaryError, secondaryCause: secondaryError?.cause, queueItemId: item.queueItemId }); }
+        results.push({ queueItemId: item.queueItemId, state: preserved ? "preserved" : "unchanged", error: String((error as any)?.message ?? error) });
       }
     }
     return results;
+  }
+  /**
+   * proof debt 重投（审计 #7 的唯一恢复 owner）。
+   *
+   * Host 侧 `classifyTerminalProofBinding` 在绑定不可解析时把证明记成 debt，但
+   * outbox 的 replay 只重投 pending：一旦 durable 事实后来补齐（ledger 重新可读、
+   * workspace 绑定稳定、官方 process-terminal.json 落盘），debt 没有任何泵，证明
+   * 永久不可达。这里在启动恢复里按 runId 直读 ledger：恰好一条 owned workspace、
+   * 且能重建出与 debt 同一 proofId 的完整 7 字段证明时，把它重新入 pending 并从
+   * debts 移除（`enqueue` 的既有语义）；找不到、歧义、身份不一致或与已记录证明
+   * 冲突时保持 debt，只落诊断，不猜测、不降级。
+   */
+  async function reconcileProofDebts() {
+    if (!proofOutbox || !workspaceService) return { reinjected: [] as string[], retained: [] as string[] };
+    const debts = await proofOutbox.debts();
+    const reinjected: string[] = [];
+    const retained: string[] = [];
+    if (debts.length === 0) return { reinjected, retained };
+    let records: any[];
+    try {
+      // 与 proof outbox 同一 storage partition；legacy v1 record 只跳过并转发诊断，
+      // v2/未知 schema 仍 fail-closed（T1 合同）。
+      records = createManagedWorkspaceLedger({ stateRoot, storageRepositoryId }).list({
+        storagePartitionOnly: true,
+        onInvalid: (diagnostic) => diagnose({ version: 1, phase: "coordinator-proof-debt-ledger-invalid", diagnostic }),
+      });
+    } catch (error) {
+      diagnose({ version: 1, phase: "coordinator-proof-debt-ledger-failed", error, cause: (error as any)?.cause,
+        reason: "workspace ledger 不可读，无法按 run 重建证明",
+        next: "核对 state root 与 ledger 文件权限/结构后重跑启动对账；修好前 debt 保持不变，不要手工改 outbox 或 ledger。" });
+      return { reinjected, retained: debts.map((debt) => debt.proofId) };
+    }
+    for (const debt of debts) {
+      // INV-EXIT（审计 #7）：保持 debt 时必须给出原因与 next——reconcileProofDebts 就是
+      // 这类债务的唯一恢复 owner，回执不能只说「还不行」。
+      const retain = (phase: string, reason: string, next: string, detail: Record<string, unknown> = {}) => {
+        diagnose({ version: 1, phase, proofId: debt.proofId, runId: debt.runId, reason, next, ...detail });
+        retained.push(debt.proofId);
+      };
+      const matches = records.filter((record: any) => record?.run?.runId === debt.runId);
+      if (matches.length !== 1) {
+        retain("coordinator-proof-debt-binding-ambiguous", `ledger 中该 run 对应 workspace 为 ${matches.length} 条（要求恰好一条）`,
+          "先用 workspace 审计/queue audit 核对唯一绑定；多条属歧义，保持 debt 交人工处置，不要挑一条重投。", { matched: matches.length });
+        continue;
+      }
+      const record: any = matches[0];
+      const ownerScope = { kind: "standalone-subagent" as const, rootSessionId: record.request?.owner?.rootSessionId };
+      let durableFailure: any;
+      const proof = readDurableObservedTerminalProof({ run: record.run, rootSessionId: ownerScope.rootSessionId,
+        onDiagnostic: (entry) => { durableFailure = entry; } });
+      if (!proof) {
+        retain("coordinator-proof-debt-durable-fact-unavailable",
+          durableFailure?.reason ?? "durable 终局事实不可用",
+          durableFailure?.next ?? "确认 child 已终止并产出官方 process-terminal.json 后重跑对账；仍缺失按阻断上报（debt 保持）。",
+          { workspaceId: record.workspaceId });
+        continue;
+      }
+      if (proof.proofId !== debt.proofId) {
+        retain("coordinator-proof-debt-identity-mismatch", "durable 制品的 proofId 与 debt 记录的 proofId 不一致",
+          "确认证明来源（是否被改写或换了 run）；跨 run 不一致不得重投，按阻断上报并保留现场。",
+          { workspaceId: record.workspaceId, durableProofId: proof.proofId });
+        continue;
+      }
+      // broker 侧的 terminalConflict 是内存标志，coordinator 可见的 durable 等价物
+      // 是 workspace 已记录的另一份 observed 证明：同一 run 出现两个 proofId 即冲突。
+      if (record.terminalProof?.state === "observed" && record.terminalProof.proofId !== proof.proofId) {
+        retain("coordinator-proof-debt-terminal-conflict", "同一 workspace 已记录另一份 observed 证明",
+          "保持 debt 并按阻断上报；不要覆盖已记录 proof、不要删除 ledger 记录。",
+          { workspaceId: record.workspaceId, recordedProofId: record.terminalProof.proofId });
+        continue;
+      }
+      try {
+        await proofOutbox.enqueue({ ...proof, workspaceId: record.workspaceId, ownerScope });
+        const status = await proofOutbox.status(debt.proofId);
+        // delivered 说明债务已被既有 receipt 覆盖（无待办）；pending 即本次重投成功。
+        if (status.state === "pending" || status.state === "delivered") { reinjected.push(debt.proofId); continue; }
+        retain("coordinator-proof-debt-reinject-incomplete", `重投后 outbox 状态仍为 ${String((status as any).state)}`,
+          "检查 outbox 文件与并发写入（terminal-proofs.json）；仍不成功按阻断上报并保留 outbox 现场。",
+          { workspaceId: record.workspaceId, observedState: status.state });
+      } catch (error) {
+        diagnose({ version: 1, phase: "coordinator-proof-debt-reinject-failed", error, cause: (error as any)?.cause, proofId: debt.proofId, runId: debt.runId,
+          reason: error instanceof Error ? (error.message || "重投写入失败") : String(error),
+          next: "核对 state root 与 outbox 目录的权限/磁盘后重试；不要手工改 outbox 文件。" });
+        retained.push(debt.proofId);
+      }
+    }
+    if (reinjected.length > 0) diagnose({ version: 1, phase: "coordinator-proof-debt-reinjected", reinjected, retained });
+    return { reinjected, retained };
+  }
+  /**
+   * 死 daemon claim 回收（审计 #13 / INV-WIRING）：`recoverClaims` 早已实现但全仓
+   * 零调用方，死 daemon 留下的 admitted claim 会永久卡住 FIFO。启动恢复用本 daemon
+   * 自己的 instanceIdentity 调用；具体回收对象由 queue 侧按 claim 自己记录的 daemon
+   * 身份做四态活性判定（undetermined 保持不动，绝不按时间推断）。结果落诊断。
+   */
+  function recoverDeadClaims() {
+    if (!integrationQueue) return [];
+    try {
+      const recovered = integrationQueue.recoverClaims(daemonIdentity);
+      diagnose({ version: 1, phase: "coordinator-recover-claims", count: recovered.length,
+        recovered: recovered.map((item: any) => ({ queueItemId: item.queueItemId, workspaceId: item.workspaceId, state: item.state })) });
+      return recovered;
+    } catch (error) {
+      diagnose({ version: 1, phase: "coordinator-recover-claims-failed", error, cause: (error as any)?.cause });
+      return [];
+    }
+  }
+  /** 启动对账残余（审计 #14 / INV-WIRING）：released 孤儿解除阻塞后，剩余非终态项
+   * 做一次全量对账（推进或 preserve），结果落诊断；失败不阻断 startupReady。 */
+  function reconcileIntegrationsAtStartup() {
+    if (!integrationQueue || !workspaceService) return [];
+    try {
+      const results = reconcileIntegrations();
+      diagnose({ version: 1, phase: "coordinator-startup-reconcile", visited: results.length,
+        results: results.map((entry: any) => ({ queueItemId: entry?.queueItemId ?? null, state: entry?.state ?? null, error: entry?.error ?? null, ...(entry?.reason === undefined ? {} : { reason: entry.reason }) })) });
+      return results;
+    } catch (error) {
+      diagnose({ version: 1, phase: "coordinator-startup-reconcile-failed", error, cause: (error as any)?.cause });
+      return [];
+    }
   }
   /**
    * 启动孤儿项对账：workspace 已 release 终态但队列项仍 queued 的组合是永久
@@ -391,16 +549,32 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
       && entry.ownerScope?.rootSessionId === proofOwnerScope?.rootSessionId).at(-1);
     if (item?.dispositionSettlementId && ["cancelled", "preserved"].includes(item.state)) {
       const prepared = workspaceService!.readPreparedDisposition({ workspaceId, ownerScope: proofOwnerScope, settlementId: item.dispositionSettlementId });
-      if (prepared.phase !== "settled" || prepared.proofHash !== terminalProof.proofId
-          || prepared.binding.runId !== terminalProof.runId || prepared.binding.asyncDir !== terminalProof.asyncDir
-          || prepared.queueReceiptRef !== item.dispositionReceiptRef) throw new Error("terminal proof does not match settled disposition receipt");
+      // 结算 binding 全等是「同一事实」的唯一判据：后到证明的 run/asyncDir 与
+      // owner scope 必须与 prepare 时持久记录的 binding 完全一致。
+      const bindingMatches = prepared.binding.runId === terminalProof.runId
+        && prepared.binding.asyncDir === terminalProof.asyncDir
+        && prepared.binding.rootSessionId === proofOwnerScope?.rootSessionId
+        && prepared.queueReceiptRef === item.dispositionReceiptRef;
+      if (prepared.phase !== "settled" || !bindingMatches) throw new Error(`terminal proof does not match settled disposition receipt: 证明的 runId/asyncDir/owner scope 或 queue receipt 与已结算 disposition 不一致；next: 按 queue.audit 的 receipt/结算记录核对证明来源，不要重复投递同一 proof；确实属同事实时由 reconcile 重放，仍不一致按阻断上报。`);
+      if (prepared.proofHash === null) {
+        // 审计 #8：结算时「证明未观察」（proofHash null）不等于「后到真证明非法」。
+        // binding 全等时把证明补记到 workspace 记录，再走既有 settle 幂等路径；
+        // 同一 workspace 已记录另一份 observed 证明（proofId 不同）仍按冲突拒绝，
+        // 防伪造语义不变。
+        const recorded = workspaceService!.readOwned({ workspaceId, ownerScope: proofOwnerScope }).terminalProof;
+        if (recorded?.state === "observed" && recorded.proofId !== terminalProof.proofId) throw new Error("terminal proof does not match the recorded terminal proof: 同一 workspace 已记录另一份 observed 证明（后到证明与已记录证明 proofId 不同）；next: 保持现场并按阻断上报，不要覆盖已记录 proof 或伪造后到证明。");
+        if (recorded?.proofId !== terminalProof.proofId) workspaceService!.recordTerminalProof({ workspaceId, ownerScope: proofOwnerScope, proof: terminalProof });
+      } else if (prepared.proofHash !== terminalProof.proofId) {
+        // 结算时已观察证明：proofId 必须全等（防伪造）。
+        throw new Error("terminal proof does not match settled disposition receipt: 结算时已记录另一份 observed 证明，proofId 必须全等；next: 核对证明来源后按阻断上报，不要覆盖已结算证明。");
+      }
       integrationQueue!.verifyDispositionBinding(prepared);
       const receipt = workspaceService!.markDispositionSettled({ workspaceId, ownerScope: proofOwnerScope, settlementId: prepared.settlementId, queueReceiptRef: prepared.queueReceiptRef });
       return { accepted: true, proofId: terminalProof.proofId, receipt };
     }
     if (item && item.state !== "completed") {
       if (item.childRunId !== terminalProof.runId || item.ownerScope?.rootSessionId !== proofOwnerScope?.rootSessionId) {
-        throw new Error("terminal proof does not match trusted child binding");
+        throw new Error("terminal proof does not match trusted child binding: queue item 的 childRunId/owner scope 与证明不一致；next: 用 queue.audit 核对队列项 binding，不一致即证明不属于该队列项，按阻断上报，不要改队列项后重试。");
       }
       workspaceService!.recordTerminalProof({ workspaceId, ownerScope: proofOwnerScope, proof: terminalProof });
       const binding = { workspaceId, leaseId: item.leaseId, runId: terminalProof.runId, ownerScope: proofOwnerScope };
@@ -431,11 +605,11 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
         integrationQueue!.requestChildResume({ queueItemId: item.queueItemId, sourceRunId: terminalProof.runId, sourceAsyncDir: terminalProof.asyncDir, sourceProofId: terminalProof.proofId });
         await pumpResumeIntents().catch((error) => { diagnose({ version: 1, phase: "coordinator-resume-pump-failed", error, cause: error?.cause }); });
       }
-      if (item.state !== "completed") throw new Error("terminal proof delivery remains pending until the child integration completes");
+      if (item.state !== "completed") throw new Error("terminal proof delivery remains pending until the child integration completes: 队列项仍未到 completed（集成未完成或已交人工）；next: 等 child integration 完成或由启动对账/auto-integration 推进；不要重复投递同一 proof，集成冲突时按 durable resume intent 交接处置。");
     }
-    if (!item) throw new Error("terminal proof requires a completed child integration");
+    if (!item) throw new Error("terminal proof requires a completed child integration: 该 workspace 没有对应队列项，证明无处交付；next: 确认 run 是否以 worktree 派发且已入队（queue.audit），缺项属事实不匹配，按阻断上报，不要伪造队列项。");
     if (item.childRunId !== terminalProof.runId || item.ownerScope?.rootSessionId !== proofOwnerScope?.rootSessionId) {
-      throw new Error("terminal proof does not match trusted child binding");
+      throw new Error("terminal proof does not match trusted child binding: queue item 的 childRunId/owner scope 与证明不一致；next: 用 queue.audit 核对队列项 binding；不一致即证明不属于该队列项，按阻断上报。");
     }
     // Replay after a crash between discard and receipt persistence must stay
     // idempotent; a released workspace already settled this proof.
@@ -465,7 +639,7 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
       await proofOutbox.enqueue({ ...structuredClone(params.proof), workspaceId: params.workspaceId, ownerScope: structuredClone(ownerScope) });
       await replayTerminalProofs();
       const delivered = await proofOutbox.receipt(params.proof.proofId);
-      if (delivered === undefined) throw new Error("terminal proof delivery remains pending");
+      if (delivered === undefined) throw new Error("terminal proof delivery remains pending: enqueue 后未产生 receipt（交付被拒或仍在 pending）；next: 用 queue.audit 与 coordinator 诊断（coordinator-proof-delivery-failed）定位拒绝原因，按原因修复后重试；不要伪造 receipt。");
       return delivered;
     }
     if (request.request.method !== "binding.register") return options.handler?.(request);
@@ -703,23 +877,37 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
   function beginActivity() { retained++; let released = false; return () => { if (released) return; released = true; retained--; }; }
   async function finishStartupRecovery() {
     startupReady = false;
+    // 证明债务重投先于 replay（审计 #7）：durable 事实已补齐的 debt 重分类为
+    // pending，与原 pending 在同一轮交付，既有 replay 语义（幂等、失败留 pending）
+    // 不变。债务重投自身的失败不得阻断恢复：debt 保持 durable 待下一轮。
+    try { await reconcileProofDebts(); }
+    catch (error) { diagnose({ version: 1, phase: "coordinator-proof-debt-reconcile-failed", error, cause: (error as any)?.cause }); }
     // Terminal proof is the authority required by destructive workspace settlement.
     // Replay it before any prepared disposition can release the worktree; a proof
     // that remains pending stays in the durable outbox for the next Host.
     await replayTerminalProofs();
     dispositionSettlement?.replay();
     await pumpResumeIntents();
+    // 死 daemon 的 admitted claim 回收（#13）先于队列对账：回收后项回到 queued，
+    // 参与下面的孤儿解除阻塞与全量对账。
+    recoverDeadClaims();
     // durable FIFO 孤儿项对账：released 终态 workspace 遗留的 queued 项直接
     // preserve 解除阻塞，避免无人可认领的历史项永久卡死队列。
     reconcileReleasedOrphanQueueItems();
+    // 剩余非终态项的全量对账（#14 接线）：推进或 preserve，结果落诊断。
+    reconcileIntegrationsAtStartup();
     startupReady = true;
   }
   // 计划契约：startupReady 供拉起器/宿主等待（Promise 形式），与 isStartupReady 同源。
+  // endpoint 绑定完成、startup recovery 尚未开始时调用 onListening：daemon 据此
+  // 在「已接管 endpoint」时就发布 durable owner 事实，不在自身存活但未登记的窗口里
+  // 留下「本仓无 coordinator」的假事实（审计 #18）。
   let whenStartupReadyPromise: Promise<void> | undefined;
   async function listen() {
     whenStartupReadyPromise = (async () => {
       try {
         await listenOnEndpoint();
+        await options.onListening?.();
         await finishStartupRecovery();
       } catch (error: any) {
         if (error?.code !== "EADDRINUSE") throw error;
@@ -733,6 +921,7 @@ export function createCoordinatorServer(options: { endpoint: string; repositoryI
         if (live) throw error;
         await unlink(options.endpoint).catch(() => undefined);
         await listenOnEndpoint();
+        await options.onListening?.();
         await finishStartupRecovery();
       }
     })();

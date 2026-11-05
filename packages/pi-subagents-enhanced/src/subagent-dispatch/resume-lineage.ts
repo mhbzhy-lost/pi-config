@@ -4,7 +4,7 @@ import { tmpdir, userInfo } from "node:os";
 // package exports 未开放该子路径；本 package 以 bundleDependencies 将
 // node_modules/pi-subagents 物化为 package 内固定闭包（scripts/verify-package.ts
 // 校验该闭包与 registry 版本一致），因此按 package 内相对文件路径消费；上游版本
-// 由 package.json dependencies 精确锚定（0.80.0）。
+// 由 package.json dependencies 精确锚定（0.84.0；该未开放子路径在 0.84.0 仍存在，由 verify-package 闭包门禁把守）。
 import { readAsyncRecoveryDescriptor } from "../../node_modules/pi-subagents/src/runs/background/async-resume.js";
 
 /**

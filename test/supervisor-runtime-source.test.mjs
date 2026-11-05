@@ -141,7 +141,7 @@ test('C 显式终态：rpc.status 成功且 state=complete → 不经 broker 覆
   const { entries, sink } = collect();
   const readRuntime = makeReader(broker, async () => ({ details: { state: 'complete' }, asyncSnapshot: { runs: [] } }), sink);
   const runtime = await readRuntime(RUN);
-  assert.deepEqual(runtime, { runId: RUN, running: false, steerable: false, ownerGeneration: 3 }, '上游链显式终态权威，broker 不覆盖');
+  assert.deepEqual(runtime, { runId: RUN, running: false, steerable: false, ownerGeneration: 3, explicitState: 'complete' }, '上游链显式终态权威，broker 不覆盖；explicitState 仅随 runtime 暴露供 INV-EXIT 拒绝归因，不参与判定');
   const entry = entries.at(-1);
   assert.equal(entry?.resolvedBy, 'primary');
   assert.equal(entry?.primarySource?.explicitState, 'complete');
@@ -155,7 +155,7 @@ test('E 主链判 running：返回值与既有实现逐字段一致，且不落�
   const readRuntime = makeReader(broker, async () => ({ details: { state: 'running', steerable: true, liveRunEpoch: 9, ownerGeneration: 7 }, asyncSnapshot: { runs: [{ id: RUN, state: 'running' }, { id: 'other' }] } }), sink);
   const before = entries.length;
   const runtime = await readRuntime(RUN);
-  assert.deepEqual(runtime, { runId: RUN, running: true, steerable: true, liveRunEpoch: 9, ownerGeneration: 3 }, 'owner receipt 合并语义与既有实现一致（receipt 覆盖 details）');
+  assert.deepEqual(runtime, { runId: RUN, running: true, steerable: true, liveRunEpoch: 9, ownerGeneration: 3, explicitState: 'running' }, 'owner receipt 合并语义与既有实现一致（receipt 覆盖 details）；新增 explicitState 仅为 SUPERVISOR_STEER_NOT_ALLOWED 回执归因');
   assert.equal(entries.length, before, '判 running 路径不新增诊断条目（零噪声）');
 });
 

@@ -778,7 +778,7 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
       });
       throw Object.assign(new Error(
         `managed resume broker binding blocked: run ${sourceRunId} 的 workspace lineage 归一化未达成${note ? `（${note}）` : ""}；存在 Root Broker/workspace 绑定事实或无法确认非托管身份，不能绕过 owner、lease 与 proof 门禁。`
-        + (currentOwnerRunId ? `请改用当前 owner run id（${currentOwnerRunId}）重新发起 resume，或放弃续跑改为 fresh 派发新 run。` : "请改用该 lineage 当前 owner run id 重新发起 resume（可经 subagent status 或 workspace 记录查询），或放弃续跑改为 fresh 派发新 run。")
+        + (currentOwnerRunId ? `next: 请改用当前 owner run id（${currentOwnerRunId}）重新发起 resume，或放弃续跑改为 fresh 派发新 run。` : "next: 请改用该 lineage 当前 owner run id 重新发起 resume（可经 subagent status 或 workspace 记录查询），或放弃续跑改为 fresh 派发新 run。")
         + (lineage.chain.length > 1 ? `lineage 链：${lineage.chain.join(" -> ")}。` : ""),
       ), { code: "RESUME_BINDING_BLOCKED" });
     }
@@ -843,7 +843,7 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
         || (record.run.agentProfile !== undefined && record.run.agentProfile !== binding.agentProfile)
         || (record.run.sessionId !== undefined && record.run.sessionId !== binding.sessionId)
         || (record.run.pid !== undefined && record.run.pid !== binding.pid)) {
-      throw Object.assign(new Error("managed resume source binding is unavailable"), { code: "RESUME_BINDING_BLOCKED" });
+      throw Object.assign(new Error("managed resume source binding is unavailable: broker execution proof 与 workspace record 的 owner/run/session/profile 不一致或已撤销（不能按非托管续跑）；next: 用 subagent_run_status 核对当前 run 身份；owner 已换代时按 lineage 当前 owner run 重新 resume，已终态则 fresh 派发新 run。"), { code: "RESUME_BINDING_BLOCKED" });
     }
     return snapshot;
   };
@@ -933,9 +933,13 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
       await supervisorControlPlane.ready(rootSessionId);
       const lifecycleSessionId = readSessionIdentity(ctx.sessionManager).sessionFile ?? resolveCurrentSessionId(ctx.sessionManager);
       // Host ceiling是显式opt-in；无配置时不得改变既有frontmatter工具行为。
+      // 0.84.0 上游 ceiling 查找统一用 ctx.sessionManager.getSessionId()（subagent-executor.js
+      // :1538/:1835 resolveCurrentSubagentCapabilityCeiling(input.ctx.sessionManager.getSessionId())），
+      // 因此注册键必须是同一 session ID；lifecycleSessionId 的 sessionFile 优先语义只服务
+      // broker/workspace/completion 生命周期，不能用作 ceiling 键。
       childToolCeilingRegistration = registerConfiguredChildToolCeiling({
         agentDir: process.env.PI_CODING_AGENT_DIR ?? "",
-        sessionId: lifecycleSessionId,
+        sessionId: rootSessionId,
       });
       // Root broker is the sole completion owner (contract §2.5); no upstream
       // completion-owner identity is generated in this integration layer.
@@ -1207,7 +1211,7 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
       events: pi.events,
       async prepare({ sourceRunId, ownerState, owner }: any) {
         if (!brokerReady || !broker || !workspaceService) {
-          if (ownerState === "owned") throw Object.assign(new Error("managed resume coordinator identity is unavailable"), { code: "RESUME_BINDING_BLOCKED" });
+          if (ownerState === "owned") throw Object.assign(new Error("managed resume coordinator identity is unavailable: broker 或 workspace service 未装配，而 owner 已确认受管（不能按非托管放行）；next: 先在 Host 侧确认 Root Broker 与 workspace service 就绪后重试一次，仍不可用按阻断上报，不要绕过 resume 直接把同一 workspace 当 fresh 派发。"), { code: "RESUME_BINDING_BLOCKED" });
           return undefined;
         }
         let localOwned: any[];
@@ -1216,7 +1220,7 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
         } catch (error) {
           // 枚举被 same-owner/unknown invalid record 阻断时无法确认绑定：转换为
           // 既有 resume 阻塞语义（保留 cause），不降级为「没有 workspace」。
-          throw Object.assign(new Error("managed resume owned receipts are unavailable"), { code: "RESUME_BINDING_BLOCKED", cause: error });
+          throw Object.assign(new Error("managed resume owned receipts are unavailable: 本 root 的 workspace receipt 枚举被非法/无法确认归属的记录阻断，无法确认绑定；next: 按阻断上报并核对 ledger 记录（workspace 审计或 service.reconcile），修掉损坏记录后重试 resume；不要把该失败解释成「没有 workspace」。"), { code: "RESUME_BINDING_BLOCKED", cause: error });
         }
         // 绑定键归一化：默认按请求 id；请求 id 是旧祖先 id（ledger 已改绑到续跑后的新
         // run）时改写为 lineage 当前 owner run，后续 register+activate 全部按 owner run
@@ -1269,37 +1273,38 @@ export function installSubagentRuntime(pi: ExtensionAPI, dependencies: { bootstr
           catch (diagnosticError) { console.error("[subagent-runtime] managed resume diagnostic sink failed", diagnosticError); }
           owned = [selected];
         }
-        if (!Array.isArray(owned)) throw Object.assign(new Error("managed resume workspace ownership is unavailable"), { code: "RESUME_BINDING_BLOCKED" });
+        if (!Array.isArray(owned)) throw Object.assign(new Error("managed resume workspace ownership is unavailable: coordinator listOwned 返回非法结构，无法确认 workspace 归属；next: 按阻断上报并核对 coordinator 记录与连接状态，不要重试同一 resume。"), { code: "RESUME_BINDING_BLOCKED" });
         if (owned.length === 0) return undefined;
-        if (owned.length !== 1) throw Object.assign(new Error("managed resume requires exactly one owned workspace"), { code: "RESUME_BINDING_BLOCKED" });
+        if (owned.length !== 1) throw Object.assign(new Error(`managed resume requires exactly one owned workspace: 该 run 对应 ${owned.length} 条 owned workspace（续跑要求恰好一条）；next: 先用 subagent_run_status 或 workspace list 核对唯一 workspace；多于一条属歧义，保持现场按阻断上报，不要挑一条强行 resume。`), { code: "RESUME_BINDING_BLOCKED" });
         if (bindingOwnerState !== "owned" || !bindingOwner || bindingOwner.runId !== bindingRunId || bindingOwner.rootSessionId !== broker.rootSessionId) {
-          throw Object.assign(new Error("managed resume owner identity is unavailable"), { code: "RESUME_BINDING_BLOCKED" });
+          throw Object.assign(new Error("managed resume owner identity is unavailable: owner receipt 缺失或 ownerState 不是 owned（读不到 ≠ 非受管）；next: 稍后重试一次，仍不可用按阻断上报，不要以非托管身份续跑。"), { code: "RESUME_BINDING_BLOCKED" });
         }
         const record = owned[0];
         if (record.workspaceId !== selected.workspaceId || record.leaseId !== selected.leaseId || record.originRoot !== selected.originRoot
             || record?.owner?.kind !== "standalone-subagent" || record.owner.rootSessionId !== broker.rootSessionId
             || record?.run?.runId !== bindingRunId || !Number.isSafeInteger(bindingOwner.ownerGeneration) || bindingOwner.ownerGeneration <= 0) {
-          throw Object.assign(new Error("managed resume owner binding is invalid"), { code: "RESUME_BINDING_BLOCKED" });
+          throw Object.assign(new Error("managed resume owner binding is invalid: workspace record 的 lease/origin/owner/run/ownerGeneration 与本次请求不一致；next: 以 workspace 记录里的 owner run 与 lease 核对请求参数；身份确实换代时按 lineage 当前 owner run 重新 resume。"), { code: "RESUME_BINDING_BLOCKED" });
         }
         const expectedAgent = managedCodingBinding(record, bindingOwner, broker).binding.agentProfile;
         const intents = await (await coordinatorRuntime.requireClient()).recoveryStatus();
         const matches = Array.isArray(intents)
           ? intents.filter((entry: any) => entry?.version === "integration-resume-intent.v1" && entry.sourceRunId === bindingRunId)
           : [];
-        if (matches.length !== 1) throw Object.assign(new Error("managed resume intent is unavailable or ambiguous"), { code: "RESUME_BINDING_BLOCKED" });
+        // 0 条即单向结算门已关闭 intent（preserve/cancel 结算顺手关闭）：恢复出口是 fresh 派发，不是重开 intent。
+        if (matches.length !== 1) throw Object.assign(new Error(`managed resume intent is unavailable or ambiguous: 该 run 有 ${matches.length} 条 pending resume intent（要求恰好一条）；next: 0 条说明该 workspace 的 resume intent 已被结算关闭（preserve/cancel 结算单向关 intent），即该 workspace 已完成处置，如需继续工作请 fresh 派发新 run；多条属歧义，保持现场按阻断上报，不要手工挑一条激活。`), { code: "RESUME_BINDING_BLOCKED" });
         const intent = parseIntegrationResumeIntentV1(matches[0], { rootSessionId: broker.rootSessionId });
         if (intent.workspaceId !== record.workspaceId || intent.leaseId !== record.leaseId || intent.state !== "pending" || intent.resumedRun !== null) {
-          throw Object.assign(new Error("managed resume intent is not activatable"), { code: "RESUME_BINDING_BLOCKED" });
+          throw Object.assign(new Error("managed resume intent is not activatable: intent 已激活（resumedRun 已绑定）或与当前 workspace/lease/generation 不匹配；next: 不要重复 resume；用 subagent_run_status 查看该 run 当前状态，需要继续工作则按当前 owner run 重新 resume 或 fresh 派发。"), { code: "RESUME_BINDING_BLOCKED" });
         }
         return Object.freeze({ intent, expectedAgent, expectedSessionId: broker.lifecycleSessionId });
       },
       async register(binding: any) {
-        if (!brokerReady || !broker) throw Object.assign(new Error("Root Broker is unavailable for managed resume"), { code: "RESUME_BINDING_BLOCKED" });
+        if (!brokerReady || !broker) throw Object.assign(new Error("Root Broker is unavailable for managed resume: 新 run 无法登记授权，续跑链路不可达；next: 等 broker 就绪后重试一次，仍不可用按阻断上报，不要绕过 broker 直接拉起 child。"), { code: "RESUME_BINDING_BLOCKED" });
         const authorization = createRunAuthorization({ kind: "coding", binding, goal: null });
         await registerRootBrokerAuthorizedRun(pi, authorization, broker.rootSessionId);
       },
       async activate({ plan, resumedRun }: any) {
-        if (!brokerReady || !broker) throw Object.assign(new Error("managed resume coordinator is unavailable"), { code: "RESUME_BINDING_BLOCKED" });
+        if (!brokerReady || !broker) throw Object.assign(new Error("managed resume coordinator is unavailable: 无法激活 resume intent（workspace 仍停在 disposing/preserved）；next: 确认 coordinator daemon 在跑（workspace status 的 blocked 原因会显示集成协调不可用）后就绪重试一次；仍不可用按阻断上报并保留 workspace 现场。"), { code: "RESUME_BINDING_BLOCKED" });
         const intent = plan.intent;
         const { context: coordinatorRuntime } = await selectReceipt(intent.sourceRunId, intent.workspaceId);
         return (await coordinatorRuntime.requireClient()).activateResume({
