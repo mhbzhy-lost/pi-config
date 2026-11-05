@@ -53,3 +53,4 @@ __pycache__/
 /skill-overrides/deepseek-search/.env
 /pi/models.json
 /pi/settings.json
+.opencode/
