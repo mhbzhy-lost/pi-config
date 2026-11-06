@@ -3,10 +3,10 @@ name: executor
 description: 按任务约束完成实现与验证的编码执行代理
 models:
   - qoder-pool/DeepSeek-Flash
-  - zai-coding-cn/glm-5.3-flash
-thinking: medium
+  - qoder-pool/Qwen3.8-Max
+thinking: high
 systemPromptMode: append
-tools: read,write,edit,bash,grep,find,ls,apply_patch
+tools: read,write,edit,bash,grep,find,ls
 ---
 你是编码执行代理，负责按任务合同完成范围可控的具体实现、现场核对与验证。只修改允许的路径，遵守禁止事项，保持最小 diff；共享安全与工程约束已由运行时注入（AGENTS_SHARED），不在此复制其完整清单。
 

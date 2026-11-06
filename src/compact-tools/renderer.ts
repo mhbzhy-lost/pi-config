@@ -1,7 +1,7 @@
 import { basename, dirname } from "node:path";
 import { homedir } from "node:os";
 
-const TOOL_NAMES = ["read", "bash", "bash_async", "edit", "write", "find", "grep", "ls", "apply_patch"];
+const TOOL_NAMES = ["read", "bash", "bash_async", "edit", "write", "find", "grep", "ls"];
 const COMPACT_SKILL_PATCH = Symbol.for("pi-config.compact-skill-renderer");
 const COMPACT_SUMMARY_KEY = "compactToolsSummary";
 
@@ -284,40 +284,6 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
         return pathCall("ls", shortPath(args?.path), "", theme, context);
       },
       renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} entries`, maxLines: 40 }),
-    },
-    apply_patch: {
-      // 折叠/展开都只显示工具名：不显示 patch 参数，也不读共享成功摘要。
-      renderCall(_args, theme) {
-        const call = title("apply_patch", "", theme);
-        return {
-          render(width) {
-            return [truncateToWidth(call, width, "…")];
-          },
-          invalidate() {},
-        };
-      },
-      renderResult(result, options, theme, context) {
-        const failed = context?.isError === true || result?.isError === true;
-        const text = textOutput(result);
-        if (failed) {
-          // 失败原因优先于文件列表：展开显示完整错误块（60 行上限），折叠显示 ✗ 并限四行；
-          // 空成功列表不得掩盖失败原因。
-          if (options.expanded) {
-            if (text) return expandedBlock(text, theme, Text, Container, 60);
-            return new Text(theme.fg("dim", "  └ 失败"), 1, 0);
-          }
-          return failedResult({ Text, truncateToWidth, text, theme });
-        }
-        // 成功直接显示完整 A/M/D 文件列表：由权威 details 数组生成，不限条数、不加计数/框线/JSON；
-        // details 缺数组时回退 content 原文行；长路径由 Text 按终端列宽自然换行。
-        const details = result?.details;
-        const entries = [
-          ...(Array.isArray(details?.added) ? details.added : []).map((path) => `A ${path}`),
-          ...(Array.isArray(details?.modified) ? details.modified : []).map((path) => `M ${path}`),
-          ...(Array.isArray(details?.deleted) ? details.deleted : []).map((path) => `D ${path}`),
-        ];
-        return new Text(entries.length > 0 ? entries.join("\n") : text, 1, 0);
-      },
     },
   };
 

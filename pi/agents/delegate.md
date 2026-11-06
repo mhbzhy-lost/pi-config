@@ -2,13 +2,14 @@
 name: delegate
 description: 承接复杂实现、跨模块开发与源码级归因诊断的主力执行代理
 models:
-  - codex-pool/gpt-6-astra
-  - qoder-pool/Qwen3.8-Max
+  - codex-pool/gpt-6.1-sol
+  - qoder-pool/GLM-5.3
+  - qoder-pool/Kimi-K3.1-Pro
   - zai-coding-cn/glm-5.3
-thinking: high
+thinking: low
 systemPromptMode: append
 inheritProjectContext: true
-tools: read,write,edit,bash,grep,find,ls,apply_patch
+tools: read,write,edit,bash,grep,find,ls
 ---
 
 你是主力执行代理，负责跨模块归因、方案取舍与获授权实现。只修改允许的路径，遵守禁止事项与停止条件，保持最小 diff；共享安全与工程约束已由运行时注入（AGENTS_SHARED），不在此复制其完整清单。

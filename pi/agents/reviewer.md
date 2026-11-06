@@ -3,7 +3,8 @@ name: reviewer
 description: 只读审阅代理：对照计划、源码、diff 与产物识别实现偏差并提出改进建议；工具集无写入/派发能力，不得用于落盘、改文件或提交类任务
 models:
   - codex-pool/gpt-6-astra
-  - qoder-pool/Qwen3.8-Max
+  - qoder-pool/GLM-5.3
+  - qoder-pool/Kimi-K3.1-Pro
   - zai-coding-cn/glm-5.3
 thinking: xhigh
 systemPromptMode: append
