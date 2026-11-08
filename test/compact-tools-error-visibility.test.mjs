@@ -12,8 +12,8 @@ const api = { registerToolRenderer(resolver) { resolvers.push(resolver); }, on()
 // 仅绑定显示 resolver，不初始化 bash 执行 owner、设置存储或 Host session。
 compactFactory(api);
 const shared = createCompactToolRenderers(tui);
-// apply_patch/bash_async 不在 sampleArgs（全局循环以七工具一行摘要为前提），单独绑定同一 resolver。
-const host = Object.fromEntries([...Object.keys(sampleArgs), "apply_patch", "bash_async"].map((name) => [name, resolvers[0](name, () => undefined)]));
+// bash_async 不在 sampleArgs（全局循环以七工具一行摘要为前提），单独绑定同一 resolver。
+const host = Object.fromEntries([...Object.keys(sampleArgs), "bash_async"].map((name) => [name, resolvers[0](name, () => undefined)]));
 const theme = { bold: (text) => text, fg: (_color, text) => text };
 const plain = (lines) => stripVTControlCharacters(lines.join("\n"));
 const errorMessage = "Upstream response stream was interrupted";
@@ -179,40 +179,6 @@ for (const [source, renderers] of Object.entries({ shared, host })) {
   });
 }
 
-test("真实Host apply_patch: 折叠展开均工具名+完整A/M/D列表，长路径按列宽换行且raw不变", () => {
-  const args = { patch: "*** Begin Patch\n*** Add File: docs/长路径.md\n+内容\n*** End Patch" };
-  const longPath = `docs/very-long-${"路径".repeat(40)}.md`;
-  const success = {
-    content: [{ type: "text", text: `A ${longPath}\nM test/b.ts\nD old/c.txt` }],
-    details: { added: [longPath], modified: ["test/b.ts"], deleted: ["old/c.txt"] },
-    structuredContent: { added: [longPath], modified: ["test/b.ts"], deleted: ["old/c.txt"] },
-    isError: false,
-  };
-  const before = structuredClone({ success, args });
-  const references = [success.content, success.details, success.structuredContent, success.content[0]];
-  const card = new sdk.ToolExecutionComponent("apply_patch", "fixture-apply", args,
-    { showImages: false }, host.apply_patch, { requestRender() {} }, "/tmp");
-  card.updateResult(success);
-  for (const expanded of [false, true, false]) {
-    card.setExpanded(expanded);
-    card.invalidate();
-    const lines = card.render(60);
-    const visible = plain(lines);
-    assert.ok(lines.every((line) => tui.visibleWidth(line) <= 60), JSON.stringify(lines));
-    assert.match(visible, /apply_patch/);
-    assert.match(visible, /M test\/b\.ts/);
-    assert.match(visible, /D old\/c\.txt/);
-    assert.doesNotMatch(visible, /Begin Patch|内容|done/);
-    // 长路径换行后逐行拼接仍完整可见，列表条数不被截断。
-    const joined = lines.map((line) => plain([line]).trim()).join("");
-    assert.ok(joined.includes(longPath), JSON.stringify(lines));
-    assert.ok(lines.filter((line) => line.trim()).length >= 5, JSON.stringify(lines));
-  }
-  assert.deepEqual({ success, args }, before);
-  [success.content, success.details, success.structuredContent, success.content[0]]
-    .forEach((value, index) => assert.equal(value, references[index]));
-});
-
 test("真实Host bash_async: launch折叠已接受待完成+展开完整身份，raw与引用不变", () => {
   const args = { command: "sleep 5", cwd: "/tmp", timeout: 15 };
   const receipt = {
@@ -304,37 +270,3 @@ test("真实Host bash_async: partial不提前已接受，unknown格式中性显�
   assert.deepEqual({ args, partialLaunch, unknown }, before);
 });
 
-test("真实Host apply_patch: 失败原因可见、展开保留完整错误，切回成功不残留错误", () => {
-  const args = { patch: "*** Begin Patch\n*** Delete File: missing.txt\n*** End Patch" };
-  const card = new sdk.ToolExecutionComponent("apply_patch", "fixture-apply-error", args,
-    { showImages: false }, host.apply_patch, { requestRender() {} }, "/tmp");
-  const failure = { content: [{ type: "text", text: "Error: patch 不匹配：missing.txt 不存在" }], details: undefined, isError: true };
-  const success = {
-    content: [{ type: "text", text: "D other.txt" }],
-    details: { added: [], modified: [], deleted: ["other.txt"] },
-    structuredContent: { added: [], modified: [], deleted: ["other.txt"] },
-    isError: false,
-  };
-  const before = structuredClone({ failure, success, args });
-  const references = [failure.content, success.content, success.details, success.structuredContent];
-  card.updateResult(failure);
-  for (const expanded of [false, true, false]) {
-    card.setExpanded(expanded);
-    card.invalidate();
-    const lines = card.render(60);
-    const visible = plain(lines);
-    assert.ok(lines.every((line) => tui.visibleWidth(line) <= 60));
-    assert.match(visible, /apply_patch/);
-    assert.match(visible, /patch 不匹配/);
-    if (expanded) assert.match(visible, /missing\.txt 不存在/);
-    else assert.match(visible, /✗/);
-    assert.doesNotMatch(visible, /Begin Patch/);
-  }
-  card.updateResult(success);
-  card.invalidate();
-  const visible = plain(card.render(60));
-  assert.match(visible, /D other\.txt/);
-  assert.doesNotMatch(visible, /✗|patch 不匹配/);
-  assert.deepEqual({ failure, success, args }, before);
-  references.forEach((value, index) => assert.equal(value, [failure.content, success.content, success.details, success.structuredContent][index]));
-});

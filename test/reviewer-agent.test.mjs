@@ -23,7 +23,9 @@ test("agent profiles keep runtime configuration in frontmatter and cannot grant 
   // 且已移出版本控制，模型 id 会随本机可用模型变更（已发生过：GLM-5.3-0.6x → GLM-5.3、
   // 摘除 gpt-6-luna），钉死会造成每次调模型都必须同步改测试。
   // 此处只校验**结构不变量**：models 为非空、形如 provider/model、无重复的候选链。
-  const assertModelChain = (text, label, thinking) => {
+  // thinking 同样按角色/机器调优（当前实况 executor=high、delegate=low、reviewer=xhigh），
+  // 不逐字锁定：只校验 frontmatter 恰好声明一个合法级别枚举。
+  const assertModelChain = (text, label) => {
     const block = text.match(/^models:\n((?:  - \S+\n)+)/m);
     assert.ok(block, `${label} frontmatter 必须声明 models 候选链`);
     const ids = block[1].split("\n").filter(Boolean).map((line) => line.replace(/^  - /, ""));
@@ -32,11 +34,11 @@ test("agent profiles keep runtime configuration in frontmatter and cannot grant 
       assert.match(id, /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/, `${label} 模型 id 必须为 provider/model 形式，实际 ${id}`);
     }
     assert.equal(new Set(ids).size, ids.length, `${label} models 候选链不得含重复项`);
-    assert.match(text, new RegExp(`^thinking: ${thinking}$`, "m"), `${label} thinking 级别必须为 ${thinking}`);
+    assert.match(text, /^thinking: (minimal|low|medium|high|xhigh|max)\n/m, `${label} thinking 必须为合法级别枚举`);
   };
-  assertModelChain(reviewer, "reviewer", "xhigh");
-  assertModelChain(executor, "executor", "medium");
-  assertModelChain(delegate, "delegate", "high");
+  assertModelChain(reviewer, "reviewer");
+  assertModelChain(executor, "executor");
+  assertModelChain(delegate, "delegate");
   const subagentConfig = JSON.parse(await readFile(new URL("../pi/extensions/subagent/config.json", import.meta.url), "utf8"));
   // 用户裁决（2026-10-19）：移除 provider 硬编码黑名单。该 key 既不被上游消费，也不被本仓 runtime 读取，
   // 保留会造成“仍有黑名单”的误导；模型可用性权威是 registry/profile 候选链与 runtime 校验。
@@ -53,8 +55,8 @@ test("agent profiles keep runtime configuration in frontmatter and cannot grant 
     // profile 不声明它是正确做法，不得以断言把它钉回白名单。
     assert.doesNotMatch(text, /^tools:.*contact_supervisor/m, `${label} 不得在 profile tools 声明 contact_supervisor`);
   }
-  assert.match(executor, /^tools: read,write,edit,bash,grep,find,ls,apply_patch$/m, "executor tools 面必须保持只含实现/验证工具");
-  assert.match(delegate, /^tools: read,write,edit,bash,grep,find,ls,apply_patch$/m, "delegate tools 面必须保持只含实现/验证工具");
+  assert.match(executor, /^tools: read,write,edit,bash,grep,find,ls$/m, "executor tools 面必须保持只含实现/验证工具");
+  assert.match(delegate, /^tools: read,write,edit,bash,grep,find,ls$/m, "delegate tools 面必须保持只含实现/验证工具");
   assert.match(reviewer, /^tools: read,grep,find,ls,bash$/m, "reviewer 保持只读工具面，不得获得写权限");
   // reviewer 的只读属性必须对派发方可见：description 是 roster/派发决策入口，必须明写无写入能力。
   assert.match(reviewer, /^description: .*只读.*$/m, "reviewer description 必须强调只读属性");

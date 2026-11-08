@@ -67,41 +67,6 @@ test("compact resolver拥有七工具显示并保留next其余字段及未知fal
   }
 });
 
-test("compact resolver绑定apply_patch显示，不进入折叠且不注册/激活/执行", () => {
-  const { resolvers, registered, activated } = registerCompactTools(compactTools);
-  const [resolve] = resolvers;
-  const mine = resolve("apply_patch", () => undefined);
-  assert.equal(mine.renderShell, "self");
-  assert.equal(typeof mine.renderCall, "function");
-  assert.equal(typeof mine.renderResult, "function");
-  // 调用只显示工具名，不显示 patch 参数。
-  const theme = { bold: (text) => text, fg: (_color, text) => text };
-  const context = { isError: false, state: {}, expanded: false, args: { patch: "*** Begin Patch\n*** Add File: docs/a.md\n*** End Patch" } };
-  assert.deepEqual(mine.renderCall(context.args, theme, context).render(100), ["∗ apply_patch"]);
-  // 显示字段覆盖，next 其余 metadata（含 execute）原样保留；未知名称仍 fallback。
-  const sentinel = {};
-  const nativeExecute = async () => ({ content: [] });
-  const base = { renderShell: "default", renderCall() {}, renderResult() {}, execute: nativeExecute, sentinel };
-  const merged = resolve("apply_patch", () => base);
-  assert.equal(merged.renderCall, mine.renderCall);
-  assert.equal(merged.renderResult, mine.renderResult);
-  assert.equal(merged.execute, nativeExecute);
-  assert.equal(merged.sentinel, sentinel);
-  assert.equal(base.renderShell, "default");
-  assert.deepEqual(resolve("unknown", () => undefined), undefined);
-  assert.deepEqual(registered, []);
-  assert.deepEqual(activated, []);
-  // 不进入单行折叠：折叠成功状态显示 A/M/D 列表而非空组件/一行摘要。
-  const output = mine.renderResult(
-    { content: [{ type: "text", text: "A docs/a.md" }], details: { added: ["docs/a.md"], modified: [], deleted: [] } },
-    { expanded: false, isPartial: false },
-    theme,
-    context,
-  );
-  const visible = output.render(100).map((line) => line.trim()).filter((line) => line);
-  assert.deepEqual(visible, ["A docs/a.md"]);
-});
-
 test("compact resolver绑定bash_async显示，launch摘要已接受待完成且不注册/激活/执行", () => {
   const { resolvers, registered, activated } = registerCompactTools(compactTools);
   const [resolve] = resolvers;
