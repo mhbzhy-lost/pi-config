@@ -104,7 +104,7 @@ function setup() {
 test("shared compact tool renderers use the self shell", () => {
   const renderers = setup();
 
-  for (const name of ["read", "bash", "bash_async", "edit", "write", "find", "grep", "ls", "apply_patch"]) {
+  for (const name of ["read", "bash", "bash_async", "edit", "write", "find", "grep", "ls"]) {
     assert.equal(renderers[name].renderShell, "self");
   }
 });
@@ -123,7 +123,7 @@ const theme = {
 
 const result = { content: [{ type: "text", text: "first line\nsecond line" }] };
 
-for (const name of ["read", "bash", "bash_async", "edit", "write", "find", "grep", "ls", "apply_patch"]) {
+for (const name of ["read", "bash", "bash_async", "edit", "write", "find", "grep", "ls"]) {
   test(`${name} renders its tool name with the native bold tool-title style`, () => {
     styles.length = 0;
     const renderers = setup();
@@ -362,90 +362,6 @@ test("bash_async partial与未知格式中性显示，不提前接受、不猜�
   const empty = { content: [], details: undefined };
   const emptyOutput = renderers.bash_async.renderResult(empty, { expanded: false, isPartial: false }, plainTheme, ctx);
   assert.match(emptyOutput.render(120).join("\n"), /未识别的回执格式/);
-});
-
-// apply_patch 不加入 sampleArgs：sampleArgs 的全局循环以七工具一行摘要为前提，期望单独维护。
-test("apply_patch 调用折叠/展开都只显示工具名，不显示 patch 参数", () => {
-  const renderers = setup();
-  const plainTheme = { bold: (text) => text, fg: (_color, text) => text };
-  const args = { patch: "*** Begin Patch\n*** Add File: docs/secret.md\n+机密内容\n*** End Patch" };
-  for (const expanded of [false, true]) {
-    const lines = renderers.apply_patch.renderCall(args, plainTheme, { expanded, state: {} }).render(120);
-    assert.deepEqual(lines, ["∗ apply_patch"]);
-    assert.doesNotMatch(lines.join("\n"), /Begin Patch|Add File|secret|机密/);
-  }
-});
-
-test("apply_patch 成功结果折叠/展开都显示完整 A/M/D 列表且不改写原始结果", () => {
-  const renderers = setup();
-  const plainTheme = { bold: (text) => text, fg: (_color, text) => text };
-  const details = { added: ["docs/a.md"], modified: ["test/b.ts", "src/c.ts"], deleted: ["old/d.txt"] };
-  const result = {
-    content: [{ type: "text", text: "A docs/a.md\nM test/b.ts\nM src/c.ts\nD old/d.txt" }],
-    details,
-    structuredContent: details,
-  };
-  const before = structuredClone(result);
-  for (const expanded of [false, true]) {
-    const lines = renderers.apply_patch
-      .renderResult(result, { expanded, isPartial: false }, plainTheme, { isError: false, state: {}, args: { patch: "*** Begin Patch" } })
-      .render(120);
-    assert.deepEqual(lines, ["A docs/a.md", "M test/b.ts", "M src/c.ts", "D old/d.txt"]);
-    assert.doesNotMatch(lines.join("\n"), /done|完成|Begin Patch|files? changed|entries|summary|详情/);
-  }
-  assert.deepEqual(result, before);
-});
-
-test("apply_patch details 缺数组时回退 content 原文，错误优先于成功列表", () => {
-  const renderers = setup();
-  const plainTheme = { bold: (text) => text, fg: (_color, text) => text };
-  const noDetails = { content: [{ type: "text", text: "A docs/a.md" }], details: undefined };
-  const fallback = renderers.apply_patch
-    .renderResult(noDetails, { expanded: false }, plainTheme, { isError: false, state: {} })
-    .render(120);
-  assert.deepEqual(fallback, ["A docs/a.md"]);
-
-  const failure = {
-    content: [{ type: "text", text: "Error: patch 不匹配" }],
-    details: { added: ["x.md"], modified: [], deleted: [] },
-    isError: true,
-  };
-  const failed = renderers.apply_patch
-    .renderResult(failure, { expanded: false }, plainTheme, { isError: true, state: {} })
-    .render(120);
-  assert.match(failed.join("\n"), /✗ Error: patch 不匹配/);
-  assert.doesNotMatch(failed.join("\n"), /x\.md/);
-
-  const blankFailure = { content: [{ type: "text", text: "   " }], details: undefined, isError: true };
-  const blank = renderers.apply_patch
-    .renderResult(blankFailure, { expanded: false }, plainTheme, { isError: true, state: {} })
-    .render(120);
-  assert.match(blank.join("\n"), /✗ 工具执行失败/);
-
-  const emptySuccess = { content: [{ type: "text", text: "" }], details: { added: [], modified: [], deleted: [] } };
-  const emptyLines = renderers.apply_patch
-    .renderResult(emptySuccess, { expanded: false }, plainTheme, { isError: false, state: {} })
-    .render(120);
-  assert.deepEqual(emptyLines, [""]);
-});
-
-test("apply_patch 渲染冻结的原始 args/result 后内容保持不变", () => {
-  const renderers = setup();
-  const plainTheme = { bold: (text) => text, fg: (_color, text) => text };
-  const args = Object.freeze({ patch: "*** Begin Patch\n*** Update File: a.ts\n*** End Patch" });
-  const result = Object.freeze({
-    content: Object.freeze([{ type: "text", text: "M a.ts" }]),
-    details: Object.freeze({ added: Object.freeze([]), modified: Object.freeze(["a.ts"]), deleted: Object.freeze([]) }),
-    structuredContent: Object.freeze({ added: Object.freeze([]), modified: Object.freeze(["a.ts"]), deleted: Object.freeze([]) }),
-  });
-  const before = structuredClone({ args, result });
-  for (const expanded of [false, true]) {
-    renderers.apply_patch.renderCall(args, plainTheme, { expanded, state: {} }).render(120);
-    renderers.apply_patch
-      .renderResult(result, { expanded, isPartial: false }, plainTheme, { args, isError: false, state: {} })
-      .render(120);
-  }
-  assert.deepEqual({ args, result }, before);
 });
 
 // ---- edit 展开委托原生 details.diff 渲染（resolver next() DI 契约）----
