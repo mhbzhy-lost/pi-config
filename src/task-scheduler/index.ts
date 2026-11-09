@@ -23,10 +23,3 @@ export { default } from "./adapter.ts";
 // F4b：scheduler 只读 ActivitySource 与同 Host TUI publisher。根 feature（含 Host 入口）
 // 只经本公开入口消费，不深引 adapter 内部；publisher 握手协议来自 package 公开出口，
 // 世代 token 仍只在 adapter 闭包内部，不出现在本入口。
-export {
-  createSchedulerActivitySource,
-  createSchedulerActivityPublisher,
-  type SchedulerActivityBus,
-  type SchedulerActivitySession,
-  type SchedulerActivityPublisher,
-} from "./activity-source.ts";
