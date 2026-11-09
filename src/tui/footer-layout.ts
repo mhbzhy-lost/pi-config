@@ -30,10 +30,13 @@ function rowText(snapshot: ActivitySnapshot): string {
     return snapshot.availability === "available" ? "后台任务：无" : "后台任务：状态读取中";
   }
   const active = snapshot.rows.filter((row) => row.placement === "main");
-  const recent = snapshot.rows.filter((row) => row.placement === "recent");
-  const rows = [...active, ...recent].slice(0, 3);
-  const text = rows.map((row) => `${row.key === snapshot.selectedKey ? "›" : " "} ${row.label} · ${row.stateLabel}`).join("  ");
-  return snapshot.rows.length > rows.length ? `${text} | +${snapshot.rows.length - rows.length}` : text;
+  const recentCount = snapshot.rows.filter((row) => row.placement === "recent").length;
+  const activeText = active.slice(0, 3)
+    .map((row) => `${row.key === snapshot.selectedKey ? ">" : " "} ${row.label} · ${row.stateLabel}`)
+    .join("  ");
+  const historyText = recentCount > 0 ? `◯ history ${recentCount}` : "";
+  if (activeText && historyText) return `${activeText}  ${historyText}`;
+  return activeText || historyText || "后台任务：无";
 }
 
 export type FooterComponentOptions = {
@@ -69,7 +72,6 @@ export function createFooterComponent(options: FooterComponentOptions): Componen
       const lines = [
         layoutLine({ width, left, right, visibleWidth: options.visibleWidth, truncateToWidth: options.truncateToWidth }),
         fit(rowText(options.getSnapshot()), width, options.truncateToWidth),
-        fit(`thinking: ${thinking}`, width, options.truncateToWidth),
       ];
       return lines.map((line) => options.theme.fg("dim", line));
     },
