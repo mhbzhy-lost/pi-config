@@ -1,12 +1,13 @@
 import type { BashAsyncController, BashAsyncLaunchReceipt, BashAsyncTerminalReceipt } from "../bash-async/contracts.ts";
 import type { SchedulerActivityObserver } from "../task-scheduler/index.ts";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { ActivityRow, ActivitySnapshot, ActivitySource, DetailComponent, DetailRequest } from "./background-activity.ts";
 
 function textDetail(lines: () => string[], request: DetailRequest): DetailComponent {
   return {
     render(width) {
       const safeWidth = Math.max(0, width);
-      return lines().map((line) => line.length > safeWidth ? line.slice(0, safeWidth) : line);
+      return lines().map((line) => truncateToWidth(line, safeWidth, "…"));
     },
     invalidate() { request.requestRender(); },
   };
@@ -75,7 +76,9 @@ export function createSchedulerActivitySource(observer: SchedulerActivityObserve
     },
     subscribe(listener) { return observer.subscribe(listener); },
     async detail(key, request) {
-      const id = key.startsWith("scheduler:") ? key.slice("scheduler:".length) : "";
+      if (!key.startsWith("scheduler:")) return undefined;
+      const id = key.slice("scheduler:".length);
+      if (!id) return undefined;
       const result = await observer.detail(id);
       if (!result.ok) return undefined;
       return textDetail(() => result.result.content

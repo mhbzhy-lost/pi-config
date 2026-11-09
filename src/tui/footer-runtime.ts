@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createActivityRegistry, activitySources, subscribeActivitySources } from "./background-activity.ts";
+import { createActivityRegistry, activitySources, subscribeActivitySources, subscribeRemoteActivitySources } from "./background-activity.ts";
 import { createFooterComponent } from "./footer-layout.ts";
 import { createSubagentActivitySource } from "./subagent-activity.ts";
 import { createSubagentBrowser } from "./session-browser.ts";
@@ -11,13 +11,22 @@ export function createFooterRuntime(pi: ExtensionAPI): { openBrowser(ctx: { sess
   let registry: ReturnType<typeof createActivityRegistry> | undefined;
   let source: ReturnType<typeof createSubagentActivitySource> | undefined;
   let sourceUnsubscribe: (() => void) | undefined;
+  let remoteSourceUnsubscribe: (() => void) | undefined;
   let activityUnsubscribe: (() => void) | undefined;
+  let closeOverlay: (() => void) | undefined;
+  let restoreEditor: (() => void) | undefined;
   let requestFooterRender = () => undefined;
 
   const teardown = () => {
+    try { closeOverlay?.(); } catch { /* stale UI context */ }
+    closeOverlay = undefined;
+    try { restoreEditor?.(); } catch { /* stale UI context */ }
+    restoreEditor = undefined;
     sourceUnsubscribe?.();
+    remoteSourceUnsubscribe?.();
     activityUnsubscribe?.();
     sourceUnsubscribe = undefined;
+    remoteSourceUnsubscribe = undefined;
     activityUnsubscribe = undefined;
     registry?.dispose();
     registry = undefined;
@@ -26,19 +35,13 @@ export function createFooterRuntime(pi: ExtensionAPI): { openBrowser(ctx: { sess
     requestFooterRender = () => undefined;
   };
 
-  const refreshSources = () => {
-    if (!registry || !source) return;
-    registry.setSources([...activitySources(pi), source]);
-  };
-
   const openBrowser = (shortcutCtx: { sessionManager?: unknown }) => {
     if (!registry || !current || shortcutCtx?.sessionManager !== current.sessionManager) return;
     const owner = current;
     const previousEditor = owner.ui.getEditorComponent?.();
     const previousDraft = owner.ui.getEditorText?.();
-    let closeOverlay: (() => void) | undefined;
     let restored = false;
-    const restoreEditor = () => {
+    restoreEditor = () => {
       if (restored) return;
       restored = true;
       try { owner.ui.setEditorComponent?.(previousEditor); } catch { /* stale UI context */ }
@@ -47,7 +50,11 @@ export function createFooterRuntime(pi: ExtensionAPI): { openBrowser(ctx: { sess
     owner.ui.setEditorComponent?.((tui, theme, keybindings) => new ReadOnlyBrowserEditor(tui, theme, keybindings));
     void owner.ui.custom((tui, theme, _keybindings, done) => {
       closeOverlay = () => {
-        try { done(); } finally { restoreEditor(); }
+        try { done(undefined); } finally {
+          closeOverlay = undefined;
+          restoreEditor?.();
+          restoreEditor = undefined;
+        }
       };
       return createSubagentBrowser({
         model: registry!,
@@ -60,7 +67,11 @@ export function createFooterRuntime(pi: ExtensionAPI): { openBrowser(ctx: { sess
       overlay: true,
       overlayOptions: { row: 0, col: 0, width: "100%", maxHeight: "100%", margin: { bottom: 4 } },
       onHandle: (handle) => handle.focus(),
-    }).catch(() => restoreEditor());
+    }).catch(() => {
+      closeOverlay = undefined;
+      restoreEditor?.();
+      restoreEditor = undefined;
+    });
   };
 
   pi.on("session_start", (_event, ctx) => {
@@ -69,7 +80,27 @@ export function createFooterRuntime(pi: ExtensionAPI): { openBrowser(ctx: { sess
     current = ctx;
     source = createSubagentActivitySource(pi);
     registry = createActivityRegistry([...activitySources(pi), source]);
-    sourceUnsubscribe = subscribeActivitySources(pi, refreshSources);
+    const remoteSources = new Map<string, { registrationId: string; source: import("./background-activity.ts").ActivitySource }>();
+    const refreshAllSources = () => {
+      if (!registry || !source) return;
+      registry.setSources([
+        ...activitySources(pi),
+        ...[...remoteSources.values()].map((entry) => entry.source),
+        source,
+      ]);
+    };
+    sourceUnsubscribe = subscribeActivitySources(pi, refreshAllSources);
+    remoteSourceUnsubscribe = subscribeRemoteActivitySources(pi, (registration) => {
+      const existing = remoteSources.get(registration.id);
+      if (existing?.registrationId === registration.registrationId && existing.source === registration.source) return;
+      remoteSources.set(registration.id, { registrationId: registration.registrationId, source: registration.source });
+      refreshAllSources();
+    }, (registration) => {
+      const existing = remoteSources.get(registration.id);
+      if (!existing || existing.registrationId !== registration.registrationId) return;
+      remoteSources.delete(registration.id);
+      refreshAllSources();
+    });
 
     const footerFactory = (tui: { requestRender(): void }, theme: any, _footerData: unknown) => createFooterComponent({
       getCwd: () => ctx.cwd,
@@ -90,7 +121,7 @@ export function createFooterRuntime(pi: ExtensionAPI): { openBrowser(ctx: { sess
       try { footerRequestRender?.(); } catch { /* stale TUI context */ }
     };
     const mountedFooterFactory = (tui: { requestRender(): void }, theme: any, footerData: unknown) => {
-      footerRequestRender = tui.requestRender;
+      footerRequestRender = () => tui.requestRender();
       return footerFactory(tui, theme, footerData);
     };
     activityUnsubscribe = registry.subscribe(() => requestFooterRender());

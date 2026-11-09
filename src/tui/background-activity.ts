@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export type ActivityKind = "subagent" | "bash_async" | "scheduler";
@@ -46,6 +47,15 @@ type ActivityHostState = {
 };
 
 const HOST_REGISTRY = Symbol.for("pi-config.tui-activity-host.v1");
+const SOURCE_REQUEST = "pi-config:tui:activity-source-request";
+const SOURCE_REGISTER = "pi-config:tui:activity-source-register";
+const SOURCE_UNREGISTER = "pi-config:tui:activity-source-unregister";
+
+export type ActivitySourceRegistration = Readonly<{
+  id: string;
+  registrationId: string;
+  source: ActivitySource;
+}>;
 
 function hostRegistry(): Map<unknown, ActivityHostState> {
   const root = globalThis as typeof globalThis & { [HOST_REGISTRY]?: Map<unknown, ActivityHostState> };
@@ -71,10 +81,34 @@ function notify(host: ActivityHostState): void {
 export function registerActivitySource(pi: ExtensionAPI, id: string, source: ActivitySource): () => void {
   const host = activityHost(pi);
   host.sources.set(id, source);
+  const events = pi.events as unknown as {
+    on?: (channel: string, handler: (data: unknown) => void) => (() => void);
+    emit?: (channel: string, data: unknown) => void;
+  } | undefined;
+  if (typeof events?.on !== "function" || typeof events.emit !== "function") {
+    notify(host);
+    return () => {
+      if (host.sources.get(id) !== source) return;
+      host.sources.delete(id);
+      notify(host);
+    };
+  }
+  const registrationId = randomUUID();
+  const registration: ActivitySourceRegistration = { id, registrationId, source };
+  let disposed = false;
+  const unsubscribeRequest = events.on(SOURCE_REQUEST, () => {
+    if (disposed) return;
+    try { events.emit?.(SOURCE_REGISTER, registration); } catch { /* display discovery is best effort */ }
+  });
+  try { events.emit(SOURCE_REGISTER, registration); } catch { /* owner may not exist yet */ }
   notify(host);
   return () => {
+    if (disposed) return;
+    disposed = true;
+    try { unsubscribeRequest(); } catch { /* stale extension context */ }
     if (host.sources.get(id) !== source) return;
     host.sources.delete(id);
+    try { events.emit?.(SOURCE_UNREGISTER, { id, registrationId }); } catch { /* display teardown is best effort */ }
     notify(host);
   };
 }
@@ -89,6 +123,45 @@ export function subscribeActivitySources(pi: ExtensionAPI, listener: () => void)
   return () => host.listeners.delete(listener);
 }
 
+export function subscribeRemoteActivitySources(
+  pi: ExtensionAPI,
+  onRegister: (registration: ActivitySourceRegistration) => void,
+  onUnregister: (registration: Pick<ActivitySourceRegistration, "id" | "registrationId">) => void,
+): () => void {
+  const events = pi.events as unknown as {
+    on?: (channel: string, handler: (data: unknown) => void) => (() => void);
+    emit?: (channel: string, data: unknown) => void;
+  } | undefined;
+  if (typeof events?.on !== "function" || typeof events.emit !== "function") return () => undefined;
+  const isRegistration = (value: unknown): value is ActivitySourceRegistration => {
+    if (!value || typeof value !== "object") return false;
+    const candidate = value as Partial<ActivitySourceRegistration>;
+    return typeof candidate.id === "string" && candidate.id.length > 0
+      && typeof candidate.registrationId === "string" && candidate.registrationId.length > 0
+      && typeof candidate.source?.snapshot === "function"
+      && typeof candidate.source?.subscribe === "function"
+      && typeof candidate.source?.detail === "function";
+  };
+  const onRegisterEvent = (value: unknown) => {
+    if (isRegistration(value)) onRegister(value);
+  };
+  const onUnregisterEvent = (value: unknown) => {
+    if (!value || typeof value !== "object") return;
+    const candidate = value as Partial<ActivitySourceRegistration>;
+    if (typeof candidate.id === "string" && candidate.id.length > 0
+      && typeof candidate.registrationId === "string" && candidate.registrationId.length > 0) {
+      onUnregister({ id: candidate.id, registrationId: candidate.registrationId });
+    }
+  };
+  const unsubscribeRegister = events.on(SOURCE_REGISTER, onRegisterEvent);
+  const unsubscribeUnregister = events.on(SOURCE_UNREGISTER, onUnregisterEvent);
+  try { events.emit(SOURCE_REQUEST, { requestId: randomUUID() }); } catch { /* discovery is best effort */ }
+  return () => {
+    try { unsubscribeRegister(); } catch { /* stale extension context */ }
+    try { unsubscribeUnregister(); } catch { /* stale extension context */ }
+  };
+}
+
 export function createActivityRegistry(sources: readonly ActivitySource[] = []): {
   setSources(next: readonly ActivitySource[]): void;
   snapshot(): ActivitySnapshot;
@@ -98,6 +171,7 @@ export function createActivityRegistry(sources: readonly ActivitySource[] = []):
   dispose(): void;
 } {
   let current = [...sources];
+  let selectedKey: string | undefined;
   const listeners = new Set<() => void>();
   const unsubscribers = new Map<ActivitySource, () => void>();
 
@@ -137,9 +211,11 @@ export function createActivityRegistry(sources: readonly ActivitySource[] = []):
           ? "unavailable"
           : stale || unavailable.length > 0 ? "stale" : "available",
         rows: snapshots.flatMap((snapshot) => snapshot.rows),
-        ...(snapshots.find((snapshot) => snapshot.selectedKey !== undefined)?.selectedKey
-          ? { selectedKey: snapshots.find((snapshot) => snapshot.selectedKey !== undefined)?.selectedKey }
-          : {}),
+        ...((selectedKey && snapshots.some((snapshot) => snapshot.rows.some((row) => row.key === selectedKey)))
+          ? { selectedKey }
+          : (snapshots.find((snapshot) => snapshot.selectedKey !== undefined)?.selectedKey
+            ? { selectedKey: snapshots.find((snapshot) => snapshot.selectedKey !== undefined)?.selectedKey }
+            : {})),
         ...(stale?.observedAt ? { observedAt: stale.observedAt } : {}),
         ...(unavailable[0]?.errorLabel ? { errorLabel: unavailable[0].errorLabel } : {}),
       };
@@ -147,6 +223,7 @@ export function createActivityRegistry(sources: readonly ActivitySource[] = []):
     select(key) {
       for (const source of current) {
         if (!source.snapshot().rows.some((row) => row.key === key)) continue;
+        selectedKey = key;
         source.select?.(key);
         notifyLocal();
         return;

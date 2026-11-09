@@ -113,6 +113,8 @@ export function createSubagentActivitySource(pi: ExtensionAPI): ActivitySource {
   let asyncSnapshot: AsyncSnapshot = { runs: [] };
   let selectedKey: string | undefined;
   let refreshInFlight: Promise<void> | undefined;
+  let refreshPending = false;
+  let disposed = false;
   const listeners = new Set<() => void>();
   const detailRefreshers = new Set<() => void>();
   const unsubscribers: Array<() => void> = [];
@@ -130,12 +132,15 @@ export function createSubagentActivitySource(pi: ExtensionAPI): ActivitySource {
   };
 
   const refresh = async () => {
-    if (!active) return;
-    if (refreshInFlight) return refreshInFlight;
+    if (!active || disposed) return;
+    if (refreshInFlight) {
+      refreshPending = true;
+      return refreshInFlight;
+    }
     refreshInFlight = callRpc(pi, "status", {}).then((reply) => {
       if (!active) return;
       if (!reply.success || !reply.data?.asyncSnapshot) {
-        snapshot = { availability: "stale", rows: snapshot.rows, observedAt: new Date().toISOString(), errorLabel: "状态不可用" };
+        snapshot = { availability: "stale", rows: snapshot.rows, ...(selectedKey ? { selectedKey } : {}), observedAt: new Date().toISOString(), errorLabel: "状态不可用" };
         return;
       }
       asyncSnapshot = reply.data.asyncSnapshot;
@@ -157,6 +162,9 @@ export function createSubagentActivitySource(pi: ExtensionAPI): ActivitySource {
       };
     }).finally(() => {
       refreshInFlight = undefined;
+      const rerun = refreshPending;
+      refreshPending = false;
+      if (rerun && active && !disposed) void refresh();
       notifyDetails();
       notify();
     });
@@ -164,6 +172,7 @@ export function createSubagentActivitySource(pi: ExtensionAPI): ActivitySource {
   };
 
   const start = () => {
+    if (disposed) return;
     active = true;
     void refresh();
   };
@@ -176,12 +185,15 @@ export function createSubagentActivitySource(pi: ExtensionAPI): ActivitySource {
   };
 
   unsubscribers.push(pi.on("session_start", () => {
+    if (disposed) return;
     stop();
     start();
   }));
-  unsubscribers.push(pi.on("session_shutdown", stop));
+  unsubscribers.push(pi.on("session_shutdown", () => {
+    if (!disposed) stop();
+  }));
   for (const event of REFRESH_EVENTS) {
-    unsubscribers.push(pi.events.on(event, () => { void refresh(); }));
+    unsubscribers.push(pi.events.on(event, () => { if (!disposed) void refresh(); }));
   }
 
   // Footer creates this source from inside the current session_start handler, so
@@ -204,8 +216,15 @@ export function createSubagentActivitySource(pi: ExtensionAPI): ActivitySource {
       let lines = ["正在读取 subagent 输出…"];
       let disposed = false;
       let refreshInFlight: Promise<void> | undefined;
+      let refreshDirty = false;
+      const timer = setInterval(() => { void refreshDetail(); }, 500);
+      timer.unref?.();
       const refreshDetail = async () => {
-        if (disposed || refreshInFlight) return refreshInFlight;
+        if (disposed) return undefined;
+        if (refreshInFlight) {
+          refreshDirty = true;
+          return refreshInFlight;
+        }
         refreshInFlight = callRpc(pi, "status", { runId, view: "transcript", lines: 240 })
           .then((result) => {
             if (disposed) return;
@@ -220,7 +239,13 @@ export function createSubagentActivitySource(pi: ExtensionAPI): ActivitySource {
               request.requestRender();
             }
           })
-          .finally(() => { refreshInFlight = undefined; });
+          .finally(() => {
+            refreshInFlight = undefined;
+            if (refreshDirty && !disposed) {
+              refreshDirty = false;
+              void refreshDetail();
+            }
+          });
         return refreshInFlight;
       };
       const onSourceRefresh = () => { void refreshDetail(); };
@@ -237,17 +262,20 @@ export function createSubagentActivitySource(pi: ExtensionAPI): ActivitySource {
         },
         dispose() {
           disposed = true;
+          clearInterval(timer);
           detailRefreshers.delete(onSourceRefresh);
         },
       };
     },
     select(key) {
       if (!snapshot.rows.some((row) => row.key === key)) return;
+      if (selectedKey === key) return;
       selectedKey = key;
       snapshot = { ...snapshot, selectedKey };
       notify();
     },
     dispose() {
+      disposed = true;
       stop();
       for (const unsubscribe of unsubscribers.splice(0)) {
         try { unsubscribe(); } catch { /* stale extension context */ }

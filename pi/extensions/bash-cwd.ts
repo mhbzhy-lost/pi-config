@@ -4,9 +4,7 @@ import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 
 const PI_BIN_DIR = fileURLToPath(new URL("../bin", import.meta.url));
 import { createBashCwdExtension } from "../../src/bash-cwd/index.ts";
-import { createBashAsyncCompleteRenderer, createBashAsyncExtension } from "../../src/bash-async/index.ts";
-import { createBashActivitySource } from "../../src/tui/feature-sources.ts";
-import { registerActivitySource } from "../../src/tui/background-activity.ts";
+import { createBashAsyncCompleteRenderer, createBashAsyncExtension, registerBashAsyncActivitySource } from "../../src/bash-async/index.ts";
 
 function getBashOptions(ctx?: { cwd: string; isProjectTrusted?: () => boolean }) {
   if (!ctx) return {};
@@ -36,7 +34,15 @@ export default function bashCwd(pi: ExtensionAPI) {
   };
   createBashCwdExtension(pi, options);
   const bashAsyncController = createBashAsyncExtension(pi, options);
-  registerActivitySource(pi, "bash_async", createBashActivitySource(bashAsyncController));
+  let unregisterActivitySource: (() => void) | undefined;
+  pi.on("session_start", () => {
+    unregisterActivitySource?.();
+    unregisterActivitySource = registerBashAsyncActivitySource(pi, bashAsyncController);
+  });
+  pi.on("session_shutdown", () => {
+    unregisterActivitySource?.();
+    unregisterActivitySource = undefined;
+  });
   // 完成回执为 feature-owned 显示投影：Host 入口只负责绑定与 TUI 能力注入，
   // 不改 raw payload、发送出口或 completion details 合同。
   pi.registerMessageRenderer("bash-async-complete", createBashAsyncCompleteRenderer({ Text, truncateToWidth }));

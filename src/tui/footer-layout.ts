@@ -1,12 +1,34 @@
-import type { Component, Theme } from "@earendil-works/pi-tui";
+import type { Component } from "@earendil-works/pi-tui";
 import type { ActivitySnapshot } from "./background-activity.ts";
+
+type FooterTheme = { fg(color: string, value: string): string };
 
 function fit(value: string, width: number, truncateToWidth: (text: string, maxWidth: number, ellipsis?: string) => string): string {
   return truncateToWidth(value, Math.max(0, width), "…");
 }
 
+function layoutLine(options: {
+  width: number;
+  left: string;
+  right: string;
+  visibleWidth: (text: string) => number;
+  truncateToWidth: (text: string, width: number, ellipsis?: string) => string;
+}): string {
+  const width = Math.max(0, options.width);
+  if (width === 0) return "";
+  const rightWidth = Math.min(width, options.visibleWidth(options.right));
+  if (rightWidth >= width) return fit(options.right, width, options.truncateToWidth);
+  const separatorWidth = options.left && options.right ? 1 : 0;
+  const leftWidth = Math.max(0, width - rightWidth - separatorWidth);
+  const left = fit(options.left, leftWidth, options.truncateToWidth);
+  const right = fit(options.right, rightWidth, options.truncateToWidth);
+  return `${left}${" ".repeat(Math.max(0, width - options.visibleWidth(left) - options.visibleWidth(right)))}${right}`;
+}
+
 function rowText(snapshot: ActivitySnapshot): string {
-  if (snapshot.rows.length === 0) return "后台任务：无";
+  if (snapshot.rows.length === 0) {
+    return snapshot.availability === "available" ? "后台任务：无" : "后台任务：状态读取中";
+  }
   const active = snapshot.rows.filter((row) => row.placement === "main");
   const recent = snapshot.rows.filter((row) => row.placement === "recent");
   const rows = [...active, ...recent].slice(0, 3);
@@ -21,12 +43,12 @@ export type FooterComponentOptions = {
   getContextUsage: () => { percent?: number | null; contextWindow?: number } | undefined;
   getSnapshot: () => ActivitySnapshot;
   requestRender: () => void;
-  theme: Theme;
+  theme: FooterTheme;
   visibleWidth: (text: string) => number;
   truncateToWidth: (text: string, width: number, ellipsis?: string) => string;
 };
 
-export function createFooterComponent(options: FooterComponentOptions): Component {
+export function createFooterComponent(options: FooterComponentOptions): Component & { dispose(): void } {
   let disposed = false;
   return {
     render(width: number): string[] {
@@ -44,9 +66,8 @@ export function createFooterComponent(options: FooterComponentOptions): Componen
       // thinking, and context across rows makes the footer harder to scan and
       // breaks the established `model · thinking · context` layout.
       const right = `${modelLabel} · ${thinking} · ${contextLabel}`;
-      const gap = Math.max(1, width - options.visibleWidth(right) - options.visibleWidth(left));
       const lines = [
-        `${fit(left, Math.max(0, width - options.visibleWidth(right) - gap), options.truncateToWidth)}${" ".repeat(gap)}${fit(right, width, options.truncateToWidth)}`,
+        layoutLine({ width, left, right, visibleWidth: options.visibleWidth, truncateToWidth: options.truncateToWidth }),
         fit(rowText(options.getSnapshot()), width, options.truncateToWidth),
         fit(`thinking: ${thinking}`, width, options.truncateToWidth),
       ];

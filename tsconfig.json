@@ -17,8 +17,6 @@
   "include": [
     "src/agents-shared/**/*.ts",
     "src/agents-global/**/*.ts",
-    "src/goal-runtime/**/*.ts",
-    "pi/extensions/goal-runtime.ts",
     "src/apply-patch/**/*.ts",
     "src/bash-cwd/**/*.ts",
     "src/bash-async/**/*.ts",
@@ -43,7 +41,6 @@
     "scripts/assert-session-tool-policy.ts",
     "scripts/probes/physical-host.ts",
     "src/pi-settings/**/*.ts",
-    "src/async-progress/**/*.ts",
     "src/context-usage/**/*.ts",
     "src/available-models/**/*.ts",
     "pi/extensions/bash-cwd.ts",
@@ -53,8 +50,9 @@
     "pi/extensions/basic-memory.ts",
     "pi/extensions/context-usage.ts",
     "pi/extensions/task-scheduler.ts",
-    "pi/extensions/async-progress-watcher.ts",
-    "src/background-activity/**/*.ts",
-    "pi/extensions/background-activity.ts"
+    "src/subagent/**/*.ts",
+    "pi/extensions/subagent.ts",
+    "src/tui/**/*.ts",
+    "pi/extensions/custom-footer.ts"
   ]
 }
