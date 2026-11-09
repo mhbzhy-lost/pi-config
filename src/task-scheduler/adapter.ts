@@ -121,8 +121,8 @@ const TOOL_SNIPPETS = Object.freeze({
 // create/delete 的边界提示：经用户授权取消 UI 确认，由 agent 直接控制；
 // create 的持久化 prompt 入库前仍做安全扫描，delete 结果如实上报、不伪报成功。
 const TOOL_GUIDELINES = Object.freeze({
-  scheduler_create: ["Does not require UI confirmation: creation is agent-controlled under explicit user authorization. The persistent prompt is still safety-scanned before storage."],
-  scheduler_delete: ["Does not require UI confirmation: deletion is agent-controlled under explicit user authorization. The tool result reports whether the task was actually deleted."],
+  scheduler_create: ["scheduler_create does not require UI confirmation: creation is agent-controlled under explicit user authorization. The persistent prompt is still safety-scanned before storage."],
+  scheduler_delete: ["scheduler_delete does not require UI confirmation: deletion is agent-controlled under explicit user authorization. The tool result reports whether the task was actually deleted."],
 });
 
 function diagnostic(message) { diagnostics.push(message); if (diagnostics.length > 25) diagnostics.shift(); }

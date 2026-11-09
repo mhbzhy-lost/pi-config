@@ -1,6 +1,7 @@
 import { validateDeclaredBashCwd } from "./policy.ts";
 
-const cwdDescription = "可选；命令在此目录执行";
+const cwdDescription = "可选；命令在此目录执行。相对路径相对 workspace root 解析，必须是已存在的目录";
+const cwdGuideline = "bash 的可选 cwd 参数指定命令执行目录；相对路径相对 workspace root 解析，必须是已存在的目录。";
 
 export function createBashCwdToolDefinition({
   workspaceRoot = process.cwd(),
@@ -26,7 +27,7 @@ export function createBashCwdToolDefinition({
         cwd: { type: "string", description: cwdDescription },
       },
     },
-    promptGuidelines: [...baseGuidelines, cwdDescription],
+    promptGuidelines: [...baseGuidelines, cwdGuideline],
     async execute(id, { cwd, ...rest }, signal, onUpdate, ctx) {
       const { definition } = await prepareBashCwdExecution({
         workspaceRoot, createBashToolDefinition, getBashOptions,

@@ -84,11 +84,13 @@ function skillListInput(input: unknown): string[] | undefined {
   return skills;
 }
 
-function rpcTool(pi: ExtensionAPI, name: string, method: string, parameters: Record<string, unknown>, buildParams: (input: unknown, ctx: RpcToolBuildContext) => Record<string, unknown>) {
+function rpcTool(pi: ExtensionAPI, name: string, method: string, description: string, parameters: Record<string, unknown>, buildParams: (input: unknown, ctx: RpcToolBuildContext) => Record<string, unknown>, prompt?: { snippet?: string; guidelines?: string[] }) {
   return {
     name,
     label: name,
-    description: `透传到 pi-subagents RPC ${method}。`,
+    description,
+    ...(prompt?.snippet !== undefined ? { promptSnippet: prompt.snippet } : {}),
+    ...(prompt?.guidelines !== undefined ? { promptGuidelines: prompt.guidelines } : {}),
     parameters,
     exposure: "model-only" as const,
     async execute(_toolCallId: string, input: unknown, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: RpcToolContext) {
@@ -141,9 +143,10 @@ export function createMinimalSubagentExtension(pi: ExtensionAPI): void {
     pi,
     "subagent_spawn",
     "spawn",
+    "异步派发一个只读子代理执行独立任务。child 为 fresh context 的只读代理（仅 read/grep/find/ls），不继承项目上下文与任何 skill，继承当前模型。立即返回 runId，不阻塞等待结果；run 结束后会自动唤醒本会话送达结果，不要轮询 status 等待。task 必须自包含：child 看不到本会话历史与项目规范。skills 可选，用于显式注入 child 需要的 skill。后续用返回的 runId 调 status/steer/stop 管理。",
     toolParameters(["task"], {
-      task: { type: "string", minLength: 1, maxLength: MAX_TASK_BYTES },
-      skills: { type: "array", maxItems: MAX_SKILLS, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: MAX_SKILL_NAME_BYTES } },
+      task: { type: "string", minLength: 1, maxLength: MAX_TASK_BYTES, description: "委派给子代理的完整任务描述，需自包含（child 无本会话上下文）" },
+      skills: { type: "array", maxItems: MAX_SKILLS, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: MAX_SKILL_NAME_BYTES }, description: "可选：显式注入 child 的 skill 名称列表，默认不继承任何 skill" },
     }),
     (input, ctx) => ({
       agent: AGENT_NAME,
@@ -158,46 +161,66 @@ export function createMinimalSubagentExtension(pi: ExtensionAPI): void {
         return skills === undefined ? {} : { skill: skills };
       })(),
     }),
+    {
+      snippet: "异步派发只读子代理执行独立任务；返回 runId，结果完成时自动唤醒本会话",
+      guidelines: [
+        "subagent_spawn 派发的 run 结束后会自动唤醒本会话；不要循环调用 subagent_status 轮询等待结果。",
+        "subagent_spawn 的 task 必须自包含：child 是 fresh context，看不到本会话历史与项目规范。",
+      ],
+    },
   ));
   pi.registerTool(rpcTool(
     pi,
     "subagent_status",
     "status",
-    toolParameters(["runId"], { runId: { type: "string", minLength: 1, maxLength: 256 } }),
+    "查询一个已派发 run 的当前状态与输出。传入 spawn 返回的 runId。",
+    toolParameters(["runId"], { runId: { type: "string", minLength: 1, maxLength: 256, description: "目标 run 的 id（spawn 返回）" } }),
     (input) => ({ runId: stringInput(input, "runId", 256) }),
+    { snippet: "查询已派发 run 的状态与输出" },
   ));
   pi.registerTool(rpcTool(
     pi,
     "subagent_steer",
     "steer",
+    "向一个仍在运行的 run 主动补充指示或纠偏，message 会在 child 当前步骤后并入其上下文。仅用于主动引导；child 通过 contact_supervisor 提问时必须用 subagent_supervisor 的 reply 回应，steer 不能替代 reply。",
     toolParameters(["runId", "message"], {
-      runId: { type: "string", minLength: 1, maxLength: 256 },
-      message: { type: "string", minLength: 1, maxLength: MAX_MESSAGE_BYTES },
+      runId: { type: "string", minLength: 1, maxLength: 256, description: "目标 run 的 id（spawn 返回）" },
+      message: { type: "string", minLength: 1, maxLength: MAX_MESSAGE_BYTES, description: "补充给运行中 child 的指示或纠偏信息" },
     }),
     (input) => ({
       runId: stringInput(input, "runId", 256),
       message: stringInput(input, "message", MAX_MESSAGE_BYTES),
     }),
+    {
+      snippet: "向运行中的 run 主动补充指示或纠偏",
+      guidelines: [
+        "child 通过 contact_supervisor 提问时用 subagent_supervisor 的 reply 回应；subagent_steer 仅用于主动引导，不能替代 reply。",
+      ],
+    },
   ));
   pi.registerTool(rpcTool(
     pi,
     "subagent_stop",
     "stop",
-    toolParameters(["runId"], { runId: { type: "string", minLength: 1, maxLength: 256 } }),
+    "请求终止一个 pending/running 的 run。回执仅代表受理（state=stopping），终止以后续 status 观测为准。",
+    toolParameters(["runId"], { runId: { type: "string", minLength: 1, maxLength: 256, description: "目标 run 的 id（spawn 返回）" } }),
     (input) => ({ runId: stringInput(input, "runId", 256) }),
+    { snippet: "请求终止 pending/running 的 run" },
   ));
   pi.registerTool(rpcTool(
     pi,
     "subagent_resume",
     "resume",
+    "以一条新消息续跑一个已结束（complete/failed/stopped）的 run；续跑资格由上游校验，不满足会拒绝并说明原因。",
     toolParameters(["runId", "message"], {
-      runId: { type: "string", minLength: 1, maxLength: 256 },
-      message: { type: "string", minLength: 1, maxLength: MAX_MESSAGE_BYTES },
+      runId: { type: "string", minLength: 1, maxLength: 256, description: "目标 run 的 id（spawn 返回）" },
+      message: { type: "string", minLength: 1, maxLength: MAX_MESSAGE_BYTES, description: "续跑时追加给 child 的新消息" },
     }),
     (input) => ({
       runId: stringInput(input, "runId", 256),
       message: stringInput(input, "message", MAX_MESSAGE_BYTES),
     }),
+    { snippet: "以新消息续跑已结束的 run" },
   ));
 }
 

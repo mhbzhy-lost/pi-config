@@ -69,7 +69,7 @@ export function createBasicMemoryExtension(pi: ExtensionAPI) {
     description: "搜索本地持久存储笔记（不得写入凭据或秘密）",
     promptSnippet: "搜索本地持久笔记。",
     promptGuidelines: ["需要按主题查找已有持久笔记时使用 memory_search。"],
-    parameters: Type.Object({ query: Type.String(), project: Type.Optional(Type.String()) }),
+    parameters: Type.Object({ query: Type.String({ description: "搜索关键词或主题短语" }), project: Type.Optional(Type.String({ description: "可选；限定目标 project，缺省使用默认 project" })) }),
   }, COMMANDS.memory_search);
   registerMemoryTool({
     name: "memory_read",
@@ -77,7 +77,7 @@ export function createBasicMemoryExtension(pi: ExtensionAPI) {
     description: "读取本地持久存储中指定笔记（不得写入凭据或秘密）",
     promptSnippet: "读取指定的本地持久笔记。",
     promptGuidelines: ["已知笔记标识、需要查看完整正文时使用 memory_read。"],
-    parameters: Type.Object({ identifier: Type.String(), project: Type.Optional(Type.String()) }),
+    parameters: Type.Object({ identifier: Type.String({ description: "笔记标识（笔记 title 或其 permalink 标识，如 my-note）" }), project: Type.Optional(Type.String({ description: "可选；限定目标 project，缺省使用默认 project" })) }),
   }, COMMANDS.memory_read);
   registerMemoryTool({
     name: "memory_context",
@@ -85,7 +85,7 @@ export function createBasicMemoryExtension(pi: ExtensionAPI) {
     description: "构建本地持久存储上下文（不得写入凭据或秘密）",
     promptSnippet: "按主题构建相关持久笔记上下文。",
     promptGuidelines: ["需要围绕主题汇集相关笔记上下文时使用 memory_context。"],
-    parameters: Type.Object({ query: Type.String(), project: Type.Optional(Type.String()) }),
+    parameters: Type.Object({ query: Type.String({ description: "主题描述，据此汇集相关笔记上下文" }), project: Type.Optional(Type.String({ description: "可选；限定目标 project，缺省使用默认 project" })) }),
   }, COMMANDS.memory_context);
   registerMemoryTool({
     name: "memory_recent",
@@ -93,7 +93,7 @@ export function createBasicMemoryExtension(pi: ExtensionAPI) {
     description: "获取本地持久存储最近活动（不得写入凭据或秘密）",
     promptSnippet: "查看本地持久笔记的近期活动。",
     promptGuidelines: ["需要了解最近的笔记变动时使用 memory_recent。"],
-    parameters: Type.Object({ project: Type.Optional(Type.String()) }, { required: [] }),
+    parameters: Type.Object({ project: Type.Optional(Type.String({ description: "可选；限定目标 project，缺省使用默认 project" })) }, { required: [] }),
   }, COMMANDS.memory_recent);
   registerMemoryTool({
     name: "memory_write",
@@ -101,7 +101,12 @@ export function createBasicMemoryExtension(pi: ExtensionAPI) {
     description: "写入本地持久存储笔记（不得写入凭据或秘密）",
     promptSnippet: "保存可复用结论为本地持久笔记。",
     promptGuidelines: ["需要长期复用的结论可用 memory_write 保存；不得写入凭据或秘密。"],
-    parameters: Type.Object({ title: Type.String(), folder: Type.String(), content: Type.String(), project: Type.Optional(Type.String()) }),
+    parameters: Type.Object({
+      title: Type.String({ description: "笔记标题" }),
+      folder: Type.String({ description: "归档目标 folder 名称（如 notes）" }),
+      content: Type.String({ description: "笔记 markdown 正文；禁止写入凭据或秘密" }),
+      project: Type.Optional(Type.String({ description: "可选；限定目标 project，缺省使用默认 project" })),
+    }),
   }, COMMANDS.memory_write, (params) => {
     if (containsLikelySecret(params.content)) {
       throw new Error("禁止将凭据或秘密 (secret) 写入持久存储");
