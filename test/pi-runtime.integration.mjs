@@ -16,7 +16,7 @@ const piRoot = resolvePiCodingAgentRoot();
 const piPackage = join(piRoot, "dist", "index.js");
 const piTypes = join(piRoot, "dist", "core", "extensions", "types.d.ts");
 
-test("minimal extension registers only prefixed subagent RPC tools", async () => {
+test("minimal extension registers prefixed subagent RPC tools plus supervisor reply tool", async () => {
   const markers = ["PI_SUBAGENT_CHILD", "PI_SUBAGENT_FANOUT_CHILD", "PI_SUBAGENT_PARENT_SESSION", "PI_ROOT_SUBAGENT_BROKER_ENABLED", "PI_CODING_WORKSPACE_DIR"];
   const previousMarkers = new Map(markers.map((name) => [name, process.env[name]]));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -56,7 +56,7 @@ test("minimal extension registers only prefixed subagent RPC tools", async () =>
       .filter((name) => /^(?:subagent|managed_workspace|supervisor_request)/.test(name)).sort();
     assert.deepEqual(errors, []);
     assert.equal(extensions.length, 1);
-    assert.deepEqual(toolNames, ["subagent_resume", "subagent_spawn", "subagent_status", "subagent_steer", "subagent_stop"]);
+    assert.deepEqual(toolNames, ["subagent_resume", "subagent_spawn", "subagent_status", "subagent_steer", "subagent_stop", "subagent_supervisor"]);
     assert.equal(session.getAllTools().some((tool) => tool.name === "subagent_roster"), false);
     assert.equal(session.getActiveToolNames().includes("subagent_roster"), false);
     assert.equal(session.getCallableToolNames().includes("subagent_roster"), false);

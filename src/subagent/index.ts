@@ -108,7 +108,14 @@ function rpcTool(pi: ExtensionAPI, name: string, method: string, parameters: Rec
 export function createMinimalSubagentExtension(pi: ExtensionAPI): void {
   // Upstream owns its lifecycle and RPC bridge; this integration exposes only our tool.
   const upstream = Object.create(pi) as ExtensionAPI;
-  upstream.registerTool = () => {};
+  // 仅放行父侧 supervisor 回复工具：child 的 contact_supervisor 由 child runtime 钩子注入，
+  // 不受 agent tools 白名单限制；child 发出 need_decision/interview_request 后会阻塞等待
+  // 父会话通过 subagent_supervisor({ action: "reply" }) 回应（steer 不能替代 reply）。
+  // 上游其余工具（subagent、subagents_enable、bg_wait、contact_supervisor 等）仍全部屏蔽，
+  // 保持本集成的最小工具面。
+  upstream.registerTool = (definition) => {
+    if (definition?.name === "subagent_supervisor") pi.registerTool(definition);
+  };
   upstream.registerCommand = () => {};
   upstream.registerShortcut = () => {};
   registerSubagents(upstream);
