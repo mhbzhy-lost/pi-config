@@ -4,7 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
-import { sdk } from './helpers/joint-upgrade-session.mjs';
+import { loadPiTestRuntime } from './helpers/pi-runtime.mjs';
+
+const { codingAgent: sdk } = await loadPiTestRuntime(import.meta.url);
 
 const sharedTemplatePath = join(import.meta.dirname, '..', 'pi', 'settings.template.json');
 
