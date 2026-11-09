@@ -1,7 +1,0 @@
-{
-  "autoResume": false,
-  "maxSubagentSpawnsPerSession": 10000,
-  "fleetView": false,
-  "asyncWidget": false,
-  "artifactDir": "project"
-}

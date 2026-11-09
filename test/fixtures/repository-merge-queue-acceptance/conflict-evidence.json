@@ -1,8 +1,0 @@
-{
-  "schemaVersion": "repository-merge-queue-conflict.v1",
-  "rebaseExitCode": 1,
-  "unmergedEntries": ["src/pipeline.ts"],
-  "sequencer": { "present": true, "path": ".git/rebase-merge" },
-  "conflictDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "digestSource": "git"
-}
