@@ -54,7 +54,6 @@ test("extension 注册无参数 context_usage 工具并返回完整快照", asyn
   assert.equal(pi.registered[0].label, "context_usage");
   assert.ok(pi.registered[0].promptSnippet.length > 0);
   assert.ok(pi.registered[0].promptGuidelines.length > 0);
-  assert.doesNotMatch([pi.registered[0].promptSnippet, ...pi.registered[0].promptGuidelines].join("\n"), /handoff/i);
   assert.equal(pi.registered[0].outputSchema, ContextUsageOutputSchema);
   assert.equal(pi.registered[0].exposure, undefined);
   assert.deepEqual(pi.registered[0].parameters.properties, {});

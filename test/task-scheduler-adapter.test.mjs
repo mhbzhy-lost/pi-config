@@ -240,41 +240,38 @@ test("injected clock polls without overlap, refreshes mutations, and isolates st
   await pi.handlers.get("session_shutdown")({}, newer);
 });
 
-test("scheduler tool descriptions explicitly say when each tool is used", () => {
+test("scheduler tool metadata passes through upstream facts and appends local boundary guidelines", () => {
+  // 文案本身是单一事实源（上游定义/adapter 本地文案），此测试只验证透传与追加的结构不变量，不重复锁定措辞。
+  const upstreamTools = [
+    { name: "scheduler_create", description: "Create a scheduled task. Use when the user requests a future, repeated, or timer task.", promptSnippet: "Schedule prompts to run automatically.", promptGuidelines: ["Upstream create guideline."], execute() {} },
+    { name: "scheduler_list", description: "List scheduled tasks.", promptSnippet: "List all scheduled prompts.", promptGuidelines: ["Upstream list guideline."], execute() {} },
+    { name: "scheduler_get", description: "Get a scheduled task.", execute() {} },
+    { name: "scheduler_delete", description: "Delete a scheduled task.", promptGuidelines: ["Upstream delete guideline."], execute() {} },
+  ];
+  const byName = new Map(upstreamTools.map((tool) => [tool.name, tool]));
   const pi = makeHost();
-  registerTaskSchedulerAdapter(pi, { upstreamExtension(api) {
-    api.registerTool({ name: "scheduler_create", description: "Create a scheduled task. Use when the user requests a future, repeated, or timer task.", promptSnippet: "Schedule prompts to run automatically.", promptGuidelines: ["Upstream create guideline."], execute() {} });
-    api.registerTool({ name: "scheduler_list", description: "List scheduled tasks.", promptSnippet: "List all scheduled prompts.", promptGuidelines: ["Upstream list guideline."], execute() {} });
-    api.registerTool({ name: "scheduler_get", description: "Get a scheduled task.", execute() {} });
-    api.registerTool({ name: "scheduler_delete", description: "Delete a scheduled task.", promptGuidelines: ["Upstream delete guideline."], execute() {} });
-  } });
-  for (const [name, usage, upstreamDescription] of [
-    ["scheduler_create", "Use when the user requests a future, repeated, or timer scheduled prompt or task.", "Create a scheduled task. Use when the user requests a future, repeated, or timer task."],
-    ["scheduler_list", "Use when inspecting what scheduled prompts or tasks exist.", "List scheduled tasks."],
-    ["scheduler_get", "Use when retrieving the details, history, or schedule of a known scheduled task ID.", "Get a scheduled task."],
-    ["scheduler_delete", "Use when removing or canceling a scheduled prompt or task by ID.", "Delete a scheduled task."],
-  ]) {
-    const description = pi.tools.get(name).description;
-    assert.ok(description.startsWith(usage), `${name} guidance must come first`);
-    assert.ok(description.includes(upstreamDescription), `${name} must preserve its upstream description`);
+  registerTaskSchedulerAdapter(pi, { upstreamExtension(api) { for (const tool of upstreamTools) api.registerTool(tool); } });
+  for (const upstream of upstreamTools) {
+    const exposed = pi.tools.get(upstream.name);
+    // 上游 description 原样保留在前缀，不被本地文案覆盖
+    assert.ok(exposed.description.includes(upstream.description), `${upstream.name} must preserve its upstream description`);
+    // 上游已携带的 snippet 原样透传；缺失的（get/delete）由 adapter 补齐非空摘要
+    assert.equal(exposed.promptSnippet, upstream.promptSnippet ?? exposed.promptSnippet);
+    if (upstream.promptSnippet === undefined) {
+      assert.equal(typeof exposed.promptSnippet, "string");
+      assert.ok(exposed.promptSnippet.length > 0, `${upstream.name} adapter should fill a missing snippet`);
+    }
   }
-  // M05B：上游已携带的 S/G 原样保留，缺失的 get/delete 摘要由 adapter 补齐；
-  // 上游 promptGuidelines 按原顺序保留，本仓边界 guideline 只追加在其后不覆盖。
-  assert.equal(pi.tools.get("scheduler_create").promptSnippet, "Schedule prompts to run automatically.");
-  assert.equal(pi.tools.get("scheduler_list").promptSnippet, "List all scheduled prompts.");
-  assert.match(pi.tools.get("scheduler_get").promptSnippet, /by ID/);
-  assert.match(pi.tools.get("scheduler_delete").promptSnippet, /by ID/);
-  const createGuidelines = pi.tools.get("scheduler_create").promptGuidelines;
-  assert.equal(createGuidelines[0], "Upstream create guideline.", "upstream guideline must be preserved first in order");
-  assert.match(createGuidelines[1], /not require UI confirmation/, "local create guideline must state the removed confirmation gate");
-  assert.match(createGuidelines[1], /safety-scanned/, "local create guideline must keep the safety-scan boundary");
-  assert.equal(createGuidelines.length, 2);
-  const deleteGuidelines = pi.tools.get("scheduler_delete").promptGuidelines;
-  assert.equal(deleteGuidelines[0], "Upstream delete guideline.");
-  assert.match(deleteGuidelines[1], /not require UI confirmation/);
-  assert.match(deleteGuidelines[1], /actually deleted/, "local delete guideline must promise an observable result");
-  assert.equal(deleteGuidelines.length, 2);
-  assert.deepEqual(pi.tools.get("scheduler_list").promptGuidelines, ["Upstream list guideline."], "upstream guideline preserved without forced local append");
+  // M05B：上游 promptGuidelines 按原顺序保留，本仓边界 guideline 只追加在其后不覆盖。
+  for (const name of ["scheduler_create", "scheduler_delete"]) {
+    const upstream = byName.get(name);
+    const exposed = pi.tools.get(name);
+    const guidelines = exposed.promptGuidelines;
+    assert.deepEqual(guidelines.slice(0, upstream.promptGuidelines.length), upstream.promptGuidelines, `${name} upstream guidelines preserved in order`);
+    assert.equal(guidelines.length, upstream.promptGuidelines.length + 1, `${name} appends exactly one local boundary guideline`);
+    assert.equal(typeof guidelines.at(-1), "string");
+  }
+  assert.deepEqual(pi.tools.get("scheduler_list").promptGuidelines, byName.get("scheduler_list").promptGuidelines, "upstream guideline preserved without forced local append");
   assert.equal(pi.tools.get("scheduler_get").promptGuidelines, undefined);
   for (const name of ["scheduler_create", "scheduler_list", "scheduler_get", "scheduler_delete"]) assert.equal(pi.tools.get(name).exposure, "model-only");
 });

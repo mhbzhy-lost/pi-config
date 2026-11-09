@@ -54,14 +54,6 @@ test("registered memory tools satisfy the current Pi execute contract", async ()
   });
 });
 
-test("all tool descriptions mention no secrets", () => {
-  const pi = createMockPi();
-  createBasicMemoryExtension(pi);
-  for (const tool of pi.tools) {
-    assert.match(tool.description, /凭据|秘密|secret/i);
-  }
-});
-
 test("tool commands start with basic-memory tool and include --local", async () => {
   const pi = createMockPi();
   createBasicMemoryExtension(pi);

@@ -67,9 +67,14 @@ test("registers a same-name bash override with the base presentation fields and 
     assert.equal(registered.description, "base description");
     assert.equal(registered.renderCall, "render-call");
     assert.equal(registered.renderResult, "render-result");
-    assert.deepEqual(registered.promptGuidelines, ["base guideline", "可选；命令在此目录执行"]);
+    // 结构不变量：原生 guidelines 原样保留，末尾恰好追加一条本地 cwd 指引；文案本身不在此重复锁定
+    assert.equal(registered.promptGuidelines.length, 2);
+    assert.equal(registered.promptGuidelines[0], "base guideline");
+    assert.equal(typeof registered.promptGuidelines[1], "string");
+    assert.ok(registered.promptGuidelines[1].length > 0);
     assert.equal(registered.parameters.properties.cwd.type, "string");
-    assert.match(registered.parameters.properties.cwd.description, /可选；命令在此目录执行/);
+    assert.equal(typeof registered.parameters.properties.cwd.description, "string");
+    assert.ok(registered.parameters.properties.cwd.description.length > 0);
   });
 });
 

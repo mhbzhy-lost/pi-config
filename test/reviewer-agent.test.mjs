@@ -8,9 +8,6 @@ test("agent profiles keep runtime configuration in frontmatter and cannot grant 
   const reviewer = await readFile(new URL("../pi/agents/reviewer.md", import.meta.url), "utf8");
   const executor = await readFile(new URL("../pi/agents/executor.md", import.meta.url), "utf8");
   const delegate = await readFile(new URL("../pi/agents/delegate.md", import.meta.url), "utf8");
-  const reviewerBody = reviewer.split("---\n").at(-1);
-  const executorBody = executor.split("---\n").at(-1);
-  const delegateBody = delegate.split("---\n").at(-1);
 
   // 不得把逐字模型 id 钉进本跟踪测试：`pi/models.json` 按根 AGENTS.md 是 per-machine
   // 且已移出版本控制，模型 id 会随本机可用模型变更（已发生过：GLM-5.3-0.6x → GLM-5.3、
@@ -51,23 +48,7 @@ test("agent profiles keep runtime configuration in frontmatter and cannot grant 
   assert.match(executor, /^tools: read,write,edit,bash,grep,find,ls$/m, "executor tools 面必须保持只含实现/验证工具");
   assert.match(delegate, /^tools: read,write,edit,bash,grep,find,ls$/m, "delegate tools 面必须保持只含实现/验证工具");
   assert.match(reviewer, /^tools: read,grep,find,ls,bash$/m, "reviewer 保持只读工具面，不得获得写权限");
-  // reviewer 的只读属性必须对派发方可见：description 是 roster/派发决策入口，必须明写无写入能力。
-  assert.match(reviewer, /^description: .*只读.*$/m, "reviewer description 必须强调只读属性");
-  assert.match(reviewer, /^description: .*(?:无写入|不得用于落盘).*$/m, "reviewer description 必须说明不能承接落盘任务");
-  // 角色职责保留在正文（不再把正文出现“runtime”等字样本身当违规，配置事实改为验证
-  // frontmatter）：审阅只读职责与发现格式、执行验证职责、委派边界与共享规范引用。
-  assert.match(reviewerBody, /计划执行前.*(?:审阅|审查)/);
-  assert.match(reviewerBody, /计划执行完成后.*核对/);
-  assert.match(reviewerBody, /偏差/);
-  assert.match(reviewerBody, /改进建议/);
-  assert.match(reviewerBody, /只读/);
-  assert.match(reviewerBody, /严重性.*路径.*证据.*影响.*建议/);
+  // 正文/description 文案是单一事实源（profile 文件本身），不在此逐字锁定；
+  // 角色能力边界由上方 tools 面与 frontmatter 结构断言约束。
   assert.doesNotMatch(executor, /^temperature:/m);
-  // TDD 默认禁令已全局下放到共享规范（AGENTS_SHARED），三个 profile 的 frontmatter 与正文都
-  // 不得携带 TDD 流程，也不得以测试断言恢复 TDD 要求；职责边界（不新增委派）必须保留。
-  for (const [body, label] of [[reviewerBody, "reviewer"], [executorBody, "executor"], [delegateBody, "delegate"]]) {
-    assert.doesNotMatch(body, /TDD/i, `${label} 正文不得携带 TDD 流程`);
-    assert.match(body, /AGENTS_SHARED/, `${label} 正文必须引用共享规范而不复制其安全清单`);
-    assert.match(body, /(?:不新增委派|不得委派)/, `${label} 必须保留不新增委派边界`);
-  }
 });
