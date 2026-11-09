@@ -139,8 +139,7 @@ export function subscribeRemoteActivitySources(
     return typeof candidate.id === "string" && candidate.id.length > 0
       && typeof candidate.registrationId === "string" && candidate.registrationId.length > 0
       && typeof candidate.source?.snapshot === "function"
-      && typeof candidate.source?.subscribe === "function"
-      && typeof candidate.source?.detail === "function";
+      && typeof candidate.source?.subscribe === "function";
   };
   const onRegisterEvent = (value: unknown) => {
     if (isRegistration(value)) onRegister(value);

@@ -83,11 +83,12 @@ export function createFooterRuntime(pi: ExtensionAPI): { openBrowser(ctx: { sess
     const remoteSources = new Map<string, { registrationId: string; source: import("./background-activity.ts").ActivitySource }>();
     const refreshAllSources = () => {
       if (!registry || !source) return;
-      registry.setSources([
+      const allSources = [
         ...activitySources(pi),
         ...[...remoteSources.values()].map((entry) => entry.source),
         source,
-      ]);
+      ];
+      registry.setSources([...new Set(allSources)]);
     };
     sourceUnsubscribe = subscribeActivitySources(pi, refreshAllSources);
     remoteSourceUnsubscribe = subscribeRemoteActivitySources(pi, (registration) => {
