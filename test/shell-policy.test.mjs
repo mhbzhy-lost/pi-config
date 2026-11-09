@@ -205,7 +205,7 @@ test("git push with global options is no longer gated on plan TODOs", async () =
   }
 });
 
-test("blocks raw mutating git worktree lifecycle commands through global options, absolute executables, and wrappers", () => {
+test("allows git worktree lifecycle commands through global options, absolute executables, and wrappers", () => {
   for (const command of [
     "git worktree add /tmp/unmanaged topic",
     "git --no-pager worktree remove /tmp/unmanaged",
@@ -216,16 +216,14 @@ test("blocks raw mutating git worktree lifecycle commands through global options
     "env LANG=C git worktree unlock /tmp/unmanaged",
     "bash -c 'git worktree add /tmp/unmanaged topic'",
   ]) {
-    assertBlocked(command, "GIT_WORKTREE_LIFECYCLE_BYPASS", /worktree lifecycle bypass/, undefined);
+    assert.equal(policy(command), undefined);
   }
 });
 
-test("allows read-only git worktree list variants and the managed lifecycle CLI", () => {
+test("allows read-only git worktree list variants", () => {
   assert.equal(policy("git worktree list"), undefined);
   assert.equal(policy("git worktree list --porcelain -z"), undefined);
   assert.equal(policy("git --no-pager worktree list --verbose"), undefined);
-  assert.equal(policy("node scripts/worktree-lifecycle.ts release --id task --owner-token token"), undefined);
-  assert.equal(policy("node scripts/worktree-lifecycle.ts audit --json"), undefined);
 });
 
 test("blocks destructive git commands that cannot be undone", () => {

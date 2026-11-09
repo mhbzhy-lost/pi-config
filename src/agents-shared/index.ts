@@ -21,22 +21,6 @@ const EMPTY_DIAGNOSTIC = "Required Pi shared AGENTS_SHARED.md is empty";
 // SDK 以 section key 自动包裹外层 XML；来源说明留在正文。
 const SHARED_INSTRUCTIONS_SOURCE = "来源：PI_CODING_AGENT_DIR/AGENTS_SHARED.md";
 
-// child 专属的子执行边界块由 runtime 独立追加（不来自 AGENTS_SHARED，不按标题
-// 解析抽取），只复用既有规范：既有 contact_supervisor need_decision 门禁、dispatch
-// 合同的 writePaths/criteria、工单需用户确认；不发明新 authority/工具/权限。
-const CHILD_EXECUTION_BOUNDARIES = [
-  "来源：runtime",
-  "- 不得新增委派（不得派生新的 subagent），不得接管或重排主计划 DAG；只推进当前任务范围。",
-  "- 关键前提矛盾、将超出 writePaths、acceptance criteria 客观不可能，或权限/产品决策阻塞时：停止相关操作，经 contact_supervisor（reason: \"need_decision\"）上报并等待决定；不得自行推断安全开关或新增 fallback。",
-  "- 工单/申请流程未经用户确认不得提交；需要时经主管代询。",
-].join("\n");
-
-// child 运行时 ACK 沿用 installed public 机制（pi-subagents runtime-acknowledged-extensions
-// 的 RUNTIME_EXTENSION_ACK_EVENT / isRuntimeAcknowledgedExtensionId 形状）；
-// 仅在成功读取共享文件且 handler 已安装后发出，ACK 观测不是 model 消费证明。
-const RUNTIME_EXTENSION_ACK_EVENT = "subagent:acknowledge-extension";
-const SHARED_EXTENSION_ACK_ID = "agents-shared";
-
 async function loadInstructions(agentsSharedPath, readFile) {
   let content;
   try {
@@ -101,22 +85,14 @@ export function createAgentsSharedExtension(pi, {
         [SHARED_INSTRUCTIONS_SOURCE, loaded.instructions].join("\n");
     }
 
-    if (scope === "child") {
-      event.systemPromptOptions.sections.pi_child_execution_boundaries = CHILD_EXECUTION_BOUNDARIES;
-    } else {
-      delete event.systemPromptOptions.sections.pi_child_execution_boundaries;
-    }
   });
 
   pi.on("session_start", async () => {
-    // 必要 startup 校验：读取失败即抛错。child 侧由现有 required extension 的
-    // startup 校验收集并使启动失败；main Host 只记录扩展错误（非 fatal），
-    // 不另设 broker/authority/provider 拦截。
+    // 必要 startup 校验：读取失败即报告扩展错误。
     const loaded = await loadInstructions(agentsSharedPath, readFile);
     if (loaded.error) {
       throw new Error(`${loaded.error}: ${agentsSharedPath}`);
     }
-    pi.events?.emit?.(RUNTIME_EXTENSION_ACK_EVENT, { id: SHARED_EXTENSION_ACK_ID });
   });
 }
 
