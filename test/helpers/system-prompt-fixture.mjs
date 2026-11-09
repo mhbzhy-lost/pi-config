@@ -57,16 +57,12 @@ let cachedTypeScript;
 /**
  * 解析提供经典 AST API（`createSourceFile` / `SyntaxKind` / `forEachChild`）的 TypeScript。
  *
- * 根 devDependency `typescript@7.0.2` 是原生端口，公开入口不暴露 JS 解析器
- * （`typescript/unstable/*` 需要原生二进制句柄），因此优先解析工作区已安装的
- * `packages/pi-subagents-enhanced` 运行时依赖 `typescript@5.9.3`（`npm ls typescript`
- * 可见，属仓库既有依赖树，无需 npm install）。两者都不可用时 fail closed，
+ * 根 devDependency 提供经典 AST API。不可用时 fail closed，
  * 不降级为 regex-only 扫描（那会静默削弱策略）。
  */
 export function resolveClassicTypeScript() {
   if (cachedTypeScript) return cachedTypeScript;
   const candidates = [
-    join(repositoryRoot, "packages", "pi-subagents-enhanced", "package.json"),
     join(repositoryRoot, "package.json"),
   ];
   const attempted = [];

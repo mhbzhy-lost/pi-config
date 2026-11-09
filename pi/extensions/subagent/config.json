@@ -1,0 +1,10 @@
+{
+  "autoResume": false,
+  "fleetView": false,
+  "asyncWidget": false,
+  "programStatus": false,
+  "enableSlashCommands": false,
+  "scheduledRuns": { "enabled": false },
+  "missions": { "enabled": false },
+  "artifactConfig": { "cleanupDays": 0 }
+}

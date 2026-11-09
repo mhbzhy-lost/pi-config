@@ -158,7 +158,10 @@ function schedulerNeedsNormalization(settings: JsonObject): boolean {
 
 function mergeSettings(existing: JsonObject, declared: JsonObject): JsonObject {
   const result: JsonObject = { ...existing };
-  if (Array.isArray(declared.packages)) result.packages = mergePackages(existing.packages, declared.packages);
+  const packages = Array.isArray(existing.packages)
+    ? existing.packages.filter((entry) => sourceOf(entry) !== "../packages/pi-subagents-enhanced")
+    : existing.packages;
+  if (Array.isArray(declared.packages)) result.packages = mergePackages(packages, declared.packages);
   for (const field of SELECTOR_FIELDS) {
     if (!Array.isArray(declared[field])) continue;
     if (field === "defaultTools" && declared[field].some((entry) => !isSelector(entry))) {
@@ -167,13 +170,8 @@ function mergeSettings(existing: JsonObject, declared: JsonObject): JsonObject {
       result[field] = mergeSelectorList(existing[field], declared[field]);
     }
   }
-  if (isRecord(declared.subagents)) result.subagents = mergeObjects(existing.subagents ?? {}, declared.subagents);
   if (existing.hideThinkingBlock === undefined && declared.hideThinkingBlock !== undefined) {
     result.hideThinkingBlock = declared.hideThinkingBlock;
-  }
-  // Goal 能力总开关：settings 未设置时才从模板补默认值，绝不覆盖用户已写入的值。
-  if (existing.goalEngine === undefined && isRecord(declared.goalEngine)) {
-    result.goalEngine = clone(declared.goalEngine);
   }
   return result;
 }
@@ -205,8 +203,7 @@ function missingFields(actual: JsonObject, template: JsonObject): string[] {
     if (template[field] !== undefined && actual[field] === undefined) missing.push(field);
     if (actual[field] !== undefined && typeof actual[field] !== "boolean") missing.push(field);
   }
-  if (isRecord(template.subagents) && JSON.stringify(mergeObjects(actual.subagents ?? {}, template.subagents)) !== JSON.stringify(actual.subagents ?? {})) missing.push("subagents");
-  if (isRecord(template.goalEngine) && actual.goalEngine === undefined) missing.push("goalEngine");
+  if (hasPackageSource(actual, "../packages/pi-subagents-enhanced")) missing.push("retired subagent package");
   const declaredScheduler = Array.isArray(template.packages)
     && template.packages.some((entry) => sourceOf(entry) === TASK_SCHEDULER_SOURCE);
   if (declaredScheduler) {

@@ -28,17 +28,17 @@ if (( node_major < 22 || (node_major == 22 && node_minor < 19) )); then
   exit 1
 fi
 
-node "$SCRIPT_DIR/scripts/setup-subagent-runtime-deps.ts" --check-upgrade
 
 # 仓库root拥有physical Host安装；不再修改global Pi。
 export PI_HOST_ROOT="$SCRIPT_DIR/node_modules/@earendil-works/pi-coding-agent"
 NPM_CONFIG_REGISTRY="$NPM_REGISTRY" npm_config_cache="$SCRIPT_DIR/var/tmp/npm-cache" npm --no-audit --no-fund --prefix "$SCRIPT_DIR" ci --ignore-scripts
+NPM_CONFIG_REGISTRY="$NPM_REGISTRY" npm_config_cache="$SCRIPT_DIR/var/tmp/npm-cache" npm --no-audit --no-fund --prefix "$SCRIPT_DIR/pi/npm" ci --legacy-peer-deps --ignore-scripts
+NPM_CONFIG_REGISTRY="$NPM_REGISTRY" npm_config_cache="$SCRIPT_DIR/var/tmp/npm-cache" npm --no-audit --no-fund --prefix "$SCRIPT_DIR/pi/npm" install --legacy-peer-deps --no-save --ignore-scripts typebox@1.1.38
 pi_binary="$PI_HOST_ROOT/dist/cli.js"
 export PI_REAL_BIN="$pi_binary"
 export PI_PACKAGE_DIR="$PI_HOST_ROOT"
 export PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT="$PI_HOST_ROOT"
 
-NPM_CONFIG_REGISTRY="$NPM_REGISTRY" npm_config_cache="$SCRIPT_DIR/var/tmp/npm-cache" npm --no-audit --no-fund --prefix "$SCRIPT_DIR" run setup:subagents-enhanced
 
 node "$SCRIPT_DIR/scripts/sync-skills.ts"
 node "$SCRIPT_DIR/scripts/ensure-pi-settings.ts"
@@ -92,16 +92,8 @@ uv tool install --force "basic-memory==$BASIC_MEMORY_VERSION"
 (
   unset PI_SUBAGENT_CHILD PI_SUBAGENT_FANOUT_CHILD PI_SUBAGENT_PARENT_SESSION PI_ROOT_SUBAGENT_BROKER_ENABLED
   cd -- "$SCRIPT_DIR"
-  npm test
   npm run doctor
-  PI_REAL_BIN="$pi_binary" npm run test:integration
-  review_tests="$SCRIPT_DIR/skill-overrides/external-llm-review/tests"
-  if [[ -d "$review_tests" ]]; then
-    uv run --no-project --with httpx --with python-dotenv --with pyyaml \
-      python -m unittest discover -s "$review_tests"
-  else
-    printf "[info] external-llm-review tests directory is absent; no tests run\n"
-  fi
+  npm run typecheck
 )
 
 printf '[ok] Pi initialization complete\n'

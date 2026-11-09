@@ -56,7 +56,6 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
 
     await mkdir(join(fixtureRepo, "scripts"), { recursive: true });
     await mkdir(join(fixtureRepo, "pi"), { recursive: true });
-    await mkdir(join(fixtureRepo, "packages", "pi-subagents-enhanced"), { recursive: true });
     await mkdir(join(fixtureRepo, "src", "pi-settings"), { recursive: true });
     await mkdir(join(home, ".local", "share", "opencode"), { recursive: true });
     await mkdir(fakeBin, { recursive: true });
@@ -78,7 +77,7 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     const fakeNpm = join(fakeBin, "npm");
     await writeFile(
       fakeNpm,
-      "#!/usr/bin/env bash\nprintf 'npm registry=%s %s markers=%s,%s,%s,%s\\n' \"${NPM_CONFIG_REGISTRY:-}\" \"$*\" \"${PI_SUBAGENT_CHILD:-}\" \"${PI_SUBAGENT_FANOUT_CHILD:-}\" \"${PI_SUBAGENT_PARENT_SESSION:-}\" \"${PI_ROOT_SUBAGENT_BROKER_ENABLED:-}\" >> \"$COMMAND_LOG\"\nif [[ \"$*\" == *\"run setup:subagents-enhanced\"* ]]; then mkdir -p \"$FIXTURE_REPO/packages/pi-subagents-enhanced/node_modules/pi-subagents\"; printf '{\\\"version\\\":\\\"0.79.2\\\"}' > \"$FIXTURE_REPO/packages/pi-subagents-enhanced/node_modules/pi-subagents/package.json\"; fi\n",
+      "#!/usr/bin/env bash\nprintf 'npm registry=%s %s markers=%s,%s,%s,%s\\n' \"${NPM_CONFIG_REGISTRY:-}\" \"$*\" \"${PI_SUBAGENT_CHILD:-}\" \"${PI_SUBAGENT_FANOUT_CHILD:-}\" \"${PI_SUBAGENT_PARENT_SESSION:-}\" \"${PI_ROOT_SUBAGENT_BROKER_ENABLED:-}\" >> \"$COMMAND_LOG\"\n",
     );
     await chmod(fakeNpm, 0o755);
     for (const [command, executable] of [["chmod", "/bin/chmod"], ["mkdir", "/bin/mkdir"], ["dirname", "/usr/bin/dirname"]]) {
@@ -89,7 +88,7 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     const fakeNode = join(fakeBin, "node");
     await writeFile(
       fakeNode,
-      "#!/usr/bin/env bash\nif [[ \"$1\" == */scripts/setup-subagent-runtime-deps.ts && \"$2\" == \"--check-upgrade\" ]]; then printf 'node check-subagent-upgrade\\n' >> \"$COMMAND_LOG\"; exit 0; fi\nif [[ \"$1\" == */scripts/sync-skills.ts ]]; then printf 'node sync-skills markers=%s,%s,%s,%s\\n' \"${PI_SUBAGENT_CHILD:-}\" \"${PI_SUBAGENT_FANOUT_CHILD:-}\" \"${PI_SUBAGENT_PARENT_SESSION:-}\" \"${PI_ROOT_SUBAGENT_BROKER_ENABLED:-}\" >> \"$COMMAND_LOG\"; exit 0; fi\nprintf 'node %s\\n' \"$*\" >> \"$COMMAND_LOG\"\nexec \"$REAL_NODE\" \"$@\"\n",
+      "#!/usr/bin/env bash\nif [[ \"$1\" == */scripts/sync-skills.ts ]]; then printf 'node sync-skills markers=%s,%s,%s,%s\\n' \"${PI_SUBAGENT_CHILD:-}\" \"${PI_SUBAGENT_FANOUT_CHILD:-}\" \"${PI_SUBAGENT_PARENT_SESSION:-}\" \"${PI_ROOT_SUBAGENT_BROKER_ENABLED:-}\" >> \"$COMMAND_LOG\"; exit 0; fi\nprintf 'node %s\\n' \"$*\" >> \"$COMMAND_LOG\"\nexec \"$REAL_NODE\" \"$@\"\n",
     );
     await chmod(fakeNode, 0o755);
     await writeFile(
@@ -142,16 +141,13 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     assert.doesNotMatch(commands, /install -g/);
 
     assert.doesNotMatch(commands, /pi-real registry=.*install npm:pi-subagents/);
-    assert.match(commands, /node check-subagent-upgrade/);
-    assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org --no-audit --no-fund --prefix .* run setup:subagents-enhanced markers=,,,/);
-    assert.ok(commands.indexOf("node check-subagent-upgrade") < commands.indexOf("run setup:subagents-enhanced"), "live-upgrade preflight must run before package setup mutates the package");
+    assert.doesNotMatch(commands, /setup:subagents-enhanced/);
     assert.doesNotMatch(commands, /rpiv-todo/);
     assert.match(commands, /node sync-skills markers=,,,/);
     assert.match(commands, /node .*ensure-pi-settings\.ts/);
-    assert.ok(commands.indexOf("ensure-pi-settings.ts") < commands.indexOf("npm registry= test"), "settings must be ensured before npm test");
-    assert.match(commands, /npm registry= test markers=,,,/);
+    assert.ok(commands.indexOf("ensure-pi-settings.ts") < commands.indexOf("npm registry= run doctor"));
     assert.match(commands, /npm registry= run doctor markers=,,,/);
-    assert.match(commands, /npm registry= run test:integration markers=,,,/);
+    assert.match(commands, /npm registry= run typecheck markers=,,,/);
     assert.match(commands, /uv tool install --force basic-memory==0\.22\.1 markers=,,,/);
   } finally {
     await rm(root, { recursive: true, force: true });

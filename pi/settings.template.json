@@ -2,9 +2,6 @@
   "hideThinkingBlock": true,
   "packages": [
     {
-      "source": "../packages/pi-subagents-enhanced"
-    },
-    {
       "source": "npm:@amaster.ai/pi-task-scheduler@0.1.9",
       "extensions": [],
       "skills": [],
@@ -12,14 +9,6 @@
       "themes": []
     }
   ],
-  "subagents": {
-    "disableBuiltins": true,
-    "agentOverrides": {
-      "delegate": {
-        "disabled": false
-      }
-    }
-  },
   "defaultTools": [
     "+codemode",
     "-tool_search",
@@ -35,10 +24,5 @@
     "-builtin:llama.cpp",
     "-builtin:codemode",
     "-builtin:mcp"
-  ],
-  "goalEngine": {
-    "enabled": false,
-    "maxConcurrentTasks": 2,
-    "maxNoProgressTurns": 3
-  }
+  ]
 }

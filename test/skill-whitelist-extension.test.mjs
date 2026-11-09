@@ -12,15 +12,12 @@ import test from "node:test";
 // 经原生公开 API（DefaultPackageManager/SettingsManager）验证声明根与排除规则。
 
 const repoRoot = resolve(import.meta.dirname, "..");
-// 生产源扫描面：root feature 入口/实现、CLI、enhanced package 源与入口。
+// 生产源扫描面：root feature 入口/实现与 CLI。
 // scripts/lib/ 的历史 .mjs 不在生产约定内，不纳入扫描（当前 grep 亦无 resources_discover）。
 const productionScanRoots = [
   "src",
   "pi/extensions",
   "scripts",
-  "packages/pi-subagents-enhanced/src",
-  "packages/pi-subagents-enhanced/extensions",
-  "packages/pi-subagents-enhanced/child-extensions",
 ];
 
 async function collectProductionTsFiles(rootDir, out) {

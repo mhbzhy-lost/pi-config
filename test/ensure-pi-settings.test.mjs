@@ -8,10 +8,8 @@ import { ensureSettings } from "../scripts/ensure-pi-settings.ts";
 const template = {
   hideThinkingBlock: true,
   packages: [
-    { source: "../packages/pi-subagents-enhanced" },
     { source: "npm:@amaster.ai/pi-task-scheduler@0.1.9", extensions: [], skills: [], prompts: [], themes: [] },
   ],
-  subagents: { disableBuiltins: true, agentOverrides: { delegate: { disabled: false } } },
 };
 
 async function fixture(existing) {
@@ -54,9 +52,8 @@ test("merges shared fields while preserving local settings", async () => {
     assert.deepEqual(result.packages, [
       existing.packages[0],
       { source: "npm:@amaster.ai/pi-task-scheduler@0.1.9", extensions: [], skills: [], prompts: [], themes: [] },
-      template.packages[0],
     ]);
-    assert.deepEqual(result.subagents, { agentOverrides: { delegate: { disabled: false, localOnly: true } }, localField: 7, disableBuiltins: true });
+    assert.deepEqual(result.subagents, existing.subagents);
     assert.equal(result.hideThinkingBlock, false);
     assert.deepEqual(result.enabledModels, existing.enabledModels);
     assert.equal(result.defaultProvider, "local");

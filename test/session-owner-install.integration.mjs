@@ -85,7 +85,6 @@ async function makeFixture() {
   await Promise.all([mkdir(repo, { recursive: true }), mkdir(home, { recursive: true }), mkdir(zsh, { recursive: true }), mkdir(bin, { recursive: true })]);
   await Promise.all([
     cp(join(repoRoot, "init-pi.sh"), join(repo, "init-pi.sh")),
-    cp(join(repoRoot,"packages/pi-subagents-enhanced/src/host-runtime"),join(repo,"packages/pi-subagents-enhanced/src/host-runtime"),{recursive:true}),
     cp(join(repoRoot, "scripts"), join(repo, "scripts"), { recursive: true }),
     cp(join(repoRoot, "src"), join(repo, "src"), { recursive: true }),
     cp(join(repoRoot, "pi", "extensions"), join(repo, "pi", "extensions"), { recursive: true }),
@@ -114,7 +113,7 @@ exec /bin/zsh "$@"
   }
   await writeFile(join(bin, "node"), `#!/usr/bin/env bash
 printf 'node %s\\n' "$*" >> "$COMMAND_LOG"
-if [[ "$1" == */scripts/setup-subagent-runtime-deps.ts || "$1" == */scripts/sync-skills.ts ]]; then exit 0; fi
+if [[ "$1" == */scripts/sync-skills.ts ]]; then exit 0; fi
 exec "$REAL_NODE" "$@"
 `);
   await chmod(join(bin, "node"), 0o755);
@@ -254,7 +253,7 @@ test("fresh init installs an idempotent owner-wrapper shell entrypoint", async (
       assert.equal(result.status, 0, result.stderr);
     }
     await verifyInstalled(state);
-    assert.match(await readFile(state.commandLog, "utf8"), /npm (?:--no-audit --no-fund )?--prefix .* run setup:subagents-enhanced/);
+    assert.match(await readFile(state.commandLog, "utf8"), /npm .*--prefix .*pi\/npm ci --legacy-peer-deps/);
     assert.doesNotMatch(await readFile(join(state.repo, "init-pi.sh"), "utf8"), /var\/upstream\/pi/);
   } finally {
     await rm(state.root, { recursive: true, force: true });

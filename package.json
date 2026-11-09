@@ -7,32 +7,22 @@
   },
   "scripts": {
     "test": "node --test \"test/**/*.test.mjs\"",
-    "typecheck": "npm run typecheck:root && npm run typecheck:subagents-enhanced",
+    "typecheck": "npm run typecheck:root",
     "typecheck:root": "tsc --noEmit -p tsconfig.json",
-    "typecheck:subagents-enhanced": "npm --prefix packages/pi-subagents-enhanced run typecheck",
     "test:all-integration": "node scripts/run-integration-gate.ts",
     "test:integration": "node --test test/pi-runtime.integration.mjs",
-    "test:subagents": "node --test test/pi-subagents-runtime.integration.mjs",
-    "test:subagents-enhanced": "npm --prefix packages/pi-subagents-enhanced test",
-    "test:subagent-workspace": "node --test test/managed-workspace-contract.test.mjs test/managed-workspace-ledger.integration.mjs test/managed-workspace-service.integration.mjs test/subagent-managed-worktree.integration.mjs",
-    "test:delegation-workspace-harness": "node --test test/subagent-generic-prompt-contract.test.mjs test/subagent-generic-prompt-contract-security.test.mjs test/subagent-execution-contract.test.mjs test/subagent-dispatch-shared-execution.integration.mjs test/managed-workspace-contract.test.mjs test/managed-workspace-ledger.integration.mjs test/managed-workspace-service.integration.mjs test/managed-workspace-v1-replay.test.mjs test/managed-workspace-terminal-proof.test.mjs test/managed-workspace-action-token.concurrent.mjs test/subagent-managed-worktree.integration.mjs test/subagent-delegation-workspace.e2e.mjs test/runtime-side-effects.integration.mjs",
-    "setup:subagent-runtime": "node scripts/setup-subagent-runtime-deps.ts",
-    "setup:subagents-enhanced": "node scripts/setup-subagent-runtime-deps.ts",
-    "verify:subagents-enhanced": "npm --prefix packages/pi-subagents-enhanced run verify:package",
-    "doctor": "node scripts/doctor.ts",
-    "worktree": "node scripts/worktree-lifecycle.ts",
-    "worktree:audit": "node scripts/worktree-lifecycle.ts audit"
+    "doctor": "node scripts/doctor.ts"
   },
   "devDependencies": {
     "@types/node": "26.4.1",
-    "typescript": "7.0.2"
+    "typescript": "5.9.3"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "1.5.0",
     "@earendil-works/pi-ai": "1.5.0",
     "@earendil-works/pi-coding-agent": "1.5.0",
     "@earendil-works/pi-tui": "1.5.0",
-    "pi-subagents-enhanced": "file:./packages/pi-subagents-enhanced",
+    "pi-subagents": "0.84.0",
     "typebox": "1.3.27"
   }
 }

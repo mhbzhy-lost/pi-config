@@ -10,8 +10,8 @@ import { resolvePiCodingAgentRoot } from "./pi-runtime.mjs";
  * The keys stay published specifiers, so the `@earendil-works/pi-ai/compat`
  * public subpath contract is preserved. The values are the resolved entry of
  * the candidate package, which forces every jiti consumer onto the same
- * module instance the Host loads. Without that, a package that ships its own
- * `node_modules` copy (for example `packages/pi-subagents-enhanced`) resolves
+ * module instance the Host loads. Without that, a package with its own
+ * `node_modules` copy can resolve
  * a second instance and `instanceof` checks against Host classes fail.
  */
 const PI_HOST_PACKAGE_SPECIFIERS = [

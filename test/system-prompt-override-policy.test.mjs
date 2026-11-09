@@ -29,11 +29,9 @@ import {
   REPO_ROOT,
   SHARED_BLOCK_OPEN,
   SHARED_CHILD_BLOCK_OPEN,
-  classifyProfileSystemPromptMode,
   classifySystemPromptMarkdownName,
   createCanaryOptions,
   createExtensionRecorder,
-  inspectAgentProfiles,
   installAgentsGlobal,
   installAgentsShared,
   probeSystemPromptMarkdown,
@@ -49,14 +47,10 @@ import {
 
 /**
  * 显式枚举的自有生产扫描根（不做 glob 泛化）。
- * `packages/pi-subagents-enhanced/child-extensions` 单列，child 入口不得漏扫。
  */
 const SCAN_ROOTS = [
   "src",
   "pi/extensions",
-  "packages/pi-subagents-enhanced/src",
-  "packages/pi-subagents-enhanced/extensions",
-  "packages/pi-subagents-enhanced/child-extensions",
   "scripts",
 ];
 
@@ -67,12 +61,8 @@ const REQUIRED_SCANNED_FILES = [
   "src/session-owner/contract.ts",
   "pi/extensions/agents-global.ts",
   "pi/extensions/agents-shared.ts",
-  "packages/pi-subagents-enhanced/src/compat/pi-subagents-0.75.ts",
-  "packages/pi-subagents-enhanced/src/subagent-dispatch/extension.ts",
-  "packages/pi-subagents-enhanced/extensions/subagent-runtime.ts",
-  "packages/pi-subagents-enhanced/child-extensions/root-session-owner.ts",
-  "packages/pi-subagents-enhanced/child-extensions/acceptance-evidence.ts",
-  "packages/pi-subagents-enhanced/child-extensions/integration-queue.ts",
+  "src/subagent/index.ts",
+  "pi/extensions/subagent.ts",
   "scripts/assert-session-tool-policy.ts",
 ];
 
@@ -80,7 +70,6 @@ const REQUIRED_SCANNED_FILES = [
 const REQUIRED_TEXT_PROBED_FILES = [
   "scripts/pi-launcher.zsh",
   "scripts/pi-shell.zsh",
-  "pi/extensions/subagent/config.json",
 ];
 
 /** 自有生产 before_agent_start 不再允许完整替换；新增 site 一律默认拒绝。 */
@@ -104,27 +93,23 @@ const REQUIRED_PRESERVATION_TESTS = [
  */
 const DATA_DTO_SITES = [
   {
-    path: "packages/pi-subagents-enhanced/src/compat/pi-subagents-0.75.ts",
-    enclosing: "function parseFrontmatter",
-    shape: "id(body)",
+    path: "src/subagent/index.ts",
+    enclosing: "function createMinimalSubagentExtension",
+    shape: "str",
     reason:
-      "BuiltinAdmissionAgent 数据 DTO：`systemPrompt: body` 是 profile 正文的结构化投影，交给上游 admission/runtime 决定 append 还是 replace；本仓 profile 一律 systemPromptMode: append（见 policy#profile-frontmatter-requires-explicit-append），此处不写 SDK options、不构成替换入口。",
+      "RuntimeAgentDefinition 数据 DTO：systemPrompt 是 pi-subagents agent 定义的一部分，交给上游 child executor 解释，不写 Pi before_agent_start systemPromptOptions，也不构成主会话替换入口。",
   },
 ];
 
-/** 仓库自有 profile 名册：新增/改名 profile 必须显式更新本清单并重新接受策略审查。 */
-const PROFILE_ROSTER = ["delegate.md", "executor.md", "reviewer.md"];
-
 /** 期望的 site 计数：静态事实一旦漂移（新增替换入口、DTO、读访问）测试即红，逼迫显式复核。 */
 const EXPECTED_SITE_COUNTS = Object.freeze({
-  "data-dto": 1,
-  "type-declaration": 2,
   "flag-classifier-literal": 2,
   // append-flag-literal 三处：src/session-owner/contract.ts 与 scripts/assert-session-tool-policy.ts
   // 中的 flag 名分类集合成员；scripts/probes/goal-smoke.ts 冒烟 launcher 向 pi spawn argv
   // 传入 --append-system-prompt 注入获授权冒烟提示（合法 append，非完整替换入口）。
   // 第三处由 b5730308「feat(goal): 增加计划执行与多仓库支持」新增，已复核为合法 append 用法。
-  "append-flag-literal": 3,
+  "append-flag-literal": 2,
+  "data-dto": 1,
 });
 
 const GLOBAL_FIXTURE = "# PI AGENTS GLOBAL 正文\n- 全局规则一\n- 全局规则二";
@@ -264,11 +249,11 @@ preservationTest("behavior#shared-append-preserves-base-and-canary", async () =>
   assert.equal(run.errors.length, 0);
   assert.equal(run.systemPromptOptions.forceSystemPrompt, undefined);
   assert.equal(run.systemPromptOptions.sections.pi_shared_instructions, `来源：PI_CODING_AGENT_DIR/AGENTS_SHARED.md\n${SHARED_FIXTURE}`);
-  assert.equal(run.systemPromptOptions.sections.pi_child_execution_boundaries, undefined, "main 撤回自己的 child section");
+  assert.equal(run.systemPromptOptions.sections.pi_child_execution_boundaries, "上一轮 child 边界", "保留其他 owner 的 section");
   assert.equal(run.final.split(SHARED_BLOCK_OPEN).length - 1, 1, "SDK 只包一层 SHARED XML");
   assert.ok(run.final.includes(SHARED_BLOCK_OPEN), "SHARED 自有块必须存在");
   assert.ok(run.final.includes(SHARED_FIXTURE), "SHARED 正文必须注入");
-  assert.ok(!run.final.includes(SHARED_CHILD_BLOCK_OPEN), "main scope 不得注入 child 边界块");
+  assert.ok(run.final.includes(SHARED_CHILD_BLOCK_OPEN), "保留传入的 section");
   assertCanaryRetained(run.final, "SHARED main 追加");
 });
 
@@ -278,22 +263,16 @@ preservationTest("behavior#shared-child-append-preserves-base-and-adds-boundarie
   assert.equal(run.errors.length, 0);
   assert.equal(run.systemPromptOptions.forceSystemPrompt, undefined);
   assert.equal(run.systemPromptOptions.sections.pi_shared_instructions, `来源：PI_CODING_AGENT_DIR/AGENTS_SHARED.md\n${SHARED_FIXTURE}`);
-  assert.deepEqual(run.systemPromptOptions.sections.pi_child_execution_boundaries.split("\n"), [
-    "来源：runtime",
-    "- 不得新增委派（不得派生新的 subagent），不得接管或重排主计划 DAG；只推进当前任务范围。",
-    '- 关键前提矛盾、将超出 writePaths、acceptance criteria 客观不可能，或权限/产品决策阻塞时：停止相关操作，经 contact_supervisor（reason: "need_decision"）上报并等待决定；不得自行推断安全开关或新增 fallback。',
-    "- 工单/申请流程未经用户确认不得提交；需要时经主管代询。",
-  ], "child 边界正文逐字保持，不新增权限");
+  assert.equal(run.systemPromptOptions.sections.pi_child_execution_boundaries, undefined);
   assert.equal(run.systemPromptOptions.sections.pi_global_instructions, undefined, "SHARED child 不得发布 GLOBAL");
-  assert.equal(run.final.split(SHARED_CHILD_BLOCK_OPEN).length - 1, 1, "SDK 只包一层 child XML");
   assert.ok(run.final.startsWith(run.base), "SHARED child scope 追加后 base 必须逐字保留为前缀");
   assert.ok(run.final.includes(SHARED_BLOCK_OPEN), "child 仍必须收到同一份共享块");
-  assert.ok(run.final.includes(SHARED_CHILD_BLOCK_OPEN), "child scope 必须追加运行时边界块");
+  assert.ok(!run.final.includes(SHARED_CHILD_BLOCK_OPEN));
   assertCanaryRetained(run.final, "SHARED child 追加");
   assert.equal(shared.emittedEvents.length, 0, "before_agent_start 阶段不得发 ACK（ACK 属 session_start）");
   await run.runner.emit({ type: "session_start" });
   assert.equal(run.errors.length, 0);
-  assert.deepEqual(shared.emittedEvents, [{ name: "subagent:acknowledge-extension", payload: { id: "agents-shared" } }], "child startup 成功后保留 required ACK");
+  assert.deepEqual(shared.emittedEvents, []);
 });
 
 preservationTest("behavior#global-then-shared-order-preserves-canary", async () => {
@@ -318,25 +297,7 @@ preservationTest("behavior#shared-then-global-order-preserves-canary", async () 
   assert.equal(run.systemPromptOptions.forceSystemPrompt, undefined);
   assert.ok(run.final.startsWith(run.base), "SHARED→GLOBAL 顺序下 base 仍必须逐字保留");
   assertCanaryRetained(run.final, "SHARED→GLOBAL");
-  assert.ok(run.final.includes(SHARED_CHILD_BLOCK_OPEN), "child 边界块不得被后加载的 GLOBAL 吞掉");
-});
-
-behaviorTest("behavior#profile-append-addendum-preserves-canary", async () => {
-  const profiles = await inspectAgentProfiles({ expectedRoster: PROFILE_ROSTER });
-  for (const profile of profiles) {
-    assert.equal(classifyProfileSystemPromptMode(profile.frontmatter), "append", `${profile.path} 必须显式 append`);
-    // 真实 SDK 的 append 语义：appendSystemPrompt → 独立 <addendum> section，
-    // preamble/tools/rules/docs 全部保留。
-    const run = await runBeforeAgentStart({
-      extensions: [],
-      options: createCanaryOptions({ appendSystemPrompt: profile.body }),
-    });
-    assert.equal(run.errors.length, 0);
-    assert.equal(run.systemPromptOptions.forceSystemPrompt, undefined, `${profile.path} append 不得进入 force 分支`);
-    assert.match(run.base, /<addendum>/, `${profile.path} 角色正文必须作为 addendum section 出现`);
-    assert.ok(run.base.includes(profile.body.slice(0, 40)), `${profile.path} 正文必须逐字进入 addendum`);
-    assertCanaryRetained(run.base, `${profile.path} append`);
-  }
+  assert.ok(run.final.includes(SHARED_BLOCK_OPEN));
 });
 
 /* --- 负 fixture：证明替换语义真的会丢 guidelines，也证明检测语义成立 ----------- */
@@ -425,7 +386,7 @@ behaviorTest("behavior#negative-real-handlers-unreadable-file-never-fabricate-re
   const sharedChild = installAgentsShared({ instructions: " \n\t", scope: "child" });
   const childRun = await runBeforeAgentStart({ extensions: [sharedChild.extension] });
   assert.ok(childRun.final.startsWith(childRun.base), "child 边界块仍必须是追加而不是替换");
-  assert.ok(childRun.final.includes(SHARED_CHILD_BLOCK_OPEN), "child 边界块与 AGENTS_SHARED 可读性无关");
+  assert.ok(!childRun.final.includes(SHARED_CHILD_BLOCK_OPEN));
   assert.ok(!childRun.final.includes(SHARED_BLOCK_OPEN), "共享文件不可读时不得注入空的共享块");
   assertCanaryRetained(childRun.final, "child 边界块追加");
   const childInput = await runInput({ extensions: [sharedChild.extension] });
@@ -460,7 +421,7 @@ behaviorTest("behavior#input-gate-loads-snapshot-through-real-runner", async () 
   await run.runner.emit({ type: "session_start" });
   assert.equal(run.errors.length, 0);
   assert.deepEqual(global.emittedEvents, [], "GLOBAL 不发 child required ACK");
-  assert.deepEqual(shared.emittedEvents, [{ name: "subagent:acknowledge-extension", payload: { id: "agents-shared" } }], "SHARED startup 读取成功且 handler 安装后 ACK");
+  assert.deepEqual(shared.emittedEvents, []);
 });
 
 /* -------------------------------------------------------------------------- */
@@ -525,26 +486,6 @@ test("policy#customPrompt-and-forceSystemPrompt-absent-from-production", () => {
   assert.equal(report.sites.filter((site) => site.kind === "handler-return-replacement").length, 0);
   assert.equal(REPLACEMENT_WHITELIST.length, 0);
   assert.equal(report.sites.filter((site) => site.kind === "data-dto").length, DATA_DTO_SITES.length);
-});
-
-test("policy#profile-frontmatter-requires-explicit-append", async () => {
-  const profiles = await inspectAgentProfiles({ expectedRoster: PROFILE_ROSTER });
-  assert.deepEqual(profiles.map((profile) => profile.name), PROFILE_ROSTER, "profile 名册漂移必须显式复核");
-  for (const profile of profiles) {
-    assert.equal(
-      classifyProfileSystemPromptMode(profile.frontmatter),
-      "append",
-      `${profile.path} 必须显式声明 systemPromptMode: append；缺失也拒绝（上游 child-launch 多数路径默认 replace）`,
-    );
-    assert.ok(profile.body.length > 0, `${profile.path} 正文不得为空（append 追加的是角色正文）`);
-  }
-  // 分类器自证：replace / 缺失 / 空串 / 其它取值都必须被判为不合法。
-  assert.equal(classifyProfileSystemPromptMode({ systemPromptMode: "append" }), "append");
-  assert.equal(classifyProfileSystemPromptMode({ systemPromptMode: "replace" }), "other");
-  assert.equal(classifyProfileSystemPromptMode({ systemPromptMode: "inherit" }), "other");
-  assert.equal(classifyProfileSystemPromptMode({ systemPromptMode: "" }), "missing");
-  assert.equal(classifyProfileSystemPromptMode({}), "missing");
-  assert.equal(classifyProfileSystemPromptMode(undefined), "missing");
 });
 
 test("policy#no-system-md-in-own-scope-and-append-system-md-is-legal", () => {

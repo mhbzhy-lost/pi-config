@@ -16,29 +16,19 @@ const piRoot = resolvePiCodingAgentRoot();
 const piPackage = join(piRoot, "dist", "index.js");
 const piTypes = join(piRoot, "dist", "core", "extensions", "types.d.ts");
 
-test("configured enhanced local package registers one authoritative subagent tool owner", async () => {
+test("minimal extension registers only prefixed subagent RPC tools", async () => {
   const markers = ["PI_SUBAGENT_CHILD", "PI_SUBAGENT_FANOUT_CHILD", "PI_SUBAGENT_PARENT_SESSION", "PI_ROOT_SUBAGENT_BROKER_ENABLED", "PI_CODING_WORKSPACE_DIR"];
   const previousMarkers = new Map(markers.map((name) => [name, process.env[name]]));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-  // The Host must start inside an isolated Git common-dir: the repository
-  // under test carries a live coordinator whose recorded state root is not
-  // this fixture's temporary workspace dir, so reusing it fails closed.
-  const { root, repository } = await createIsolatedHostRepository("pi-runtime-enhanced-");
+  const { root, repository } = await createIsolatedHostRepository("pi-runtime-minimal-");
   const agentDir = join(root, "agent");
   let session;
   try {
-    await mkdir(join(agentDir, "agents"), { recursive: true });
     await mkdir(join(agentDir, "extensions"), { recursive: true });
-    await symlink(join(repoRoot, "pi/extensions/agents-shared.ts"), join(agentDir, "extensions/agents-shared.ts"));
-    for (const name of ["delegate", "executor", "reviewer"]) {
-      await writeFile(join(agentDir, "agents", `${name}.md`), await readFile(join(repoRoot, "pi", "agents", `${name}.md`)));
-    }
     for (const name of markers) delete process.env[name];
     process.env.PI_CODING_AGENT_DIR = agentDir;
     process.env.PI_CODING_WORKSPACE_DIR = join(agentDir, "workspaces");
-    await writeFile(join(agentDir, "settings.json"), JSON.stringify({
-      packages: [{ source: join(repoRoot, "packages", "pi-subagents-enhanced") }],
-    }));
+    await writeFile(join(agentDir, "settings.json"), JSON.stringify({ extensions: [join(repoRoot, "pi/extensions/subagent.ts")] }));
     const host = await import(pathToFileURL(piPackage).href);
     const resourceLoader = new host.DefaultResourceLoader({
       cwd: repository,
@@ -62,30 +52,14 @@ test("configured enhanced local package registers one authoritative subagent too
     await session.bindExtensions({ mode: "rpc", shutdownHandler() {}, onError(error) { errors.push(error); } });
 
     const extensions = resourceLoader.getExtensions().extensions;
-    const enhanced = extensions.filter((extension) => String(extension.path).includes("/packages/pi-subagents-enhanced/extensions/"));
-    const legacy = extensions.filter((extension) => /\/pi\/extensions\/(?:subagent-runtime|custom-footer)\.ts$/.test(String(extension.path)));
-    const operationNames = ["subagent_start", "subagent_run_status", "subagent_run_steer",
-      "subagent_run_interrupt", "subagent_run_resume", "subagent_run_stop", "managed_workspace_list",
-      "managed_workspace_status", "managed_workspace_dispose", "managed_workspace_release",
-      "supervisor_request_pending", "supervisor_request_status", "supervisor_request_reply"].sort();
-    const toolNames = session.getAllTools().map((tool) => tool.name).filter((name) => operationNames.includes(name)).sort();
-    const runtime = enhanced.find((extension) => String(extension.path).endsWith("/subagent-runtime.ts"));
+    const toolNames = session.getAllTools().map((tool) => tool.name)
+      .filter((name) => /^(?:subagent|managed_workspace|supervisor_request)/.test(name)).sort();
     assert.deepEqual(errors, []);
-    assert.equal(enhanced.length, 2);
-    assert.equal(legacy.length, 0);
-    assert.deepEqual(toolNames, operationNames);
+    assert.equal(extensions.length, 1);
+    assert.deepEqual(toolNames, ["subagent_resume", "subagent_spawn", "subagent_status", "subagent_steer", "subagent_stop"]);
     assert.equal(session.getAllTools().some((tool) => tool.name === "subagent_roster"), false);
     assert.equal(session.getActiveToolNames().includes("subagent_roster"), false);
     assert.equal(session.getCallableToolNames().includes("subagent_roster"), false);
-    assert.deepEqual(runtime?.sourceInfo, {
-      path: join(repoRoot, "packages", "pi-subagents-enhanced", "extensions", "subagent-runtime.ts"),
-      source: join(repoRoot, "packages", "pi-subagents-enhanced"),
-      scope: "user",
-      origin: "package",
-      baseDir: join(repoRoot, "packages", "pi-subagents-enhanced"),
-    });
-    assert.equal(enhanced.filter((extension) => extension.messageRenderers.has("subagent-notify")).length, 1);
-    assert.equal(enhanced.filter((extension) => extension.messageRenderers.has("subagent_supervisor_request")).length, 1);
   } finally {
     try {
       if (session) {

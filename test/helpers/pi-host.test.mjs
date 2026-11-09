@@ -21,7 +21,6 @@ const PUBLIC_SPECIFIERS = [
 ];
 
 const repoRoot = resolve(import.meta.dirname, "..", "..");
-const sessionViewportPath = join(repoRoot, "packages", "pi-subagents-enhanced", "src", "tui", "session-viewport.ts");
 /** A real installed Pi package root inside the repository, used as an explicit candidate. */
 const explicitCandidateRoot = join(repoRoot, "node_modules", "@earendil-works", "pi-coding-agent");
 
@@ -153,8 +152,6 @@ async function assertSingleCustomEditorIdentity(candidateRoot) {
   const runtime = await loadPiTestRuntime(import.meta.url, {
     env: { PI_TEST_CODING_AGENT_ROOT: candidateRoot },
   });
-  const viewport = await runtime.jiti.import(sessionViewportPath);
-  const editor = new viewport.ReadOnlyBrowserEditor({ requestRender() {} }, { borderColor: (text) => text, selectList: {} }, {});
   const jitiCodingAgent = await runtime.jiti.import("@earendil-works/pi-coding-agent");
 
   assert.equal(runtime.root, candidateRoot);
@@ -163,12 +160,6 @@ async function assertSingleCustomEditorIdentity(candidateRoot) {
     runtime.codingAgent.CustomEditor,
     "jiti public specifier import must reuse the runtime module instance",
   );
-  assert.equal(
-    Object.getPrototypeOf(Object.getPrototypeOf(editor)),
-    runtime.codingAgent.CustomEditor.prototype,
-    "editor prototype must come from the runtime CustomEditor",
-  );
-  assert.equal(editor instanceof runtime.codingAgent.CustomEditor, true);
   const jitiPiTui = await runtime.jiti.import("@earendil-works/pi-tui");
   assert.equal(jitiPiTui.visibleWidth, runtime.piTui.visibleWidth, "pi-tui must load as a single instance");
   return runtime;

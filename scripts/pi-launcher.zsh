@@ -14,7 +14,6 @@ export PI_HOST_ROOT="${PI_HOST_ROOT:-$root/node_modules/@earendil-works/pi-codin
 real_bin=$("$node_bin" "$root/scripts/resolve-physical-pi.ts") || exit 1
 export PI_REAL_BIN="$real_bin"
 export PI_PACKAGE_DIR="${PI_HOST_ROOT:A}"
-export PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT="$PI_PACKAGE_DIR"
 
 decision_dir=$(mktemp -d "${TMPDIR:-/tmp}/pi-session-owner.XXXXXXXX") || exit 1
 chmod 700 "$decision_dir" || { rmdir "$decision_dir"; exit 1; }
