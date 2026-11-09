@@ -10,7 +10,7 @@ function rowText(snapshot: ActivitySnapshot): string {
   const active = snapshot.rows.filter((row) => row.placement === "main");
   const recent = snapshot.rows.filter((row) => row.placement === "recent");
   const rows = [...active, ...recent].slice(0, 3);
-  const text = rows.map((row) => `${row.label} · ${row.stateLabel}`).join(" | ");
+  const text = rows.map((row) => `${row.key === snapshot.selectedKey ? "›" : " "} ${row.label} · ${row.stateLabel}`).join("  ");
   return snapshot.rows.length > rows.length ? `${text} | +${snapshot.rows.length - rows.length}` : text;
 }
 
@@ -48,6 +48,7 @@ export function createFooterComponent(options: FooterComponentOptions): Componen
       const lines = [
         `${fit(left, Math.max(0, width - options.visibleWidth(right) - gap), options.truncateToWidth)}${" ".repeat(gap)}${fit(right, width, options.truncateToWidth)}`,
         fit(rowText(options.getSnapshot()), width, options.truncateToWidth),
+        fit(`thinking: ${thinking}`, width, options.truncateToWidth),
       ];
       return lines.map((line) => options.theme.fg("dim", line));
     },

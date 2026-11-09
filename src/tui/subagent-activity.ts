@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { ActivityRow, ActivitySnapshot, ActivitySource, DetailComponent, DetailRequest } from "./background-activity.ts";
 
 const RPC_REQUEST = "subagents:rpc:v1:request";
@@ -100,7 +101,7 @@ function textDetail(lines: () => string[], request: DetailRequest): DetailCompon
   return {
     render(width) {
       const safeWidth = Math.max(0, width);
-      return lines().map((line) => line.length > safeWidth ? line.slice(0, safeWidth) : line);
+      return lines().map((line) => truncateToWidth(line, safeWidth, "…"));
     },
     invalidate() { request.requestRender(); },
   };
@@ -110,13 +111,21 @@ export function createSubagentActivitySource(pi: ExtensionAPI): ActivitySource {
   let active = false;
   let snapshot: ActivitySnapshot = { availability: "unavailable", rows: [] };
   let asyncSnapshot: AsyncSnapshot = { runs: [] };
+  let selectedKey: string | undefined;
   let refreshInFlight: Promise<void> | undefined;
   const listeners = new Set<() => void>();
+  const detailRefreshers = new Set<() => void>();
   const unsubscribers: Array<() => void> = [];
 
   const notify = () => {
     for (const listener of [...listeners]) {
       try { listener(); } catch { /* TUI invalidation is isolated */ }
+    }
+  };
+
+  const notifyDetails = () => {
+    for (const refreshDetail of [...detailRefreshers]) {
+      try { refreshDetail(); } catch { /* detail refresh is best effort */ }
     }
   };
 
@@ -130,11 +139,25 @@ export function createSubagentActivitySource(pi: ExtensionAPI): ActivitySource {
         return;
       }
       asyncSnapshot = reply.data.asyncSnapshot;
-      snapshot = { availability: "available", rows: flattenRows(asyncSnapshot.runs ?? []), observedAt: new Date().toISOString() };
+      const rows = flattenRows(asyncSnapshot.runs ?? []);
+      if (!rows.some((row) => row.key === selectedKey)) selectedKey = rows[0]?.key;
+      snapshot = {
+        availability: "available",
+        rows,
+        ...(selectedKey ? { selectedKey } : {}),
+        observedAt: new Date().toISOString(),
+      };
     }).catch(() => {
-      if (active) snapshot = { availability: "stale", rows: snapshot.rows, observedAt: new Date().toISOString(), errorLabel: "状态读取失败" };
+      if (active) snapshot = {
+        availability: "stale",
+        rows: snapshot.rows,
+        ...(selectedKey ? { selectedKey } : {}),
+        observedAt: new Date().toISOString(),
+        errorLabel: "状态读取失败",
+      };
     }).finally(() => {
       refreshInFlight = undefined;
+      notifyDetails();
       notify();
     });
     return refreshInFlight;
@@ -147,6 +170,7 @@ export function createSubagentActivitySource(pi: ExtensionAPI): ActivitySource {
   const stop = () => {
     active = false;
     asyncSnapshot = { runs: [] };
+    selectedKey = undefined;
     snapshot = { availability: "unavailable", rows: [] };
     notify();
   };
@@ -177,10 +201,51 @@ export function createSubagentActivitySource(pi: ExtensionAPI): ActivitySource {
       const match = /^subagent:([^:]+):/.exec(key);
       if (!match) return undefined;
       const runId = match[1];
-      const result = await callRpc(pi, "status", { runId, view: "transcript", lines: 120 }).catch(() => undefined);
-      if (!result?.success) return undefined;
-      const lines = (result.data?.text ?? "状态详情不可用").split("\n");
-      return textDetail(() => lines, request);
+      let lines = ["正在读取 subagent 输出…"];
+      let disposed = false;
+      let refreshInFlight: Promise<void> | undefined;
+      const refreshDetail = async () => {
+        if (disposed || refreshInFlight) return refreshInFlight;
+        refreshInFlight = callRpc(pi, "status", { runId, view: "transcript", lines: 240 })
+          .then((result) => {
+            if (disposed) return;
+            lines = result.success
+              ? (result.data?.text ?? "尚无 subagent 输出").split("\n")
+              : ["状态详情不可用"];
+            request.requestRender();
+          })
+          .catch(() => {
+            if (!disposed) {
+              lines = ["状态详情读取失败，等待下一次刷新…"];
+              request.requestRender();
+            }
+          })
+          .finally(() => { refreshInFlight = undefined; });
+        return refreshInFlight;
+      };
+      const onSourceRefresh = () => { void refreshDetail(); };
+      detailRefreshers.add(onSourceRefresh);
+      await refreshDetail();
+      if (disposed) return undefined;
+      return {
+        render(width) {
+          return lines.map((line) => truncateToWidth(line, Math.max(0, width), "…"));
+        },
+        invalidate() {
+          void refreshDetail();
+          request.requestRender();
+        },
+        dispose() {
+          disposed = true;
+          detailRefreshers.delete(onSourceRefresh);
+        },
+      };
+    },
+    select(key) {
+      if (!snapshot.rows.some((row) => row.key === key)) return;
+      selectedKey = key;
+      snapshot = { ...snapshot, selectedKey };
+      notify();
     },
     dispose() {
       stop();
@@ -188,6 +253,7 @@ export function createSubagentActivitySource(pi: ExtensionAPI): ActivitySource {
         try { unsubscribe(); } catch { /* stale extension context */ }
       }
       listeners.clear();
+      detailRefreshers.clear();
     },
   };
 }

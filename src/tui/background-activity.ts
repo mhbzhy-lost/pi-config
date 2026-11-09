@@ -15,6 +15,7 @@ export type ActivityRow = Readonly<{
 export type ActivitySnapshot = Readonly<{
   availability: "available" | "stale" | "unavailable";
   rows: readonly ActivityRow[];
+  selectedKey?: string;
   observedAt?: string;
   errorLabel?: string;
 }>;
@@ -35,6 +36,7 @@ export interface ActivitySource {
   snapshot(): ActivitySnapshot;
   subscribe(listener: () => void): () => void;
   detail?(key: string, request: DetailRequest): Promise<DetailComponent | undefined>;
+  select?(key: string): void;
   dispose?(): void;
 }
 
@@ -90,6 +92,7 @@ export function subscribeActivitySources(pi: ExtensionAPI, listener: () => void)
 export function createActivityRegistry(sources: readonly ActivitySource[] = []): {
   setSources(next: readonly ActivitySource[]): void;
   snapshot(): ActivitySnapshot;
+  select(key: string): void;
   detail(key: string, request: DetailRequest): Promise<DetailComponent | undefined>;
   subscribe(listener: () => void): () => void;
   dispose(): void;
@@ -134,9 +137,20 @@ export function createActivityRegistry(sources: readonly ActivitySource[] = []):
           ? "unavailable"
           : stale || unavailable.length > 0 ? "stale" : "available",
         rows: snapshots.flatMap((snapshot) => snapshot.rows),
+        ...(snapshots.find((snapshot) => snapshot.selectedKey !== undefined)?.selectedKey
+          ? { selectedKey: snapshots.find((snapshot) => snapshot.selectedKey !== undefined)?.selectedKey }
+          : {}),
         ...(stale?.observedAt ? { observedAt: stale.observedAt } : {}),
         ...(unavailable[0]?.errorLabel ? { errorLabel: unavailable[0].errorLabel } : {}),
       };
+    },
+    select(key) {
+      for (const source of current) {
+        if (!source.snapshot().rows.some((row) => row.key === key)) continue;
+        source.select?.(key);
+        notifyLocal();
+        return;
+      }
     },
     async detail(key, request) {
       for (const source of current) {
