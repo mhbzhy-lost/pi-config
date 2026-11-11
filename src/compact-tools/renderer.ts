@@ -79,12 +79,13 @@ function resultRenderer({ Text, Container, truncateToWidth, summary, maxLines = 
     const text = textOutput(result);
     const failed = context?.isError === true || result?.isError === true;
     const resultSummary = failed ? "失败" : summary(text);
+    if (failed && context?.state) delete context.state[COMPACT_SUMMARY_KEY];
     if (options.expanded) {
       if (text) return expandedBlock(text, theme, Text, Container, maxLines);
       return new Text(theme.fg("dim", `  └ ${resultSummary}`), 1, 0);
     }
-    if (context?.state) context.state[COMPACT_SUMMARY_KEY] = resultSummary;
     if (failed) return failedResult({ Text, truncateToWidth, text, theme });
+    if (context?.state) context.state[COMPACT_SUMMARY_KEY] = resultSummary;
     return new Text("", 0, 0);
   };
 }
