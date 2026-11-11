@@ -1,16 +1,19 @@
 import { randomUUID } from "node:crypto";
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import registerSubagents from "pi-subagents";
-import { registerAgent } from "pi-subagents/agents";
 
 const RPC_REQUEST = "subagents:rpc:v1:request";
 const RPC_REPLY = "subagents:rpc:v1:reply:";
-const AGENT_NAME = "minimal-generic";
+const AGENT_NAME = "executor";
 const MAX_TASK_BYTES = 32 * 1024;
 const MAX_MESSAGE_BYTES = 32 * 1024;
 const MAX_SKILLS = 32;
 const MAX_SKILL_NAME_BYTES = 256;
 const RPC_TIMEOUT_MS = 60_000;
+const AGENT_CATALOG_ALLOWLIST = new Set([AGENT_NAME]);
+const AGENT_CATALOG_ROOT = join(import.meta.dirname, "..", "..", "pi", "agents");
 
 type RpcReply = {
   version: number;
@@ -27,6 +30,60 @@ type RpcToolContext = {
 };
 
 type RpcToolBuildContext = RpcToolContext & { modelRef?: string };
+
+type AdvertisedAgent = {
+  name: string;
+  description: string;
+  tools?: string[];
+};
+
+function frontmatter(content: string): Map<string, string> {
+  const normalized = content.replace(/\r\n/g, "\n");
+  if (!normalized.startsWith("---\n")) return new Map();
+  const end = normalized.indexOf("\n---", 4);
+  if (end < 0) return new Map();
+  const fields = new Map<string, string>();
+  for (const line of normalized.slice(4, end).split("\n")) {
+    const match = /^(\w[\w-]*):\s*(.*)$/.exec(line);
+    if (!match) continue;
+    const value = match[2]?.trim();
+    if (value !== undefined) fields.set(match[1]!, value.replace(/^(['"])(.*)\1$/, "$2"));
+  }
+  return fields;
+}
+
+async function loadAdvertisedAgents(): Promise<readonly AdvertisedAgent[]> {
+  let names: string[];
+  try {
+    names = await readdir(AGENT_CATALOG_ROOT);
+  } catch {
+    return [];
+  }
+  const agents: AdvertisedAgent[] = [];
+  for (const name of names) {
+    if (!name.endsWith(".md")) continue;
+    const path = join(AGENT_CATALOG_ROOT, name);
+    let fields: Map<string, string>;
+    try { fields = frontmatter(await readFile(path, "utf8")); } catch { continue; }
+    const agentName = fields.get("name");
+    const description = fields.get("description");
+    if (fields.get("advertise") !== "true" || !agentName || !description || !AGENT_CATALOG_ALLOWLIST.has(agentName)) continue;
+    const tools = fields.get("tools")?.split(",").map((tool) => tool.trim()).filter(Boolean);
+    agents.push({ name: agentName, description, ...(tools?.length ? { tools } : {}) });
+  }
+  return agents.sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function formatAdvertisedAgents(agents: readonly AdvertisedAgent[]): string | undefined {
+  if (agents.length === 0) return undefined;
+  const lines = ["可用子代理（仅限本仓 RPC facade 暴露的 agent）："];
+  for (const agent of agents) {
+    lines.push(`- ${agent.name}：${agent.description}`);
+    lines.push(`  调用：subagent_spawn({ task, skills? })`);
+    if (agent.tools?.length) lines.push(`  工具：${agent.tools.join(", ")}`);
+  }
+  return lines.join("\n");
+}
 
 function callRpc(pi: ExtensionAPI, method: string, params: Record<string, unknown>): Promise<RpcReply> {
   const requestId = randomUUID();
@@ -122,21 +179,10 @@ export function createMinimalSubagentExtension(pi: ExtensionAPI): void {
   upstream.registerShortcut = () => {};
   registerSubagents(upstream);
 
-  registerAgent({
-    pi: upstream,
-    name: AGENT_NAME,
-    definition: {
-      description: "Read-only generic subagent",
-      systemPrompt: "Execute the assigned task using the available read-only tools. Return the result directly.",
-      systemPromptMode: "append",
-      model: "inherit",
-      tools: ["read", "grep", "find", "ls"],
-      inheritProjectContext: false,
-      inheritGlobalContext: false,
-      inheritSkills: false,
-      extensions: [],
-      allowNestedSubagents: false,
-    },
+  pi.on("before_agent_start", async (event) => {
+    const catalog = formatAdvertisedAgents(await loadAdvertisedAgents());
+    if (catalog) event.systemPromptOptions.sections.advertised_subagents = catalog;
+    else delete event.systemPromptOptions.sections.advertised_subagents;
   });
 
   pi.registerTool(rpcTool(

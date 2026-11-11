@@ -1,6 +1,7 @@
 ---
 name: executor
 description: 按任务约束完成实现与验证的编码执行代理
+advertise: true
 models:
   - codex-pool/gpt-6.1-terra
 thinking: high

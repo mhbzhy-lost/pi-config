@@ -91,15 +91,7 @@ const REQUIRED_PRESERVATION_TESTS = [
  * 该 site 是 admission 数据对象：把 profile frontmatter body 投影给上游 runtime 的
  * agent 定义结构，不写 SDK `systemPromptOptions`、不是 before_agent_start handler 返回体。
  */
-const DATA_DTO_SITES = [
-  {
-    path: "src/subagent/index.ts",
-    enclosing: "function createMinimalSubagentExtension",
-    shape: "str",
-    reason:
-      "RuntimeAgentDefinition 数据 DTO：systemPrompt 是 pi-subagents agent 定义的一部分，交给上游 child executor 解释，不写 Pi before_agent_start systemPromptOptions，也不构成主会话替换入口。",
-  },
-];
+const DATA_DTO_SITES = [];
 
 /** 期望的 site 计数：静态事实一旦漂移（新增替换入口、DTO、读访问）测试即红，逼迫显式复核。 */
 const EXPECTED_SITE_COUNTS = Object.freeze({
@@ -109,7 +101,6 @@ const EXPECTED_SITE_COUNTS = Object.freeze({
   // 传入 --append-system-prompt 注入获授权冒烟提示（合法 append，非完整替换入口）。
   // 第三处由 b5730308「feat(goal): 增加计划执行与多仓库支持」新增，已复核为合法 append 用法。
   "append-flag-literal": 2,
-  "data-dto": 1,
 });
 
 const GLOBAL_FIXTURE = "# PI AGENTS GLOBAL 正文\n- 全局规则一\n- 全局规则二";
