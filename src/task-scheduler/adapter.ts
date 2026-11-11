@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import { chmodSync, lstatSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
-import upstreamDefaultExtension from "../../pi/npm/node_modules/@amaster.ai/pi-task-scheduler/dist/extension.js";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 
 const ALLOWED_TOOLS = new Set(["scheduler_list", "scheduler_get", "scheduler_create", "scheduler_delete"]);
@@ -26,6 +26,16 @@ const ROUTING_CONTEXT = [
 ].join("\n") + "\n";
 const TRUNCATED_MARKER = "[scheduled-task upstream] truncated\n";
 const diagnostics = [];
+let cachedUpstreamDefaultExtension;
+
+function loadUpstreamDefaultExtension() {
+  if (cachedUpstreamDefaultExtension) return cachedUpstreamDefaultExtension;
+  const agentDir = process.env.PI_CODING_AGENT_DIR ?? resolve(import.meta.dirname, "..", "..", "pi");
+  const require = createRequire(join(agentDir, "npm", "package.json"));
+  cachedUpstreamDefaultExtension = require("@amaster.ai/pi-task-scheduler/extension").default;
+  return cachedUpstreamDefaultExtension;
+}
+
 
 /** Public projection of the accepted P4 orphan-recovery result. */
 export type SchedulerRecoveryOutcome =
@@ -346,7 +356,15 @@ function wrapTool(definition, hooks: { captureOwner?: (toolCtx: any) => Schedule
 /** A deliberately small in-process membrane around the exact upstream extension.
  * 返回值是 scheduler 只读 observer（F4g R2 §7）：既有调用方忽略返回值仍然兼容；
  * F4b source 消费该 observer，世代 token 永不出现在公开面。 */
-export function registerTaskSchedulerAdapter(pi, { upstreamExtension = upstreamDefaultExtension, env = process.env, clock = globalThis, pollMs = FOOTER_POLL_MS } = {}): SchedulerActivityObserver {
+export function registerTaskSchedulerAdapter(pi, options = {}) {
+  const { upstreamExtension: injectedExtension, env = process.env, clock = globalThis, pollMs = FOOTER_POLL_MS } = options as {
+    upstreamExtension?: unknown;
+    env?: NodeJS.ProcessEnv;
+    clock?: typeof globalThis;
+    pollMs?: number;
+  };
+  let upstreamExtension = injectedExtension;
+  upstreamExtension ??= loadUpstreamDefaultExtension();
   if (!pi || typeof pi.registerTool !== "function") throw new Error("Pi registerTool is required");
   let sessionCwd;
   let sessionCtx;
@@ -531,7 +549,7 @@ export function registerTaskSchedulerAdapter(pi, { upstreamExtension = upstreamD
     if (!sessionCwd) throw new Error("scheduler data directory requested outside session_start");
     return repositoryDataDir(sessionCwd, env);
   } });
-  upstreamExtension(facade, injectedConfig);
+  (upstreamExtension as (facade: unknown, config: unknown) => void)(facade, injectedConfig);
   return observer;
 }
 export function getSchedulerAdapterDiagnostics() { return [...diagnostics]; }

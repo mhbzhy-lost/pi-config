@@ -88,7 +88,7 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     const fakeNode = join(fakeBin, "node");
     await writeFile(
       fakeNode,
-      "#!/usr/bin/env bash\nif [[ \"$1\" == */scripts/sync-skills.ts ]]; then printf 'node sync-skills markers=%s,%s,%s,%s\\n' \"${PI_SUBAGENT_CHILD:-}\" \"${PI_SUBAGENT_FANOUT_CHILD:-}\" \"${PI_SUBAGENT_PARENT_SESSION:-}\" \"${PI_ROOT_SUBAGENT_BROKER_ENABLED:-}\" >> \"$COMMAND_LOG\"; exit 0; fi\nprintf 'node %s\\n' \"$*\" >> \"$COMMAND_LOG\"\nexec \"$REAL_NODE\" \"$@\"\n",
+      "#!/usr/bin/env bash\nif [[ \"$1\" == */scripts/sync-skills.ts ]]; then printf 'node sync-skills markers=%s,%s,%s,%s\\n' \"${PI_SUBAGENT_CHILD:-}\" \"${PI_SUBAGENT_FANOUT_CHILD:-}\" \"${PI_SUBAGENT_PARENT_SESSION:-}\" \"${PI_ROOT_SUBAGENT_BROKER_ENABLED:-}\" >> \"$COMMAND_LOG\"; exit 0; fi\nprintf 'node %s\\n' \"$*\" >> \"$COMMAND_LOG\"\nif [[ \"$1\" == */node_modules/@earendil-works/pi-coding-agent/dist/cli.js ]]; then exit 0; fi\nexec \"$REAL_NODE\" \"$@\"\n",
     );
     await chmod(fakeNode, 0o755);
     await writeFile(

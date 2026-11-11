@@ -114,6 +114,7 @@ exec /bin/zsh "$@"
   await writeFile(join(bin, "node"), `#!/usr/bin/env bash
 printf 'node %s\\n' "$*" >> "$COMMAND_LOG"
 if [[ "$1" == */scripts/sync-skills.ts ]]; then exit 0; fi
+if [[ "$1" == */node_modules/@earendil-works/pi-coding-agent/dist/cli.js ]]; then exit 0; fi
 exec "$REAL_NODE" "$@"
 `);
   await chmod(join(bin, "node"), 0o755);
@@ -253,7 +254,7 @@ test("fresh init installs an idempotent owner-wrapper shell entrypoint", async (
       assert.equal(result.status, 0, result.stderr);
     }
     await verifyInstalled(state);
-    assert.match(await readFile(state.commandLog, "utf8"), /npm .*--prefix .*pi\/npm ci --legacy-peer-deps/);
+    assert.doesNotMatch(await readFile(state.commandLog, "utf8"), /--prefix .*pi\/npm/);
     assert.doesNotMatch(await readFile(join(state.repo, "init-pi.sh"), "utf8"), /var\/upstream\/pi/);
   } finally {
     await rm(state.root, { recursive: true, force: true });

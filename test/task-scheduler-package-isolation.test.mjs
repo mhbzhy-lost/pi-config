@@ -14,15 +14,10 @@ test("scheduler package is isolated and its exact dependencies install without l
     source: `npm:${scheduler}@0.1.9`, extensions: [], skills: [], prompts: [], themes: [],
   }, "scheduler package must be declared with every Pi resource explicitly disabled");
 
-  const runtimePackage = JSON.parse(await readFile(join(repoRoot, "pi/npm/package.json"), "utf8"));
-  assert.equal(runtimePackage.dependencies[scheduler], "0.1.9");
-  assert.equal(runtimePackage.dependencies["@amaster.ai/pi-shared"], "0.1.9");
-  assert.equal(runtimePackage.dependencies.croner, "10.0.1");
-  assert.equal(Object.hasOwn(runtimePackage.dependencies, "typebox"), false, "Doctor forbids pi/npm from owning the scheduler peer as a direct dependency");
-
   const init = await readFile(join(repoRoot, "init-pi.sh"), "utf8");
-  assert.match(init, /--prefix "\$SCRIPT_DIR\/pi\/npm" ci --legacy-peer-deps --ignore-scripts/);
-  assert.match(init, /--prefix "\$SCRIPT_DIR\/pi\/npm" install --legacy-peer-deps --no-save --ignore-scripts typebox@1\.1\.38/);
+  assert.match(init, /node "\$PI_REAL_BIN" install "\$source"/);
+  assert.match(init, /PI_CODING_AGENT_DIR="\$SCRIPT_DIR\/pi" NPM_CONFIG_REGISTRY="\$NPM_REGISTRY"/);
+  assert.doesNotMatch(init, /--prefix "\$SCRIPT_DIR\/pi\/npm"/);
   assert.doesNotMatch(init, /pi-task-scheduler.*(?:extension|dist\/index)/s, "init must not load upstream extension");
 
   const adapter = await readFile(join(repoRoot, "src/task-scheduler/adapter.ts"), "utf8");

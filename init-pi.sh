@@ -32,8 +32,6 @@ fi
 # 仓库root拥有physical Host安装；不再修改global Pi。
 export PI_HOST_ROOT="$SCRIPT_DIR/node_modules/@earendil-works/pi-coding-agent"
 NPM_CONFIG_REGISTRY="$NPM_REGISTRY" npm_config_cache="$SCRIPT_DIR/var/tmp/npm-cache" npm --no-audit --no-fund --prefix "$SCRIPT_DIR" ci --ignore-scripts
-NPM_CONFIG_REGISTRY="$NPM_REGISTRY" npm_config_cache="$SCRIPT_DIR/var/tmp/npm-cache" npm --no-audit --no-fund --prefix "$SCRIPT_DIR/pi/npm" ci --legacy-peer-deps --ignore-scripts
-NPM_CONFIG_REGISTRY="$NPM_REGISTRY" npm_config_cache="$SCRIPT_DIR/var/tmp/npm-cache" npm --no-audit --no-fund --prefix "$SCRIPT_DIR/pi/npm" install --legacy-peer-deps --no-save --ignore-scripts typebox@1.1.38
 pi_binary="$PI_HOST_ROOT/dist/cli.js"
 export PI_REAL_BIN="$pi_binary"
 export PI_PACKAGE_DIR="$PI_HOST_ROOT"
@@ -42,6 +40,21 @@ export PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT="$PI_HOST_ROOT"
 
 node "$SCRIPT_DIR/scripts/sync-skills.ts"
 node "$SCRIPT_DIR/scripts/ensure-pi-settings.ts"
+# Pi owns the managed npm tree; settings remain the only dependency declaration.
+# `update` skips pinned versions, so explicitly install configured npm sources.
+package_sources="$(node -e '
+  const fs = require("node:fs");
+  const settings = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  for (const entry of settings.packages ?? []) {
+    const source = typeof entry === "string" ? entry : entry.source;
+    if (source?.startsWith("npm:")) console.log(source);
+  }
+' "$SCRIPT_DIR/pi/settings.json")"
+while IFS= read -r source; do
+  [[ -n "$source" ]] || continue
+  PI_CODING_AGENT_DIR="$SCRIPT_DIR/pi" NPM_CONFIG_REGISTRY="$NPM_REGISTRY" \
+    node "$PI_REAL_BIN" install "$source"
+done <<< "$package_sources"
 
 chmod +x "$PI_LAUNCHER"
 

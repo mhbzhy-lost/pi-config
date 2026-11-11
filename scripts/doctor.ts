@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { access, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { checkSettings } from "../src/pi-settings/index.ts";
 
@@ -22,8 +22,6 @@ try {
   const settings = JSON.parse(await readFile(join(root, "pi/settings.json"), "utf8"));
   issues.push(...await checkSettings({ settings, target: join(root, "pi/settings.json") }));
 } catch (error) { issues.push(`settings: ${String(error)}`); }
-try { await access(join(root, "pi/npm/node_modules/typebox/package.json")); }
-catch { issues.push("scheduler TypeBox dependency is missing"); }
 if (issues.length) {
   for (const issue of issues) console.error(`[error] ${issue}`);
   process.exitCode = 1;
