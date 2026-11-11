@@ -225,7 +225,7 @@ test("rejects invalid declared cwd before executing bash", async () => {
 test("bash-cwd preserves native renderers and resolves settings only from execution context", async () => {
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "bash-cwd-renderer-"));
   try {
-    const extensionSource = await readFile(new URL("../pi/extensions/bash-cwd.ts", import.meta.url), "utf8");
+    const extensionSource = await readFile(new URL("../src/bash-cwd/entry.ts", import.meta.url), "utf8");
     const mockPath = join(temporaryDirectory, "pi-mock.mjs");
     const extensionPath = join(temporaryDirectory, "bash-cwd.ts");
     const bashCwdExtensionUrl = pathToFileURL(new URL("../src/bash-cwd/index.ts", import.meta.url).pathname).href;
@@ -260,8 +260,8 @@ export function createBashToolDefinition(cwd, options = {}) {
 `);
     const source = extensionSource
       .replace("@earendil-works/pi-coding-agent", pathToFileURL(mockPath).href)
-      .replace("../../src/bash-cwd/index.ts", bashCwdExtensionUrl)
-      .replace("../../src/bash-async/index.ts", bashAsyncUrl);
+      .replace("./index.ts", bashCwdExtensionUrl)
+      .replace("../bash-async/index.ts", bashAsyncUrl);
     await writeFile(extensionPath, source);
 
     const { default: bashCwd } = await jiti.import(extensionPath);
@@ -320,7 +320,7 @@ export function createBashToolDefinition(cwd, options = {}) {
 });
 
 test("bash-cwd leaves compact display binding to the renderer-only owner", async () => {
-  const extensionSource = await readFile(new URL("../pi/extensions/bash-cwd.ts", import.meta.url), "utf8");
+  const extensionSource = await readFile(new URL("../src/bash-cwd/entry.ts", import.meta.url), "utf8");
 
   // renderShell/renderCall/renderResult/compact-tools 仍不得进入执行 owner；
   // pi-tui 仅作为已授权 completion MessageRenderer 的依赖注入能力放行，不承担工具渲染。

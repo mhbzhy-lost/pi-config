@@ -2,9 +2,9 @@ import { createBashToolDefinition, SettingsManager, type ExtensionAPI } from "@e
 import { fileURLToPath } from "node:url";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 
-const PI_BIN_DIR = fileURLToPath(new URL("../bin", import.meta.url));
-import { createBashCwdExtension } from "../../src/bash-cwd/index.ts";
-import { createBashAsyncCompleteRenderer, createBashAsyncExtension } from "../../src/bash-async/index.ts";
+const PI_BIN_DIR = fileURLToPath(new URL("../../pi/bin", import.meta.url));
+import { createBashCwdExtension } from "./index.ts";
+import { createBashAsyncCompleteRenderer, createBashAsyncExtension } from "../bash-async/index.ts";
 
 function getBashOptions(ctx?: { cwd: string; isProjectTrusted?: () => boolean }) {
   if (!ctx) return {};

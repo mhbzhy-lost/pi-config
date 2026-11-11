@@ -80,6 +80,6 @@ test("does not switch model when no model in context", async () => {
 });
 
 test("extension entry file loads without error", async () => {
-  const mod = await import("../pi/extensions/provider-fallback.ts");
+  const mod = await import("../src/provider-fallback/entry.ts");
   assert.equal(typeof mod.default, "function");
 });

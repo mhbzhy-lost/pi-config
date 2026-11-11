@@ -16,7 +16,6 @@ const repoRoot = resolve(import.meta.dirname, "..");
 // scripts/lib/ 的历史 .mjs 不在生产约定内，不纳入扫描（当前 grep 亦无 resources_discover）。
 const productionScanRoots = [
   "src",
-  "pi/extensions",
   "scripts",
 ];
 

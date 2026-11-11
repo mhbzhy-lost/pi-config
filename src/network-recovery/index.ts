@@ -1,4 +1,4 @@
-// 断网兜底 feature 的公开入口：Host 入口（pi/extensions/network-recovery.ts）与其他
+// 断网兜底 feature 的公开入口：Host 入口（entry.ts）与其他
 // feature 只能经本文件消费能力，不得深引 extension/probe/settings 内部实现。
 
 export {

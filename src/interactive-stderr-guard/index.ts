@@ -4,7 +4,7 @@ import { join } from "node:path";
 import {
   createRotatingStderrSink,
   installInteractiveStderrGuard,
-} from "./lib/interactive-stderr-guard.ts";
+} from "./guard.ts";
 
 interface GuardDependencies {
   resolveLogPath(): string;

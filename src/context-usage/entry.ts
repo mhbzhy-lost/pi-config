@@ -3,7 +3,7 @@ import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   createContextUsageToolResult,
   ContextUsageOutputSchema,
-} from "../../src/context-usage/snapshot.ts";
+} from "./snapshot.ts";
 
 export default function contextUsageExtension(pi: ExtensionAPI) {
   pi.registerTool(defineTool({

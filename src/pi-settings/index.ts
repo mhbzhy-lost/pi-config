@@ -78,11 +78,12 @@ function validateSharedScalars(existing: JsonObject, declared: JsonObject): void
   }
 }
 
-function mergeSelectorList(existing: unknown, declared: unknown): unknown {
+function mergeResourceList(existing: unknown, declared: unknown, includePaths = false): unknown {
   if (!Array.isArray(declared)) return existing;
   const current = Array.isArray(existing) ? [...existing] : [];
   const selectors = declared.filter(isSelector);
-  return [...current.filter((entry) => !selectors.includes(entry)), ...selectors.map(clone)];
+  const paths = includePaths ? declared.filter((entry) => !isSelector(entry) && !current.includes(entry)) : [];
+  return [...current.filter((entry) => !selectors.includes(entry)), ...paths.map(clone), ...selectors.map(clone)];
 }
 
 function mergeObjects(existing: unknown, declared: unknown): unknown {
@@ -128,7 +129,7 @@ function mergeSettings(existing: JsonObject, declared: JsonObject): JsonObject {
     if (field === "defaultTools" && declared[field].some((entry) => !isSelector(entry))) {
       result[field] = clone(declared[field]);
     } else {
-      result[field] = mergeSelectorList(existing[field], declared[field]);
+      result[field] = mergeResourceList(existing[field], declared[field], field === "extensions");
     }
   }
   if (existing.hideThinkingBlock === undefined && declared.hideThinkingBlock !== undefined) {
@@ -157,7 +158,7 @@ function missingFields(actual: JsonObject, template: JsonObject): string[] {
   for (const field of SELECTOR_FIELDS) {
     if (Array.isArray(template[field])) {
       const current = Array.isArray(actual[field]) ? actual[field] : [];
-      if (template[field].some((entry) => isSelector(entry) && !current.includes(entry))) missing.push(field);
+      if (template[field].some((entry) => (field === "extensions" || isSelector(entry)) && !current.includes(entry))) missing.push(field);
     }
   }
   for (const field of SHARED_SCALAR_FIELDS) {

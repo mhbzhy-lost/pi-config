@@ -1,13 +1,6 @@
 import { SkillInvocationMessageComponent, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, sliceByColumn, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { collapseCollapsedCallLines as collapseCallLines, createCompactToolRendererResolver, installCompactSkillRenderer } from "../../src/compact-tools/index.ts";
-
-export function collapseCollapsedCallLines(
-  lines: string[], width: number, status: string,
-  measureWidth = visibleWidth, truncate = truncateToWidth,
-): string[] {
-  return collapseCallLines(lines, width, status, measureWidth, truncate);
-}
+import { createCompactToolRendererResolver, installCompactSkillRenderer } from "./index.ts";
 
 export default function compactTools(pi: ExtensionAPI) {
   pi.registerToolRenderer(createCompactToolRendererResolver({ Text, Container, visibleWidth, sliceByColumn, truncateToWidth }));

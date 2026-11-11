@@ -5,7 +5,7 @@
 // 可靠 child 标记（runtime 在 child 进程模块初始化时置位，与 enhanced 主 entry 的
 // child guard 同一事实源），不用 cwd 或 prompt 内容自判。
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createNetworkRecoveryExtension } from "../../src/network-recovery/index.ts";
+import { createNetworkRecoveryExtension } from "./index.ts";
 
 export default function networkRecovery(pi: ExtensionAPI): void {
   const isChildProcess =

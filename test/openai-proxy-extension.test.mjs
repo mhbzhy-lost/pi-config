@@ -12,7 +12,7 @@ const {
   loadOpenAIApi,
   loadOpenAICodexApi,
   loadOpenAIProxyConfig,
-} = await jiti.import("../pi/extensions/openai-proxy.ts");
+} = await jiti.import("../src/openai-proxy/index.ts");
 
 test("OpenAI proxy default API loader uses the public openai-responses api factory", async () => {
   const api = await loadOpenAIApi();
@@ -164,7 +164,7 @@ test("OpenAI proxy routes only OpenAI auth hosts through the proxy fetch", async
 test("OpenAI proxy undici resolver works outside the Pi bundle process (node --test argv)", async () => {
   // 复现 process-fleet-removal 场景：测试进程 argv[1] 不是 pi bundle、repo root
   // 无本地 undici。resolver 必须仍能从 pi 包依赖树解析 undici。
-  const { hostPackageEntryForTest } = await jiti.import("../pi/extensions/openai-proxy.ts");
+  const { hostPackageEntryForTest } = await jiti.import("../src/openai-proxy/index.ts");
   assert.equal(typeof hostPackageEntryForTest, "function", "resolver 需可注入测试");
   const url = hostPackageEntryForTest("undici", { inferredRoot: process.cwd() });
   assert.match(url, /undici/);

@@ -8,6 +8,7 @@ import { ensureSettings } from "../scripts/ensure-pi-settings.ts";
 const template = {
   hideThinkingBlock: true,
   packages: [],
+  extensions: ["../src/compact-tools/entry.ts"],
 };
 
 async function fixture(existing) {
@@ -52,6 +53,7 @@ test("merges shared fields while preserving local settings", async () => {
       existing.packages[1],
     ]);
     assert.deepEqual(result.subagents, existing.subagents);
+    assert.deepEqual(result.extensions, template.extensions);
     assert.equal(result.hideThinkingBlock, false);
     assert.deepEqual(result.enabledModels, existing.enabledModels);
     assert.equal(result.defaultProvider, "local");
@@ -67,7 +69,9 @@ test("merges shared fields while preserving local settings", async () => {
 test("replaying ensure is idempotent", async () => {
   const paths = await fixture({ packages: [], subagents: {} });
   try {
+    await assert.rejects(ensureSettings({ target:paths.target, template:paths.templatePath, check: true }), /extensions/);
     await ensureSettings({ target:paths.target, template:paths.templatePath });
+    await ensureSettings({ target:paths.target, template:paths.templatePath, check: true });
     assert.equal(JSON.parse(await readFile(paths.target, "utf8")).hideThinkingBlock, true);
     const first = await readFile(paths.target, "utf8");
     await ensureSettings({ target:paths.target, template:paths.templatePath });

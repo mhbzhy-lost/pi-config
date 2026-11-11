@@ -9,14 +9,14 @@ import { loadPiTestRuntime } from "./helpers/pi-runtime.mjs";
 const { jiti } = await loadPiTestRuntime(import.meta.url);
 let guardModule = {};
 try {
-  guardModule = await jiti.import("../pi/extensions/lib/interactive-stderr-guard.ts");
+  guardModule = await jiti.import("../src/interactive-stderr-guard/guard.ts");
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   if (!message.includes("Cannot find module") && !message.includes("Failed to resolve import")) throw error;
 }
 let extensionModule = {};
 try {
-  extensionModule = await jiti.import("../pi/extensions/interactive-stderr-guard.ts");
+  extensionModule = await jiti.import("../src/interactive-stderr-guard/index.ts");
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   if (!message.includes("Cannot find module") && !message.includes("Failed to resolve import")) throw error;

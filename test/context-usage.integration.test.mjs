@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import contextUsageExtension from "../pi/extensions/context-usage.ts";
+import contextUsageExtension from "../src/context-usage/entry.ts";
 
 test("context usage extension 使用无参数 schema 且不依赖宿主脚本", () => {
   const registered = [];

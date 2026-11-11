@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { createBashAsyncCompleteRenderer, createBashAsyncController, createBashAsyncExtension } from '../src/bash-async/index.ts';
 import { createBashToolDefinition } from '@earendil-works/pi-coding-agent';
 import { Text, truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
-import bashCwdExtension from '../pi/extensions/bash-cwd.ts';
+import bashCwdExtension from '../src/bash-cwd/entry.ts';
 
 const deferred = () => Promise.withResolvers();
 const native = (exit = 0, output = 'fixture') => ({ content: [{ type: 'text', text: output }], details: { fixture: true }, structuredContent: { output, exit_code: exit, wall_time_seconds: 0.1 }, ...(exit ? { isError: true } : {}) });

@@ -50,7 +50,6 @@ import {
  */
 const SCAN_ROOTS = [
   "src",
-  "pi/extensions",
   "scripts",
 ];
 
@@ -59,10 +58,10 @@ const REQUIRED_SCANNED_FILES = [
   "src/agents-global/index.ts",
   "src/agents-shared/index.ts",
   "src/session-owner/contract.ts",
-  "pi/extensions/agents-global.ts",
-  "pi/extensions/agents-shared.ts",
+  "src/agents-global/entry.ts",
+  "src/agents-shared/entry.ts",
   "src/subagent/index.ts",
-  "pi/extensions/subagent.ts",
+  "src/subagent/entry.ts",
   "scripts/assert-session-tool-policy.ts",
 ];
 

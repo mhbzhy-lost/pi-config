@@ -230,7 +230,7 @@ async function verifyInstalled(state) {
   assert.match(zshrc, new RegExp(join(state.repo, "scripts", "pi-shell.zsh").replaceAll("/", "\\/")));
   assert.equal((await stat(join(state.repo, "scripts", "pi-launcher.zsh"))).mode & 0o111, 0o111);
   await stat(join(state.repo, "scripts", "pi-session-owner.ts"));
-  await stat(join(state.repo, "pi", "extensions", "session-owner.ts"));
+  await stat(join(state.repo, "src", "session-owner", "entry.ts"));
   const result = runFreshZsh(state);
   assertCompleted(result, "fresh zsh");
   assert.equal(result.status, 0, describeFailure(result));
@@ -242,7 +242,7 @@ async function verifyInstalled(state) {
   assert.equal(invocation.registry, state.registry);
   // 普通入口不再隐式传 --no-skills（scripts/pi-shell.zsh:11-12：使用 Pi 原生 Skill 发现，
   // 用户显式 --no-skills 才转发；只有 pi-lite 分支固定禁用）。
-  assert.deepEqual(invocation.argv, ["-e", join(await realpath(state.repo), "pi", "extensions", "session-owner.ts"), "--tui-mode", "fullscreen", "--no-extensions", "--", "fresh-install"]);
+  assert.deepEqual(invocation.argv, ["-e", join(await realpath(state.repo), "src", "session-owner", "entry.ts"), "--tui-mode", "fullscreen", "--no-extensions", "--", "fresh-install"]);
 }
 
 test("fresh init installs an idempotent owner-wrapper shell entrypoint", async () => {
@@ -294,7 +294,7 @@ test("fresh-install verifier rejects broken shell, launcher permission, and exte
       },
     },
     { mutate: async (state) => chmod(join(state.repo, "scripts", "pi-launcher.zsh"), 0o644) },
-    { mutate: async (state) => rm(join(state.repo, "pi", "extensions", "session-owner.ts")) },
+    { mutate: async (state) => rm(join(state.repo, "src", "session-owner", "entry.ts")) },
   ];
   for (const { mutate, verifyRejection } of mutations) {
     const state = await makeFixture();

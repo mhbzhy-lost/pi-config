@@ -17,6 +17,8 @@ source ~/.zshrc
 
 启动入口为 `pi`，`pi-inline` 使用 regular TUI，`pi-lite` 为不自动加载 extension 和 skill 的只读探索模式。
 
+扩展代码统一位于 `src/<feature>/`：`entry.ts` 只负责宿主接线，具体实现与它同目录；加载列表由 `pi/settings.template.json` 的 `extensions` 显式声明，已有安装运行 `node scripts/ensure-pi-settings.ts` 同步。本机额外扩展在 `pi/settings.json` 中显式声明；`pi/extensions/` 仅保留上游固定读取的 `subagent/config.json`，不再放扩展代码。
+
 ## 最小 Subagent
 
 当前暴露五个 `pi-subagents` RPC facade：`subagent_spawn({ task, skills? })`、`subagent_status({ runId })`、`subagent_steer({ runId, message })`、`subagent_stop({ runId })` 和 `subagent_resume({ runId, message })`。child 固定使用 `pi/agents/executor.md` profile；工具面、system prompt、skills、extensions 和 nested policy 均由该 Markdown 声明。启动时只将本仓 `pi/agents/` 中同时声明 `advertise: true` 且在 RPC allowlist 内的 profile 元数据注入主会话；`skills` 只选择本次显式指定的 skill 名称。
@@ -35,7 +37,7 @@ source ~/.zshrc
 
 ## Basic Memory
 
-`pi/extensions/basic-memory.ts` 提供本地记忆工具。诊断可使用：
+`src/basic-memory/entry.ts` 提供本地记忆工具。诊断可使用：
 
 ```bash
 basic-memory status --local --json

@@ -8,10 +8,10 @@ Pi config root is `pi/` (not `~/.pi`). Agent 规范入口：`pi/AGENTS_SHARED.md
 - Node 原生可执行的 production/CLI 代码统一使用 `.ts`；`scripts/*.ts`、`scripts/probes/*.ts` 和 package 内直接由 Node 调用的 `scripts/*.ts` 仍可通过 shebang/npm script 直接运行。`.mjs` 仅用于 `test/` 下的测试、fixture、测试辅助模块，以及第三方入口或尚未迁移的外部兼容文件；不得为新的 production/CLI 实现选择 `.mjs`。
 - 仓库和 package 的最低 Node 版本固定为 `>=22.19.0`，依赖其原生 TypeScript type-stripping 能力；type-stripping 不等于类型检查，新增或迁移 TypeScript 实现应由 `tsc --noEmit` 或等价静态检查覆盖。
 - `scripts/lib/` 是待迁移的历史目录，不是共享基础库。禁止在其中新增文件、扩大依赖或把新调用方接入其中；修改存量模块时，应优先将实现迁到所属 `src/<feature>/` 或 `packages/<name>/src/`，并在调用方清零后删除旧路径，不保留一行 re-export facade。
-- `pi/extensions/` 只放 Pi 自动发现入口及其入口级配置。入口负责 Host API 绑定、依赖注入和资源注册；可复用业务逻辑归属根 `src/<feature>/` 或对应 package，其他 feature 不得 import `pi/extensions/**` 作为实现库。
+- 本仓扩展统一放在 `src/<feature>/`，每个扩展以 `entry.ts` 负责 Host API 绑定、依赖注入和资源注册，由 `pi/settings.template.json` 显式声明加载。实现与入口同目录，不在 `pi/extensions/` 保留转发壳；该目录仅保留上游固定路径要求的配置文件。
 - 根 `src/<feature>/` 存放尚未独立发行的 feature-owned 实现；代码、状态机、codec 和 renderer 按领域归属，不建立根级 `lib/`、`common/`、`utils/` 通用收容目录。
 - `packages/<name>/extensions/` 只放该 package manifest 声明的主 Host 入口，`packages/<name>/child-extensions/` 只放显式注入 child 的入口，实际实现放在 `packages/<name>/src/`。主 Host 与 child 入口不得因复用方便混用发现边界。
-- 跨 feature 依赖只能通过对方明确的公开入口或 package `exports`；禁止深层引用其他 feature 的内部文件，也禁止从 `src/**` 或 `packages/**/src/**` 反向依赖 `scripts/**`、`pi/extensions/**` 等宿主入口。
+- 跨 feature 依赖只能通过对方明确的公开入口或 package `exports`；禁止深层引用其他 feature 的内部文件，不得把其他 feature 的 `entry.ts` 作为实现库，也禁止从 `src/**` 或 `packages/**/src/**` 反向依赖 `scripts/**` 等宿主入口。
 - 只有具备稳定领域边界、明确 owner 和独立发行/版本价值的能力才可抽为共享 package；不得仅为消除少量重复创建新的通用库。
 
 ## 外部工具接入规范

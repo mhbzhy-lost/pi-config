@@ -91,4 +91,4 @@ fi
 export PI_SESSION_OWNER_ID="$owner_id"
 export PI_SESSION_OWNER_REGISTRY="${PI_SESSION_OWNER_REGISTRY:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/pi-session-owner-${EUID}}"
 cleanup; trap - EXIT HUP INT TERM
-exec "$node_bin" "$real_bin" -e "$root/pi/extensions/session-owner.ts" "${args[@]}"
+exec "$node_bin" "$real_bin" -e "$root/src/session-owner/entry.ts" "${args[@]}"

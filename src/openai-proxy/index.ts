@@ -175,9 +175,3 @@ export async function createOpenAIProxyExtension(
     },
   });
 }
-
-export default async function openAIProxyExtension(pi: any) {
-  const configPath = join(import.meta.dirname, "..", "openai-proxy.json");
-  const config = loadOpenAIProxyConfig(configPath, { onError: (message) => console.warn(`[pi extension] ${message}`) });
-  await createOpenAIProxyExtension(pi, config);
-}

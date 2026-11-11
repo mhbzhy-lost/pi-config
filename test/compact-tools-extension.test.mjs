@@ -10,7 +10,7 @@ after(() => {
 });
 
 const { codingAgent, jiti } = await loadPiTestRuntime(import.meta.url);
-const compactToolsModule = await jiti.import("../pi/extensions/compact-tools.ts");
+const compactToolsModule = await jiti.import("../src/compact-tools/entry.ts");
 const compactTools = compactToolsModule.default;
 const names = ["read", "bash", "edit", "write", "find", "grep", "ls"];
 const factories = Object.fromEntries(names.map((name) => [

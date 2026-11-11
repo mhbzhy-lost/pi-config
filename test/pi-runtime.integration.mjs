@@ -28,7 +28,7 @@ test("minimal extension registers prefixed subagent RPC tools plus supervisor re
     for (const name of markers) delete process.env[name];
     process.env.PI_CODING_AGENT_DIR = agentDir;
     process.env.PI_CODING_WORKSPACE_DIR = join(agentDir, "workspaces");
-    await writeFile(join(agentDir, "settings.json"), JSON.stringify({ extensions: [join(repoRoot, "pi/extensions/subagent.ts")] }));
+    await writeFile(join(agentDir, "settings.json"), JSON.stringify({ extensions: [join(repoRoot, "src/subagent/entry.ts")] }));
     const host = await import(pathToFileURL(piPackage).href);
     const resourceLoader = new host.DefaultResourceLoader({
       cwd: repository,

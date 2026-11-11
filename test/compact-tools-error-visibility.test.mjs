@@ -6,7 +6,7 @@ import { createCompactToolRenderers, sampleArgs } from "../src/compact-tools/ren
 
 const { codingAgent: sdk, piTui: tui, jiti } = await loadPiTestRuntime(import.meta.url);
 sdk.initTheme("dark", false);
-const compactFactory = (await jiti.import("../pi/extensions/compact-tools.ts")).default;
+const compactFactory = (await jiti.import("../src/compact-tools/entry.ts")).default;
 const resolvers = [];
 const api = { registerToolRenderer(resolver) { resolvers.push(resolver); }, on() {} };
 // 仅绑定显示 resolver，不初始化 bash 执行 owner、设置存储或 Host session。
