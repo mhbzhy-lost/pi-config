@@ -1,4 +1,4 @@
-import { checkShellPolicy, checkSensitivePath } from "./shell-policy.ts";
+import { checkShellPolicy, checkSensitivePath, checkSynchronousBash } from "./shell-policy.ts";
 import { validateDeclaredBashCwd } from "../bash-cwd/index.ts";
 
 export function createSecurityGatesExtension(pi, {
@@ -19,6 +19,11 @@ export function createSecurityGatesExtension(pi, {
       } catch (error) {
         return { block: true, reason: error instanceof Error ? error.message : "声明的 bash cwd 无效，安全门禁已阻断" };
       }
+    }
+
+    if (event.toolName === "bash") {
+      const sleepViolation = checkSynchronousBash(event.input.command, cwd);
+      if (sleepViolation) return { block: true, reason: sleepViolation.reason };
     }
 
     const violation = shellPolicy({ command: event.input.command, cwd, workspaceRoot, env: process.env });

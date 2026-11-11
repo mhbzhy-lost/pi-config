@@ -89,6 +89,31 @@ function commandContext(command, cwd) {
   return commands;
 }
 
+function isSleepExecutable(value) {
+  return value === "sleep" || value?.endsWith("/sleep");
+}
+
+function containsSleepCommand(command, cwd) {
+  for (const { tokens } of commandContext(command, cwd)) {
+    if (isSleepExecutable(tokens[0])) return true;
+    const executable = tokens[0]?.split("/").pop();
+    if (!new Set(["sh", "bash", "zsh"]).has(executable)) continue;
+    for (let index = 1; index < tokens.length; index += 1) {
+      const token = tokens[index];
+      if ((token === "-c" || (token.startsWith("-") && !token.startsWith("--") && token.endsWith("c"))) && tokens[index + 1]) {
+        if (containsSleepCommand(tokens[index + 1], cwd)) return true;
+      }
+    }
+  }
+  return false;
+}
+
+export function checkSynchronousBash(command, cwd) {
+  return containsSleepCommand(command, cwd)
+    ? violation("SYNC_BASH_SLEEP", "同步 bash 禁止执行 sleep；需要一次性提醒时请使用 bash_async")
+    : undefined;
+}
+
 function hasExpansion(target) {
   return /[$*?\[\]{}~`]|\$\(|<\(|>\(/.test(target);
 }
