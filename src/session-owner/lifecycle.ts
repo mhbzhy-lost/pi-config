@@ -2,7 +2,7 @@ import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MAX_SESSION_HEADER_BYTES, canonicalizeCwd, normalizeSessionPath, readSessionHeaderBytes } from "./contract.ts";
+import { canonicalizeCwd, normalizeSessionPath, parseSessionHeaderBytes, readSessionHeaderBytes } from "./contract.ts";
 import type {
   CommitSwitchTargetInput,
   ProcessOwnerRecord,
@@ -69,8 +69,6 @@ type CommitRequest =
 type TargetResolution =
   | Readonly<{ kind: "resolved"; target: SwitchTarget }>
   | Readonly<{ kind: "unverifiable"; reason: string }>;
-// 返回字符串时它就是不可验证原因；返回对象时才是已验证的 header 身份。
-type HeaderLine = Readonly<{ id: string; cwd: string }> | string;
 
 function block(kind: SessionOwnerNoticeKind, reason: string, conflictingOwnerId?: string): SessionOwnerBlock {
   return conflictingOwnerId === undefined ? { kind, reason } : { kind, reason, conflictingOwnerId };
@@ -153,23 +151,6 @@ function resolveEventPath(raw: string, baseCwd: string): string | null {
   return isAbsolute(value) ? resolve(value) : resolve(baseCwd, value);
 }
 
-// 有界首行解析：预算 16KiB、首个 LF 截止、允许 EOF 无 LF 的完整短首行与 CRLF；
-// 达到上限仍无 LF 说明首行不完整，必须拒绝。绝不回退到全文件读取或 SessionManager.open 探测。
-function parseSessionHeaderLine(bytes: Buffer): HeaderLine {
-  const lineEnd = bytes.indexOf(10);
-  if (lineEnd < 0 && bytes.length >= MAX_SESSION_HEADER_BYTES) return "target-header-oversize";
-  const line = (lineEnd < 0 ? bytes : bytes.subarray(0, lineEnd)).toString("utf8").replace(/\r$/, "");
-  if (line === "") return bytes.length === 0 ? "target-empty" : "target-header-missing";
-  let header: unknown;
-  try { header = JSON.parse(line); } catch { return "target-header-invalid"; }
-  if (!header || typeof header !== "object") return "target-header-invalid";
-  const candidate = header as { type?: unknown; id?: unknown; cwd?: unknown };
-  if (candidate.type !== "session") return "target-header-type";
-  if (typeof candidate.id !== "string" || candidate.id === "" || candidate.id.includes("\0")) return "target-header-id";
-  if (typeof candidate.cwd !== "string" || candidate.cwd === "") return "target-header-cwd";
-  return { id: candidate.id, cwd: candidate.cwd };
-}
-
 // 目标身份只能由既存 regular file 的有界 header 证明；ENOENT 正是外部 import 在 before 时点的形状（blocked-upstream）。
 function resolveSwitchTarget(raw: unknown, readHeader: (path: string) => Buffer): TargetResolution {
   if (typeof raw !== "string" || raw === "" || raw.includes("\0")) return { kind: "unverifiable", reason: "missing-target" };
@@ -187,12 +168,12 @@ function resolveSwitchTarget(raw: unknown, readHeader: (path: string) => Buffer)
   if (!info.isFile()) return { kind: "unverifiable", reason: "target-not-a-file" };
   let bytes: Buffer;
   try { bytes = readHeader(sessionFile); } catch { return { kind: "unverifiable", reason: "target-header-unreadable" }; }
-  const header = parseSessionHeaderLine(bytes);
-  if (typeof header === "string") return { kind: "unverifiable", reason: header };
+  const parsed = parseSessionHeaderBytes(bytes);
+  if (parsed.kind !== "valid") return { kind: "unverifiable", reason: parsed.reason };
   // header cwd 允许不同于 source cwd（合法跨 cwd resume），但必须能 canonicalize 为既存目录。
   let cwd: string;
-  try { cwd = canonicalizeCwd(header.cwd); } catch { return { kind: "unverifiable", reason: "target-cwd-unknown" }; }
-  return { kind: "resolved", target: { cwd, sessionId: header.id, sessionFile } };
+  try { cwd = canonicalizeCwd(parsed.header.cwd); } catch { return { kind: "unverifiable", reason: "target-cwd-unknown" }; }
+  return { kind: "resolved", target: { cwd, sessionId: parsed.header.id, sessionFile } };
 }
 
 export function createSessionOwnerLifecycle(deps: SessionOwnerLifecycleDeps) {

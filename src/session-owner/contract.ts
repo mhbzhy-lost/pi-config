@@ -30,6 +30,29 @@ export type ResolveRecentSessionInput = Readonly<{
 
 export const MAX_SESSION_HEADER_BYTES = 16 * 1024;
 
+export type SessionHeader = Readonly<{ id: string; cwd: string }>;
+export type SessionHeaderParseResult =
+  | Readonly<{ kind: "valid"; header: SessionHeader }>
+  | Readonly<{ kind: "invalid"; reason: "target-header-oversize" | "target-empty" | "target-header-missing" | "target-header-invalid" | "target-header-type" | "target-header-id" | "target-header-cwd" }>;
+
+// 有界首行解析：预算 16KiB、首个 LF 截止，允许 CRLF 与 EOF 无 LF 的完整短首行；
+// 达到上限仍无 LF 时拒绝，不回退全文件读取或 SessionManager.open 探测。
+// 该 parser 同时服务 launcher 的 path/recent 解析和运行期 switch 目标验证，避免两套校验规则漂移。
+export function parseSessionHeaderBytes(bytes: Buffer): SessionHeaderParseResult {
+  const lineEnd = bytes.indexOf(10);
+  if (lineEnd < 0 && bytes.length >= MAX_SESSION_HEADER_BYTES) return { kind: "invalid", reason: "target-header-oversize" };
+  const line = (lineEnd < 0 ? bytes : bytes.subarray(0, lineEnd)).toString("utf8").replace(/\r$/, "");
+  if (line === "") return { kind: "invalid", reason: bytes.length === 0 ? "target-empty" : "target-header-missing" };
+  let header: unknown;
+  try { header = JSON.parse(line); } catch { return { kind: "invalid", reason: "target-header-invalid" }; }
+  if (!header || typeof header !== "object") return { kind: "invalid", reason: "target-header-invalid" };
+  const candidate = header as { type?: unknown; id?: unknown; cwd?: unknown };
+  if (candidate.type !== "session") return { kind: "invalid", reason: "target-header-type" };
+  if (typeof candidate.id !== "string" || candidate.id === "" || candidate.id.includes("\0")) return { kind: "invalid", reason: "target-header-id" };
+  if (typeof candidate.cwd !== "string" || candidate.cwd === "") return { kind: "invalid", reason: "target-header-cwd" };
+  return { kind: "valid", header: { id: candidate.id, cwd: candidate.cwd } };
+}
+
 export class LaunchIntentError extends Error {
   readonly code: "missing-value" | "conflicting-intents" | "unverifiable-cwd" | "unverifiable-path";
   constructor(code: "missing-value" | "conflicting-intents" | "unverifiable-cwd" | "unverifiable-path", message: string) { super(message); this.name = "LaunchIntentError"; this.code = code; }
@@ -116,13 +139,9 @@ function sessionHeader(path: string, cwd: string): ForkSource | null {
   const sessionFile = normalizeSessionPath(path, cwd);
   try {
     if (!statSync(sessionFile).isFile()) throw new Error("not a file");
-    const firstLine = readSessionHeaderBytes(sessionFile).toString("utf8").split(/\r?\n/, 1)[0];
-    if (!firstLine) throw new Error("missing header");
-    const header: unknown = JSON.parse(firstLine);
-    if (!header || typeof header !== "object" || (header as { type?: unknown }).type !== "session"
-      || typeof (header as { id?: unknown }).id !== "string" || !(header as { id: string }).id
-      || typeof (header as { cwd?: unknown }).cwd !== "string") throw new Error("invalid header");
-    return { cwd: canonicalizeCwd((header as { cwd: string }).cwd), sessionFile, sessionId: (header as { id: string }).id };
+    const parsed = parseSessionHeaderBytes(readSessionHeaderBytes(sessionFile));
+    if (parsed.kind !== "valid") throw new Error(parsed.reason);
+    return { cwd: canonicalizeCwd(parsed.header.cwd), sessionFile, sessionId: parsed.header.id };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw new LaunchIntentError("unverifiable-path", `cannot verify session header: ${path}`);
@@ -174,21 +193,16 @@ export async function resolveRecentSession(input: ResolveRecentSessionInput): Pr
     }));
     for (const candidate of candidates.filter((value): value is NonNullable<typeof value> => value !== null).sort((left, right) => right.mtime - left.mtime || left.index - right.index)) {
       const bytes = input.readHeaderBytes ? await input.readHeaderBytes(candidate.path, MAX_SESSION_HEADER_BYTES) : readSessionHeaderBytes(candidate.path);
-      const lineEnd = bytes.indexOf(10);
-      if (lineEnd < 0) {
-        if (bytes.length >= MAX_SESSION_HEADER_BYTES) throw new Error("session header exceeds maximum size");
+      const parsed = parseSessionHeaderBytes(bytes);
+      if (parsed.kind !== "valid") {
+        if (parsed.reason === "target-header-oversize") throw new Error("session header exceeds maximum size");
         continue;
       }
-      const line = bytes.subarray(0, lineEnd).toString("utf8").replace(/\r$/, "");
       try {
-        const header: unknown = JSON.parse(line);
-        if (!header || typeof header !== "object" || (header as { type?: unknown }).type !== "session"
-          || typeof (header as { id?: unknown }).id !== "string" || !(header as { id: string }).id
-          || typeof (header as { cwd?: unknown }).cwd !== "string") continue;
-        if (canonicalizeCwd((header as { cwd: string }).cwd) !== cwd) continue;
-        return { kind: "found", session: { id: (header as { id: string }).id, cwd, path: candidate.path } };
+        if (canonicalizeCwd(parsed.header.cwd) !== cwd) continue;
+        return { kind: "found", session: { id: parsed.header.id, cwd, path: candidate.path } };
       } catch (error) {
-        if (error instanceof SyntaxError || error instanceof LaunchIntentError) continue;
+        if (error instanceof LaunchIntentError) continue;
         throw error;
       }
     }

@@ -198,7 +198,7 @@ test("reads an existing path header before reserving it and rejects invalid iden
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-// S1b 的运行期 switch 目标解析复用下面这个公开有界 reader（lifecycle 私有 parser 只消费它的首行），
+// launcher 与运行期 switch 目标解析共用公开有界 reader 和首行 parser，
 // 因此首行预算、LF 截止与不完整首行的语义必须在这里被固定，不能退化成全文件读取。
 test("bounded session header reader stops at the first LF and never reads the body", async () => {
   const root = await mkdtemp(join(tmpdir(), "session-owner-bounded-header-"));
