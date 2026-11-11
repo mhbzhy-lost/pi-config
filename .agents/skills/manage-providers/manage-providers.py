@@ -22,7 +22,8 @@ class SafeArgumentParser(ArgumentParser):
 
 
 def get_agent_dir():
-    return Path(os.environ.get("PI_CODING_AGENT_DIR") or Path.home() / ".pi" / "agent")
+    configured = os.environ.get("PI_CODING_AGENT_DIR")
+    return Path(configured).expanduser() if configured else Path(__file__).resolve().parents[3] / "pi"
 
 
 def _json_text(value):
@@ -139,11 +140,26 @@ def cmd_list(args):
         print(f"  baseUrl: {provider.get('baseUrl', '?')}")
         for key in provider.get("headers", {}):
             print(f"  header: {key}: [redacted]")
-        if provider.get("metadataUserId"):
-            print(f"  metadataUserId: {provider['metadataUserId']}")
         for model in provider.get("models", []):
-            actual = f" → {model['actualModelId']}" if model.get("actualModelId") else ""
-            print(f"  • {model['id']}{actual} ({model.get('contextWindow', '?')} ctx, {model.get('maxTokens', '?')} out)")
+            print(f"  • {model['id']} ({model.get('contextWindow', '?')} ctx, {model.get('maxTokens', '?')} out)")
+
+
+def _compat_overrides(items):
+    result = {}
+    for item in items or []:
+        key, separator, value = item.partition("=")
+        if not separator or not key.strip() or not value.strip():
+            raise ValueError("--compat must use key=value")
+        value = value.strip()
+        if value.lower() in ("true", "yes", "false", "no"):
+            parsed = value.lower() in ("true", "yes")
+        else:
+            try:
+                parsed = json.loads(value)
+            except ValueError:
+                parsed = value
+        result[key.strip()] = parsed
+    return result
 
 
 def cmd_add_provider(args):
@@ -158,6 +174,7 @@ def cmd_add_provider(args):
         if _sensitive_header_value(value):
             raise ValueError("sensitive header value must not be stored in models.json")
         headers[key] = value.strip()
+    compat = _compat_overrides(args.compat)
 
     def change(config):
         providers = config.setdefault("providers", {})
@@ -166,13 +183,10 @@ def cmd_add_provider(args):
         provider = {"baseUrl": args.base_url, "api": args.api, "models": []}
         if args.auth_header:
             provider["authHeader"] = True
-        if args.metadata_user_id:
-            provider["metadataUserId"] = args.metadata_user_id
         if headers:
             provider["headers"] = headers
-        if args.compat:
-            provider["compat"] = {k: (v.lower() in ("true", "1", "yes") if v.lower() in ("true", "1", "yes", "false", "0", "no") else v)
-                                  for k, _, v in (item.partition("=") for item in args.compat)}
+        if compat:
+            provider["compat"] = compat
         providers[args.name] = provider
     _update_models(change)
     print(f"Added provider '{args.name}' (api={args.api})")
@@ -212,7 +226,6 @@ def cmd_add_model(args):
         if any(model["id"] == args.id for model in models):
             raise ValueError(f"model '{args.id}' already exists in provider '{args.provider}'")
         model = {"id": args.id, "name": args.name or args.id, "input": args.input.split(","), "contextWindow": args.context, "maxTokens": args.max_tokens}
-        if args.actual_model_id: model["actualModelId"] = args.actual_model_id
         if args.reasoning: model["reasoning"] = True
         models.append(model)
     _update_models(change)
@@ -268,11 +281,11 @@ def main():
     ap = sub.add_parser("add-provider", help="Add a non-sensitive provider definition")
     ap.add_argument("name"); ap.add_argument("--api", required=True); ap.add_argument("--base-url", required=True)
     ap.add_argument("--auth-header", action="store_true"); ap.add_argument("--header", action="append")
-    ap.add_argument("--metadata-user-id"); ap.add_argument("--compat", action="append")
+    ap.add_argument("--compat", action="append", help="Compatibility key=value; JSON values keep their types")
     rp = sub.add_parser("remove-provider", help="Remove a provider definition and credential entry")
     rp.add_argument("name"); rp.add_argument("--confirm", required=True, help="Repeat the provider name to confirm deletion")
     am = sub.add_parser("add-model", help="Add a model")
-    am.add_argument("provider"); am.add_argument("--id", required=True); am.add_argument("--name"); am.add_argument("--actual-model-id")
+    am.add_argument("provider"); am.add_argument("--id", required=True, help="Actual model ID sent to the API"); am.add_argument("--name", help="Display name, not an API model alias")
     am.add_argument("--context", type=int, required=True); am.add_argument("--max-tokens", type=int, required=True); am.add_argument("--reasoning", action="store_true"); am.add_argument("--input", default="text")
     rm = sub.add_parser("remove-model", help="Remove a model")
     rm.add_argument("provider"); rm.add_argument("model_id")
