@@ -1,14 +1,6 @@
 {
   "hideThinkingBlock": true,
-  "packages": [
-    {
-      "source": "npm:@amaster.ai/pi-task-scheduler@0.1.9",
-      "extensions": [],
-      "skills": [],
-      "prompts": [],
-      "themes": []
-    }
-  ],
+  "packages": [],
   "defaultTools": [
     "+codemode",
     "-tool_search",

@@ -11,9 +11,9 @@ Pi Coding Agent 的独立配置。仓库内 `pi/` 是配置根。
 source ~/.zshrc
 ```
 
-初始化使用 npm 官方源，在仓库内安装 Pi 1.5.0、scheduler 依赖和 Basic Memory，合并本机设置，并运行 doctor 与类型检查。模型和认证保存在 Git 忽略的 `pi/models.json`、`pi/auth.json`；`pi/settings.json` 中的 `enabledModels` 为本机配置。
+初始化使用 npm 官方源，在仓库内安装 Pi 1.5.0 和 Basic Memory，合并本机设置，并运行 doctor 与类型检查。模型和认证保存在 Git 忽略的 `pi/models.json`、`pi/auth.json`；`pi/settings.json` 中的 `enabledModels` 为本机配置。
 
-根 `package.json` 管理本仓直接依赖；Pi 按 `pi/settings.json` 的 npm package 声明管理 `pi/npm/`，不再维护第二份受版本控制的 manifest/lock 或手工补装 peer。初始化显式安装这些声明（Pi 的 update 会跳过固定版本）。scheduler 的上游资源全部禁用，仅由本仓适配器通过公开 extension 入口受控加载。
+根 `package.json` 管理本仓直接依赖；Pi 按 `pi/settings.json` 的 npm package 声明管理 `pi/npm/`，不再维护第二份受版本控制的 manifest/lock 或手工补装 peer。初始化显式安装这些声明（Pi 的 update 会跳过固定版本）。
 
 启动入口为 `pi`，`pi-inline` 使用 regular TUI，`pi-lite` 为不自动加载 extension 和 skill 的只读探索模式。
 
@@ -25,7 +25,7 @@ source ~/.zshrc
 
 ## TUI
 
-主会话 footer 第一行展示 cwd、model 和 thinking，第二行展示运行中的 subagent 与折叠的历史数量。按 `Alt+O` 打开只读子会话：正文直接复用 Pi 主会话的消息、Markdown 和工具调用/结果组件；已加载子会话时，footer 展示子会话元数据，不重复显示主会话活动列表。使用 `↑/↓`（或 `k/j`）切换代理，`PgUp/PgDn` 翻页，`End` 回到尾部跟随；`Esc`、`Alt+O` 或 `Ctrl+C` 关闭。查看器每 750ms 通过公开 status RPC 定位选中 run 的 Session 文件，再只读解析结构化会话；不把 transcript 日志解析成消息。刷新受上游落盘时机限制，不是逐 token 流，单个会话读取上限为 64 MiB。查看器不调用 steer、stop 或 resume，也不聚合 bash/scheduler 活动。
+主会话 footer 第一行展示 cwd、model 和 thinking，第二行展示运行中的 subagent 与折叠的历史数量。按 `Alt+O` 打开只读子会话：正文直接复用 Pi 主会话的消息、Markdown 和工具调用/结果组件；已加载子会话时，footer 展示子会话元数据，不重复显示主会话活动列表。使用 `↑/↓`（或 `k/j`）切换代理，`PgUp/PgDn` 翻页，`End` 回到尾部跟随；`Esc`、`Alt+O` 或 `Ctrl+C` 关闭。查看器每 750ms 通过公开 status RPC 定位选中 run 的 Session 文件，再只读解析结构化会话；不把 transcript 日志解析成消息。刷新受上游落盘时机限制，不是逐 token 流，单个会话读取上限为 64 MiB。查看器不调用 steer、stop 或 resume，也不聚合 bash 活动。
 
 子会话查看器支持触控板/鼠标滚轮滚动正文；向上滚动进入历史浏览，向下滚动至底部或按 `End` 恢复尾部跟随。
 

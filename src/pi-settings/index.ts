@@ -13,8 +13,6 @@ type JsonObject = Record<string, unknown>;
 type DirectoryProbe = { exists: boolean; error?: NodeJS.ErrnoException };
 
 export const R2C_ADAPTER_SOURCE = "../../.r2c/integrations/pi-adapter";
-export const TASK_SCHEDULER_SOURCE = "npm:@amaster.ai/pi-task-scheduler@0.1.9";
-const RESOURCE_FIELDS = ["extensions", "skills", "prompts", "themes"] as const;
 const SELECTOR_FIELDS = ["defaultTools", "extensions", "skills"] as const;
 const SHARED_SCALAR_FIELDS = ["hideThinkingBlock"] as const;
 
@@ -99,9 +97,6 @@ function mergeObjects(existing: unknown, declared: unknown): unknown {
 function mergePackages(existing: unknown, declared: unknown): unknown[] | undefined {
   if (!Array.isArray(declared)) return Array.isArray(existing) ? clone(existing) : undefined;
   const packages = Array.isArray(existing) ? existing.map(clone) : [];
-  for (let index = 0; index < packages.length; index += 1) {
-    if (sourceOf(packages[index]) === TASK_SCHEDULER_SOURCE) packages[index] = mergeSchedulerEntry(packages[index]);
-  }
   const positions = new Map<string, number>();
   for (let index = 0; index < packages.length; index += 1) {
     const source = sourceOf(packages[index]);
@@ -116,44 +111,10 @@ function mergePackages(existing: unknown, declared: unknown): unknown[] | undefi
     const position = positions.get(source);
     if (position === undefined) {
       positions.set(source, packages.length);
-      packages.push(source === TASK_SCHEDULER_SOURCE ? mergeSchedulerEntry(entry) : clone(entry));
-    } else if (source === TASK_SCHEDULER_SOURCE) {
-      packages[position] = mergeSchedulerEntry(packages[position]);
+      packages.push(clone(entry));
     }
-  }
-  // 只对调度器去重；其它 package 的重复条目可能是用户有意保留的配置。
-  const schedulerIndex = positions.get(TASK_SCHEDULER_SOURCE);
-  if (schedulerIndex !== undefined) {
-    const scheduler = packages[schedulerIndex];
-    const result: unknown[] = [];
-    let retained = false;
-    for (const entry of packages) {
-      if (sourceOf(entry) !== TASK_SCHEDULER_SOURCE) result.push(entry);
-      else if (!retained) {
-        result.push(scheduler);
-        retained = true;
-      }
-    }
-    return result;
   }
   return packages;
-}
-
-function mergeSchedulerEntry(entry: unknown): unknown {
-  const result: JsonObject = isRecord(entry) ? { ...entry } : { source: TASK_SCHEDULER_SOURCE };
-  for (const field of RESOURCE_FIELDS) result[field] = [];
-  return result;
-}
-
-function schedulerEntries(settings: JsonObject): unknown[] {
-  return Array.isArray(settings.packages)
-    ? settings.packages.filter((entry) => sourceOf(entry) === TASK_SCHEDULER_SOURCE)
-    : [];
-}
-
-function schedulerNeedsNormalization(settings: JsonObject): boolean {
-  const entries = schedulerEntries(settings);
-  return entries.length !== 1 || entries.some((entry) => !isRecord(entry) || RESOURCE_FIELDS.some((field) => !Array.isArray(entry[field]) || entry[field].length !== 0));
 }
 
 function mergeSettings(existing: JsonObject, declared: JsonObject): JsonObject {
@@ -204,12 +165,6 @@ function missingFields(actual: JsonObject, template: JsonObject): string[] {
     if (actual[field] !== undefined && typeof actual[field] !== "boolean") missing.push(field);
   }
   if (hasPackageSource(actual, "../packages/pi-subagents-enhanced")) missing.push("retired subagent package");
-  const declaredScheduler = Array.isArray(template.packages)
-    && template.packages.some((entry) => sourceOf(entry) === TASK_SCHEDULER_SOURCE);
-  if (declaredScheduler) {
-    if (!hasPackageSource(actual, TASK_SCHEDULER_SOURCE)) missing.push("packages");
-    if (schedulerNeedsNormalization(actual)) missing.push("packages");
-  }
   return [...new Set(missing)];
 }
 
@@ -291,7 +246,6 @@ export async function checkSettings(options: {
   const registered = hasPackageSource(options.settings, R2C_ADAPTER_SOURCE);
   if (r2c.exists && !registered) issues.push(`r2c pi-adapter is installed but not registered in pi/settings.json (run: node scripts/ensure-pi-settings.ts): ${R2C_ADAPTER_SOURCE}`);
   if (!r2c.exists && registered) issues.push(`pi/settings.json references missing local r2c adapter package: ${R2C_ADAPTER_SOURCE}`);
-  if (schedulerNeedsNormalization(options.settings)) issues.push("task scheduler package resources must all be disabled and uniquely configured");
   return issues;
 }
 

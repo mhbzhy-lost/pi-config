@@ -7,9 +7,7 @@ import { ensureSettings } from "../scripts/ensure-pi-settings.ts";
 
 const template = {
   hideThinkingBlock: true,
-  packages: [
-    { source: "npm:@amaster.ai/pi-task-scheduler@0.1.9", extensions: [], skills: [], prompts: [], themes: [] },
-  ],
+  packages: [],
 };
 
 async function fixture(existing) {
@@ -42,7 +40,7 @@ test("merges shared fields while preserving local settings", async () => {
   const existing = {
     enabledModels: ["local/model"], defaultProvider: "local", theme: "local",
     hideThinkingBlock: false,
-    packages: ["../../.r2c/integrations/pi-adapter", "npm:@amaster.ai/pi-task-scheduler@0.1.9", { source: "npm:@amaster.ai/pi-task-scheduler@0.1.9", extensions: ["local"] }],
+    packages: ["../../.r2c/integrations/pi-adapter", "npm:local-package@1.0.0"],
     subagents: { agentOverrides: { delegate: { disabled: true, localOnly: true } }, localField: 7 },
   };
   const paths = await fixtureWithAdapter(existing);
@@ -51,7 +49,7 @@ test("merges shared fields while preserving local settings", async () => {
     const result = JSON.parse(await readFile(paths.target, "utf8"));
     assert.deepEqual(result.packages, [
       existing.packages[0],
-      { source: "npm:@amaster.ai/pi-task-scheduler@0.1.9", extensions: [], skills: [], prompts: [], themes: [] },
+      existing.packages[1],
     ]);
     assert.deepEqual(result.subagents, existing.subagents);
     assert.equal(result.hideThinkingBlock, false);
