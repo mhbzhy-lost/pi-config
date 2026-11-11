@@ -22,6 +22,10 @@ Pi config root is `pi/` (not `~/.pi`). Agent 规范入口：`pi/AGENTS_SHARED.md
 
 npm 只能使用官方源 `https://registry.npmjs.org/`；禁止使用淘宝、阿里或其他第三方 registry。
 
+## Git 操作规范
+
+执行 Git 操作时，优先使用 `git1` 命令；只有在确认当前环境不存在 `git1` 命令后，才使用 `git`。
+
 ## `pi/settings.json` 提交规则
 
 `enabledModels` 字段为 per-machine 配置（各机器可用模型不同），禁止提交其变更。

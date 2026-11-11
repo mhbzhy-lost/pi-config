@@ -5,6 +5,10 @@ import { homedir, tmpdir } from "node:os";
 const COMMIT_TYPES = new Set(["feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert"]);
 const WRAPPERS = new Set(["sudo", "command", "env"]);
 
+function isGitExecutable(value) {
+  return value === "git" || value === "git1" || value?.endsWith("/git") || value?.endsWith("/git1");
+}
+
 function violation(code, reason) {
   return { block: true, code, reason };
 }
@@ -159,7 +163,7 @@ function gitSubcommand(tokens) {
 }
 
 function checkBroadGitStaging(tokens) {
-  if (tokens[0] !== "git" && !tokens[0]?.endsWith("/git")) return undefined;
+  if (!isGitExecutable(tokens[0])) return undefined;
   const subcommand = gitSubcommand(tokens);
   if (!subcommand) return undefined;
   const subcommandIndex = tokens.findIndex((token, index) => index > 0 && token === subcommand);
@@ -189,7 +193,7 @@ function checkBroadGitStaging(tokens) {
 }
 
 function checkDestructiveGit(tokens) {
-  if (tokens[0] !== "git" && !tokens[0]?.endsWith("/git")) return undefined;
+  if (!isGitExecutable(tokens[0])) return undefined;
   const subcommand = gitSubcommand(tokens);
   if (!subcommand) return undefined;
 
