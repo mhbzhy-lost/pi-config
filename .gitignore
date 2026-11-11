@@ -12,6 +12,8 @@ __pycache__/
 *.pyc
 *.pyo
 .venv/
+/.pytest_cache/
+/.ruff_cache/
 
 # Pi runtime (machine-specific)
 /pi/auth.json
