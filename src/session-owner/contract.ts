@@ -116,7 +116,7 @@ function sessionHeader(path: string, cwd: string): ForkSource | null {
   const sessionFile = normalizeSessionPath(path, cwd);
   try {
     if (!statSync(sessionFile).isFile()) throw new Error("not a file");
-    const firstLine = readFileSync(sessionFile, "utf8").split(/\r?\n/, 1)[0];
+    const firstLine = readSessionHeaderBytes(sessionFile).toString("utf8").split(/\r?\n/, 1)[0];
     if (!firstLine) throw new Error("missing header");
     const header: unknown = JSON.parse(firstLine);
     if (!header || typeof header !== "object" || (header as { type?: unknown }).type !== "session"
