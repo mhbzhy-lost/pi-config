@@ -80,10 +80,10 @@ async function createPiHostFixture({ piAiCompatEntry = "./dist/compat.js" } = {}
     exports: { ".": { types: "./dist/index.d.ts", import: "./dist/index.js" } },
   });
   await writeFixtureFile(parent, join("node_modules", "@earendil-works", "pi-agent-core", "dist", "index.js"));
-  // Pi 1.5 的 pi-schema 与 pi-coding-agent 同级 hoist，且声明 "." 与 "./formats" 两个公开 subpath。
+  // Pi 1.5.2 的 pi-schema 与 pi-coding-agent 同级 hoist，且声明 "." 与 "./formats" 两个公开 subpath。
   await writeFixtureManifest(parent, join("node_modules", "@earendil-works", "pi-schema"), {
     name: "@earendil-works/pi-schema",
-    version: "1.5.0",
+    version: "1.5.2",
     exports: {
       ".": { types: "./dist/index.d.ts", import: "./dist/index.js" },
       "./formats": { types: "./dist/formats/index.d.ts", import: "./dist/formats/index.js" },

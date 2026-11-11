@@ -1,5 +1,6 @@
 {
   "hideThinkingBlock": true,
+  "cacheWarming": "streaming",
   "packages": [],
   "defaultTools": [
     "+codemode",

@@ -11,7 +11,7 @@ Pi Coding Agent 的独立配置。仓库内 `pi/` 是配置根。
 source ~/.zshrc
 ```
 
-初始化使用 npm 官方源，在仓库内安装 Pi 1.5.0 和 Basic Memory，合并本机设置，并运行 doctor 与类型检查。模型和认证保存在 Git 忽略的 `pi/models.json`、`pi/auth.json`；`pi/settings.json` 中的 `enabledModels` 为本机配置。
+初始化使用 npm 官方源，在仓库内安装 Pi 1.5.2 和 Basic Memory，合并本机设置，并运行 doctor 与类型检查。模型和认证保存在 Git 忽略的 `pi/models.json`、`pi/auth.json`；`pi/settings.json` 中的 `enabledModels` 为本机配置。
 
 根 `package.json` 和 `package-lock.json` 统一管理 Pi Host、本仓依赖与第三方扩展，由根 `npm ci --ignore-scripts` 安装到 `node_modules/`。Pi 只加载扩展，不再由初始化脚本调用 `pi install npm:…` 创建 `pi/npm/`。
 

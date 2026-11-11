@@ -10,8 +10,8 @@ try {
   if (manifest.version !== "0.84.0") issues.push(`pi-subagents: expected 0.84.0, got ${manifest.version}`);
 } catch (error) { issues.push(`pi-subagents: ${String(error)}`); }
 for (const [name, expected] of [
-  ["pi-agent-core", "1.5.0"], ["pi-ai", "1.5.0"],
-  ["pi-coding-agent", "1.5.0"], ["pi-tui", "1.5.0"],
+  ["pi-agent-core", "1.5.2"], ["pi-ai", "1.5.2"],
+  ["pi-coding-agent", "1.5.2"], ["pi-tui", "1.5.2"],
 ] as const) {
   try {
     const manifest = JSON.parse(await readFile(join(root, "node_modules/@earendil-works", name, "package.json"), "utf8"));

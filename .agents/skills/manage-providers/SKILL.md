@@ -5,7 +5,7 @@ description: Use only to add, delete, update, or diagnose missing/invalid/reject
 
 # 管理 Pi Provider 与 Model
 
-本仓使用 Pi 1.5.0，配置根是仓库内的 `pi/`，不是 `~/.pi/agent/`。脚本默认根据自身真实路径定位本仓 `pi/`；显式设置 `PI_CODING_AGENT_DIR` 时，以该目录为准，包括通过共享 Skill 软链调用的情况。
+本仓使用 Pi 1.5.2，配置根是仓库内的 `pi/`，不是 `~/.pi/agent/`。脚本默认根据自身真实路径定位本仓 `pi/`；显式设置 `PI_CODING_AGENT_DIR` 时，以该目录为准，包括通过共享 Skill 软链调用的情况。
 
 只管理 `models.json` 中不敏感的 provider/model 定义，不检查凭据，不调用真实 provider。`pi/models.json` 整体 Git 忽略，是本机配置，不提交、不跨机器同步；`pi/settings.json` 的 `enabledModels` 同样是本机选择，不因新增定义自动改写。
 

@@ -60,9 +60,9 @@ for (const specifier of Object.keys(localAliases)) {
   for (const entry of [hostAliases[specifier], localAliases[specifier]]) {
     const metadata = JSON.parse(await readFile(join(dirname(dirname(entry)), "package.json"), "utf8"));
     assert.equal(metadata.name, name);
-    assert.equal(metadata.version, "1.5.0");
+    assert.equal(metadata.version, "1.5.2");
   }
 }
-console.log("Host and enhanced Pi peer versions: all four 1.5.0");
+console.log("Host and enhanced Pi peer versions: all four 1.5.2");
 for (const handler of extension.handlers.get("session_shutdown") ?? []) await handler({ type: "session_shutdown" }, {});
 loaded.runtime.invalidate();

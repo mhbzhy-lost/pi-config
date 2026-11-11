@@ -14,7 +14,7 @@ type DirectoryProbe = { exists: boolean; error?: NodeJS.ErrnoException };
 
 export const R2C_ADAPTER_SOURCE = "../../.r2c/integrations/pi-adapter";
 const SELECTOR_FIELDS = ["defaultTools", "extensions", "skills"] as const;
-const SHARED_SCALAR_FIELDS = ["hideThinkingBlock"] as const;
+const SHARED_SCALAR_FIELDS = ["hideThinkingBlock", "cacheWarming"] as const;
 
 const moduleRoot = resolve(dirname(new URL(import.meta.url).pathname), "../..");
 const defaultTarget = resolve(moduleRoot, "pi/settings.json");
@@ -67,8 +67,12 @@ function assertSelectorConflicts(existing: JsonObject, declared: JsonObject): vo
 function validateSharedScalars(existing: JsonObject, declared: JsonObject): void {
   for (const field of SHARED_SCALAR_FIELDS) {
     for (const [label, value] of [["template", declared[field]], ["settings", existing[field]]] as const) {
-      if (value !== undefined && typeof value !== "boolean") {
-        throw Object.assign(new Error(`${label}.${field} 必须是 boolean`), {
+      const valid = field === "hideThinkingBlock"
+        ? typeof value === "boolean"
+        : value === "off" || value === "streaming" || value === "idle";
+      if (value !== undefined && !valid) {
+        const expected = field === "hideThinkingBlock" ? "boolean" : '"off"、"streaming" 或 "idle"';
+        throw Object.assign(new Error(`${label}.${field} 必须是 ${expected}`), {
           code: "SETTINGS_INVALID_VALUE",
           field,
           value,
@@ -132,8 +136,10 @@ function mergeSettings(existing: JsonObject, declared: JsonObject): JsonObject {
       result[field] = mergeResourceList(existing[field], declared[field], field === "extensions");
     }
   }
-  if (existing.hideThinkingBlock === undefined && declared.hideThinkingBlock !== undefined) {
-    result.hideThinkingBlock = declared.hideThinkingBlock;
+  for (const field of SHARED_SCALAR_FIELDS) {
+    if (existing[field] === undefined && declared[field] !== undefined) {
+      result[field] = clone(declared[field]);
+    }
   }
   return result;
 }
@@ -163,7 +169,10 @@ function missingFields(actual: JsonObject, template: JsonObject): string[] {
   }
   for (const field of SHARED_SCALAR_FIELDS) {
     if (template[field] !== undefined && actual[field] === undefined) missing.push(field);
-    if (actual[field] !== undefined && typeof actual[field] !== "boolean") missing.push(field);
+    const valid = field === "hideThinkingBlock"
+      ? typeof actual[field] === "boolean"
+      : actual[field] === "off" || actual[field] === "streaming" || actual[field] === "idle";
+    if (actual[field] !== undefined && !valid) missing.push(field);
   }
   if (hasPackageSource(actual, "../packages/pi-subagents-enhanced")) missing.push("retired subagent package");
   return [...new Set(missing)];

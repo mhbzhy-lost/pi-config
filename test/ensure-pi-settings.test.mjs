@@ -7,6 +7,7 @@ import { ensureSettings } from "../scripts/ensure-pi-settings.ts";
 
 const template = {
   hideThinkingBlock: true,
+  cacheWarming: "streaming",
   packages: [],
   extensions: ["../src/compact-tools/entry.ts"],
 };
@@ -55,6 +56,7 @@ test("merges shared fields while preserving local settings", async () => {
     assert.deepEqual(result.subagents, existing.subagents);
     assert.deepEqual(result.extensions, template.extensions);
     assert.equal(result.hideThinkingBlock, false);
+    assert.equal(result.cacheWarming, "streaming");
     assert.deepEqual(result.enabledModels, existing.enabledModels);
     assert.equal(result.defaultProvider, "local");
     assert.equal(result.theme, "local");
