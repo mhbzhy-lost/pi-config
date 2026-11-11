@@ -49,6 +49,9 @@ export function createNetworkRecoveryExtension(pi: ExtensionAPI): void {
     timer: undefined,
     context: undefined,
   };
+  // 使异步探活结果绑定到发起它的等待世代；用户输入、session 切换或新 run
+  // 发生后，旧探活不得再触发自动唤醒。
+  let tickGeneration = 0;
 
   const readConfig = () => {
     let settings: unknown;
@@ -74,6 +77,7 @@ export function createNetworkRecoveryExtension(pi: ExtensionAPI): void {
 
   /** 回到静止态：清定时器、清计数，不改 lastErrorMessage（由调用方决定是否清）。 */
   const reset = () => {
+    tickGeneration += 1;
     clearTimer();
     state.phase = "idle";
     state.attemptCount = 0;
@@ -118,6 +122,7 @@ export function createNetworkRecoveryExtension(pi: ExtensionAPI): void {
   };
 
   const tick = async () => {
+    const generation = ++tickGeneration;
     state.timer = undefined;
     const config = readConfig();
     if (!config.enabled) {
@@ -132,21 +137,29 @@ export function createNetworkRecoveryExtension(pi: ExtensionAPI): void {
     }
     const baseUrl = ctx.model?.baseUrl ?? "";
     const reachable = await probeEndpointReachability(baseUrl, { timeoutMs: DEFAULT_PROBE_TIMEOUT_MS });
+    // 探活期间可能发生用户接管、session shutdown 或新的 agent run；这些路径
+    // 都会推进世代或替换 context。旧结果只能丢弃，不能重新排定/发送恢复消息。
+    if (generation !== tickGeneration || state.context !== ctx || state.phase !== "waiting" || ctx.isIdle() !== true) return;
+    const latestConfig = readConfig();
+    if (!latestConfig.enabled) {
+      reset();
+      return;
+    }
     if (!reachable) {
       state.probeFailures += 1;
       if (state.probeFailures < MAX_PROBE_FAILURES_BEFORE_FORCE) {
         // 静默顺延：探活不通时唤醒只会往会话上下文里堆失败消息。
         state.phase = "waiting";
-        armTimer(config.delayMs);
+        armTimer(latestConfig.delayMs);
         return;
       }
       state.probeFailures = 0;
       notify(`连续 ${MAX_PROBE_FAILURES_BEFORE_FORCE} 次探活未通过，仍强制唤醒一次`, "warning");
-      wake(config.delayMs);
+      wake(latestConfig.delayMs);
       return;
     }
     state.probeFailures = 0;
-    wake(config.delayMs);
+    wake(latestConfig.delayMs);
   };
 
   pi.on("session_start", (_event, ctx) => {
