@@ -4,6 +4,9 @@
 # Dependencies
 node_modules/
 
+# Local documentation
+/docs/
+
 # Python artifacts
 __pycache__/
 *.pyc
