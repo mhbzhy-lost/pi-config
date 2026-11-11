@@ -2,8 +2,6 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-PI_VERSION="1.5.0"
-PI_PACKAGE="@earendil-works/pi-coding-agent@$PI_VERSION"
 NPM_REGISTRY="https://registry.npmjs.org"
 BASIC_MEMORY_VERSION="0.22.1"
 ZSHRC_PATH="${ZDOTDIR:-$HOME}/.zshrc"
@@ -29,7 +27,7 @@ if (( node_major < 22 || (node_major == 22 && node_minor < 19) )); then
 fi
 
 
-# 仓库root拥有physical Host安装；不再修改global Pi。
+# 根 package-lock 统一安装 Pi Host 与第三方扩展，不再创建 Pi-managed npm 树。
 export PI_HOST_ROOT="$SCRIPT_DIR/node_modules/@earendil-works/pi-coding-agent"
 NPM_CONFIG_REGISTRY="$NPM_REGISTRY" npm_config_cache="$SCRIPT_DIR/var/tmp/npm-cache" npm --no-audit --no-fund --prefix "$SCRIPT_DIR" ci --ignore-scripts
 pi_binary="$PI_HOST_ROOT/dist/cli.js"
@@ -40,21 +38,6 @@ export PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT="$PI_HOST_ROOT"
 
 node "$SCRIPT_DIR/scripts/sync-skills.ts"
 node "$SCRIPT_DIR/scripts/ensure-pi-settings.ts"
-# Pi owns the managed npm tree; settings remain the only dependency declaration.
-# `update` skips pinned versions, so explicitly install configured npm sources.
-package_sources="$(node -e '
-  const fs = require("node:fs");
-  const settings = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-  for (const entry of settings.packages ?? []) {
-    const source = typeof entry === "string" ? entry : entry.source;
-    if (source?.startsWith("npm:")) console.log(source);
-  }
-' "$SCRIPT_DIR/pi/settings.json")"
-while IFS= read -r source; do
-  [[ -n "$source" ]] || continue
-  PI_CODING_AGENT_DIR="$SCRIPT_DIR/pi" NPM_CONFIG_REGISTRY="$NPM_REGISTRY" \
-    node "$PI_REAL_BIN" install "$source"
-done <<< "$package_sources"
 
 chmod +x "$PI_LAUNCHER"
 

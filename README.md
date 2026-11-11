@@ -13,7 +13,9 @@ source ~/.zshrc
 
 初始化使用 npm 官方源，在仓库内安装 Pi 1.5.0 和 Basic Memory，合并本机设置，并运行 doctor 与类型检查。模型和认证保存在 Git 忽略的 `pi/models.json`、`pi/auth.json`；`pi/settings.json` 中的 `enabledModels` 为本机配置。
 
-根 `package.json` 管理本仓直接依赖；Pi 按 `pi/settings.json` 的 npm package 声明管理 `pi/npm/`，不再维护第二份受版本控制的 manifest/lock 或手工补装 peer。初始化显式安装这些声明（Pi 的 update 会跳过固定版本）。
+根 `package.json` 和 `package-lock.json` 统一管理 Pi Host、本仓依赖与第三方扩展，由根 `npm ci --ignore-scripts` 安装到 `node_modules/`。Pi 只加载扩展，不再由初始化脚本调用 `pi install npm:…` 创建 `pi/npm/`。
+
+第三方扩展先加入根依赖，再在 `pi/settings.json` 的 `packages` 中使用相对配置根的本地包路径，例如 `../node_modules/@arhen/pi-core-ask`；Pi 会读取包 manifest 的资源声明。共享默认启用项才写入模板，本机启用项只保留在本机 settings。不要通过 `pi install npm:…` 或手工补装 peer 恢复第二套依赖树。
 
 启动入口为 `pi`，`pi-inline` 使用 regular TUI，`pi-lite` 为不自动加载 extension 和 skill 的只读探索模式。
 

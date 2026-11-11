@@ -140,7 +140,7 @@ test("init-pi.sh reproducibly installs Pi without reading OpenCode credentials",
     assert.match(commands, /npm registry=https:\/\/registry\.npmjs\.org --no-audit --no-fund --prefix .* ci --ignore-scripts/);
     assert.doesNotMatch(commands, /install -g/);
 
-    assert.doesNotMatch(commands, /pi-real registry=.*install npm:pi-subagents/);
+    assert.doesNotMatch(commands, /(?:pi-real registry=.*|node .*\/dist\/cli\.js) install /);
     assert.doesNotMatch(commands, /setup:subagents-enhanced/);
     assert.doesNotMatch(commands, /rpiv-todo/);
     assert.match(commands, /node sync-skills markers=,,,/);
