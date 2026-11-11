@@ -26,10 +26,12 @@ try {
   fail();
 }
 if (!isRecord(config) || !isRecord(config.provider)) fail();
+const providers = config.provider as JsonRecord;
 
-const matches = Object.values(config.provider).filter(provider => {
+const matches = Object.values(providers).filter(provider => {
   if (!isRecord(provider) || provider.npm !== "@ai-sdk/openai-compatible" || !isRecord(provider.options)) return false;
   return typeof provider.options.baseURL === "string" && modeUrl.exec(provider.options.baseURL)?.[1] === requestedMode;
 });
-if (matches.length !== 1 || !isRecord(matches[0].options) || typeof matches[0].options.apiKey !== "string" || !matches[0].options.apiKey.trim()) fail();
-process.stdout.write(`${matches[0].options.apiKey}\n`);
+const match = matches[0];
+if (matches.length !== 1 || !isRecord(match) || !isRecord(match.options) || typeof match.options.apiKey !== "string" || !match.options.apiKey.trim()) fail();
+process.stdout.write(`${match.options.apiKey}\n`);

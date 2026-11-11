@@ -171,7 +171,8 @@ if (existingEnabledModels !== undefined && (!Array.isArray(existingEnabledModels
 const currentEnabledModels = [...generated.entries()].flatMap(([providerId, provider]) =>
   (provider.models as JsonRecord[]).map(model => `${providerId}/${model.id}`)
 );
-const enabledModels = (existingEnabledModels || []).filter(value => !isManagedModelReference(value as string));
+const enabledModels = (existingEnabledModels === undefined ? [] : existingEnabledModels as string[])
+  .filter(value => !isManagedModelReference(value));
 enabledModels.push(...currentEnabledModels);
 
 const modelsOutput = JSON.stringify({ ...modelsSource.value, providers }, null, 2) + "\n";

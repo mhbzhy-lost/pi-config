@@ -111,8 +111,10 @@ function validate(record: unknown, previous: number | undefined) {
   }
   if (typeof entry.parentSessionId !== "string" || !entry.parentSessionId || typeof entry.toolCallId !== "string" || !entry.toolCallId) return "invalid-identity";
   if (typeof entry.phase !== "string" || !PHASES.has(entry.phase)) return "invalid-phase";
-  if (!Number.isSafeInteger(entry.monotonicMs)) return "invalid-monotonic-ms";
-  if (previous !== undefined && entry.monotonicMs < previous) return "non-monotonic-time";
+  const monotonicMs = entry.monotonicMs;
+  if (!Number.isSafeInteger(monotonicMs)) return "invalid-monotonic-ms";
+  const monotonic = monotonicMs as number;
+  if (previous !== undefined && monotonic < previous) return "non-monotonic-time";
   if (Object.keys(entry).some((key) => !ALLOWED.has(key)) || ["method", "requestId", "rootRunId", "leafRunId", "errorCode"].some((key) => entry[key] !== undefined && typeof entry[key] !== "string")) return "invalid-schema";
   if (entry.stage !== undefined && (typeof entry.stage !== "string" || !STAGES.has(entry.stage))) return "invalid-schema";
   // negotiation 只允许出现在 tool-failed 记录上，与 producer sink 的写入合同一致。
@@ -136,7 +138,7 @@ export function readBoundedDispatchTrace({ file, parentSessionId, toolCallId, ma
     try { entry = JSON.parse(line); } catch { return invalid("invalid-json", partialLeadingLine, partialTrailingLine, tail.truncated); }
     const error = validate(entry, previous);
     if (error) return invalid(error, partialLeadingLine, partialTrailingLine, tail.truncated);
-    previous = entry.monotonicMs;
+    previous = (entry as Record<string, unknown>).monotonicMs as number;
     entries.push(entry);
   }
   const records = entries.filter((entry) => entry.toolCallId === toolCallId && entry.parentSessionId === parentSessionId).slice(-maxRecords);

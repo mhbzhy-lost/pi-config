@@ -24,8 +24,10 @@ function validate(record: unknown, previous: number | undefined) {
   if (entry.version !== 1) return "invalid-version";
   if (typeof entry.hostSessionId !== "string" || !entry.hostSessionId || typeof entry.completionOwnerId !== "string" || !entry.completionOwnerId) return "invalid-identity";
   if (typeof entry.event !== "string" || !EVENTS.has(entry.event)) return "invalid-event";
-  if (!Number.isSafeInteger(entry.monotonicMs)) return "invalid-monotonic-ms";
-  if (previous !== undefined && entry.monotonicMs < previous) return "non-monotonic-time";
+  const monotonicMs = entry.monotonicMs;
+  if (!Number.isSafeInteger(monotonicMs)) return "invalid-monotonic-ms";
+  const monotonic = monotonicMs as number;
+  if (previous !== undefined && monotonic < previous) return "non-monotonic-time";
   if (Object.keys(entry).some((key) => !ALLOWED.has(key))) return "invalid-schema";
   if (["source", "runId", "eventSessionId", "eventCompletionOwnerId", "ownershipDecision", "customType", "deliverAs", "deliveryResult"].some((key) => entry[key] !== undefined && typeof entry[key] !== "string") || ["triggerTurn", "display"].some((key) => entry[key] !== undefined && typeof entry[key] !== "boolean")) return "invalid-schema";
   if (entry.event === "completion-received" && (!(["async", "foreground"].includes(entry.source as string)) || typeof entry.runId !== "string" || typeof entry.eventSessionId !== "string" || typeof entry.eventCompletionOwnerId !== "string")) return "invalid-completion-identity";
@@ -48,7 +50,7 @@ export function readWorkingStateTrace({ file, hostSessionId, maxBytes = 64 * 102
     try { entry = JSON.parse(line); } catch { return invalid("invalid-json", partialLeadingLine, partialTrailingLine, tail.truncated); }
     const error = validate(entry, previous);
     if (error) return invalid(error, partialLeadingLine, partialTrailingLine, tail.truncated);
-    previous = entry.monotonicMs;
+    previous = (entry as Record<string, unknown>).monotonicMs as number;
     entries.push(entry);
   }
   const records = entries.filter((entry) => entry.hostSessionId === hostSessionId).slice(-maxRecords);
