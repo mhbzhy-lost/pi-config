@@ -204,16 +204,14 @@ test("malformed enabled tasks are ignored in footer summaries", async () => {
   assert.equal(statuses.at(-1), undefined);
 });
 
-test("injected clock polls without overlap, refreshes mutations, and isolates stale sessions", async () => {
+test("adapter creates no activity polling timer, refreshes mutations, and isolates stale sessions", async () => {
   const pi = makeHost(); const statuses = []; const intervals = []; const cleared = [];
   const clock = { setInterval(fn) { const timer = { fn, unrefCalled: false, unref() { this.unrefCalled = true; } }; intervals.push(timer); return timer; }, clearInterval(timer) { cleared.push(timer); } };
-  let calls = 0; let releasePoll; let oldPending;
-  const pollPending = new Promise((resolve) => { releasePoll = resolve; });
+  let calls = 0; let oldPending;
   registerTaskSchedulerAdapter(pi, { clock, upstreamExtension(api) {
     api.registerTool({ name: "scheduler_list", execute: async () => {
       calls++;
-      if (calls === 2) return pollPending;
-      if (calls === 4) return oldPending;
+      if (calls === 3) return oldPending;
       return { content: [{ type: "text", text: JSON.stringify([{ name: calls === 1 ? "initial" : "mutation", type: "cron", schedule: "daily", enabled: true }]) }], details: undefined };
     } });
     api.registerTool({ name: "scheduler_create", execute: async () => ({ content: [{ type: "text", text: "created" }] }) });
@@ -222,12 +220,9 @@ test("injected clock polls without overlap, refreshes mutations, and isolates st
   const root = await mkdtemp(join(tmpdir(), "scheduler-footer-")); await mkdir(join(root, "repo"));
   const first = { ...ctx(join(root, "repo")), ui: { confirm: async () => true, setStatus: (_key, value) => statuses.push(value) } };
   await pi.handlers.get("session_start")({}, first);
-  assert.equal(statuses.at(-1), "⏱ initial"); assert.equal(intervals.length, 1); assert.equal(intervals[0].unrefCalled, true);
-  intervals[0].fn(); intervals[0].fn(); await Promise.resolve();
-  assert.equal(calls, 2, "a pending poll must prevent overlapping refresh"); releasePoll({ content: [{ type: "text", text: JSON.stringify([{ name: "polled", enabled: true }]) }], details: undefined }); await Promise.resolve(); await Promise.resolve();
-  assert.equal(statuses.at(-1), "⏱ polled");
+  assert.equal(statuses.at(-1), "⏱ initial"); assert.equal(intervals.length, 0);
   await call(pi.tools.get("scheduler_create"), { prompt: "safe" }, first); assert.equal(statuses.at(-1), "⏱ mutation");
-  await pi.handlers.get("session_shutdown")({}, first); assert.equal(cleared.length, 1); assert.equal(statuses.at(-1), undefined);
+  await pi.handlers.get("session_shutdown")({}, first); assert.equal(cleared.length, 0); assert.equal(statuses.at(-1), undefined);
 
   let releaseOld; oldPending = new Promise((resolve) => { releaseOld = resolve; });
   const old = { ...first, ui: { confirm: async () => true, setStatus: (_key, value) => statuses.push(`old:${value}`) } };
@@ -634,7 +629,7 @@ test("an in-flight listing settling after shutdown is discarded without publishi
   assert.equal(snapshot.errorLabel, undefined, "an epoch-discarded result is not an error observation");
 });
 
-test("timer ticks stay single-flight while in-flight mutators coalesce into exactly one rerun", async () => {
+test("mutation refreshes stay single-flight and coalesce into exactly one rerun without polling", async () => {
   const pi = makeHost(); const statuses = []; const intervals = [];
   const clock = { setInterval(fn, ms) { const timer = { fn, ms, unrefCalled: false, unref() { this.unrefCalled = true; } }; intervals.push(timer); return timer; }, clearInterval() {} };
   let listCalls = 0; let listText = JSON.stringify([taskFixture("t1")]); let blocked = false;
@@ -647,24 +642,23 @@ test("timer ticks stay single-flight while in-flight mutators coalesce into exac
   } });
   const root = await mkdtemp(join(tmpdir(), "scheduler-f4a-")); const repo = join(root, "repo"); await mkdir(repo);
   const pair = freshContextPair(repo, "f4a-session-4", { setStatus: (_key, value) => statuses.push(value) });
-  await pi.handlers.get("session_start")({}, pair.sessionCtx); // initial refresh 完成，唯一 timer 建立
+  await pi.handlers.get("session_start")({}, pair.sessionCtx);
   assert.equal(listCalls, 1, "exactly one initial refresh");
-  assert.equal(intervals.length, 1);
-  assert.equal(intervals[0].ms, 30000, "the unique timer keeps the frozen 30s interval");
-  assert.equal(intervals[0].unrefCalled, true);
+  assert.equal(intervals.length, 0, "activity observation creates no polling timer");
   blocked = true;
-  intervals[0].fn(); // timer tick：listCalls=2，阻塞在途（快照已在调用时刻取得）
-  intervals[0].fn(); // 再次 tick：同代单飞，不叠加
-  assert.equal(listCalls, 2, "a pending poll must not overlap (single flight)");
+  const pendingMutation = call(pi.tools.get("scheduler_create"), { prompt: "safe" }, pair.toolCtx());
+  await flush();
+  assert.equal(listCalls, 2, "mutation starts one blocked refresh");
   await call(pi.tools.get("scheduler_create"), { prompt: "safe" }, pair.toolCtx());
   await call(pi.tools.get("scheduler_delete"), { taskId: "t1" }, pair.toolCtx());
   assert.equal(listCalls, 2, "mutators during an in-flight listing must not add a concurrent read");
   listText = JSON.stringify([taskFixture("t2")]); // 变更后视图
   blocked = false; listGate.resolve();
+  await pendingMutation;
   await flush(); await flush();
   assert.equal(listCalls, 3, "multiple mutators merge into exactly one coalesced rerun");
   assert.deepEqual(observer.snapshot().records.map((record) => record.id), ["t2"], "the rerun publishes the post-mutation view");
-  assert.equal(intervals.length, 1, "the coalesced rerun reuses the single timer, never a new one");
+  assert.equal(intervals.length, 0, "the coalesced rerun creates no timer");
   assert.equal(statuses.at(-1), "⏱ task-t2");
   await flush(); await flush();
   assert.equal(listCalls, 3, "without a new mutator the rerun chain stops");

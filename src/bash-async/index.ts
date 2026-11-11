@@ -1,17 +1,11 @@
 import { createLocalBashOperations, type ExtensionAPI, type ExtensionToolContext } from '@earendil-works/pi-coding-agent';
 import { createBashCwdToolDefinition, prepareBashCwdExecution } from '../bash-cwd/index.ts';
 import { createBashAsyncController } from './controller.ts';
-import type { BashAsyncController, BashAsyncLaunchReceipt, BashAsyncTerminalReceipt } from './contracts.ts';
+import type { BashAsyncLaunchReceipt, BashAsyncTerminalReceipt } from './contracts.ts';
 import type { BashAsyncRequest, ExecutionEvidence } from './contracts.ts';
-import { createBashActivitySource } from '../tui/feature-sources.ts';
-import { registerActivitySource } from '../tui/background-activity.ts';
 export * from './contracts.ts';
 export { createBashAsyncController } from './controller.ts';
 export { createBashAsyncCompleteRenderer, type BashAsyncRendererDeps } from './renderer.ts';
-
-export function registerBashAsyncActivitySource(pi: ExtensionAPI, controller: BashAsyncController): () => void {
-  return registerActivitySource(pi, 'bash_async', createBashActivitySource(controller));
-}
 
 export function createBashAsyncExtension(pi: ExtensionAPI, options: Parameters<typeof createBashCwdToolDefinition>[0]) {
   const base = createBashCwdToolDefinition(options);

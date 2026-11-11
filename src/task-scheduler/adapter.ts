@@ -36,7 +36,6 @@ function loadUpstreamDefaultExtension() {
   return cachedUpstreamDefaultExtension;
 }
 
-
 /** Public projection of the accepted P4 orphan-recovery result. */
 export type SchedulerRecoveryOutcome =
   | { kind: "rebound"; runId: string; ownerReceiptId: string }
@@ -69,7 +68,7 @@ export function consumeRecoveryOutcome(outcome: SchedulerRecoveryOutcome): { out
  * `success` 是 runner 投递结果，不证明业务成功——观察结果不做语义升级。 */
 export type SchedulerActivityStatus = "pending" | "success" | "error" | "running";
 
-/** 公开 typed 记录（F4g R2 §4.2，与 footer 子计划 T4b 接口契约统一）：字段名沿用上游 JSON
+/** 公开 typed 记录：字段名沿用上游 JSON
  * （`id`/`lastStatus`），剔除 prompt；name/type/schedule 是不可信上游字符串，只作展示投影来源，
  * ANSI/control 清理属 renderer-only，不得写回缓存或 raw。 */
 export type SchedulerActivityRecord = Readonly<{
@@ -98,7 +97,7 @@ export type SchedulerDetailOutcome =
   | { ok: true; result: AgentToolResult<unknown> }
   | { ok: false; reason: "token-stale" | "no-detail-tool" | "get-failed" };
 
-/** scheduler 只读 observer 公开形状（F4g R2 §7；F4b source 消费面）。
+/** scheduler 只读 observer 公开形状；当前无生产订阅者，保留公开 API 与既有测试覆盖。
  * `SchedulerRefreshOwner` 世代 token 仅存在于 adapter 闭包内部，不出现在任何公开导出。 */
 export type SchedulerActivityObserver = {
   snapshot(): SchedulerActivitySnapshot;
@@ -231,7 +230,6 @@ function boundedResult(result) {
   }
   return { content, details: undefined };
 }
-const FOOTER_POLL_MS = 30_000;
 function taskFooterLabel(value) {
   return String(value ?? "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim().slice(0, 48);
 }
@@ -354,14 +352,13 @@ function wrapTool(definition, hooks: { captureOwner?: (toolCtx: any) => Schedule
 }
 
 /** A deliberately small in-process membrane around the exact upstream extension.
- * 返回值是 scheduler 只读 observer（F4g R2 §7）：既有调用方忽略返回值仍然兼容；
- * F4b source 消费该 observer，世代 token 永不出现在公开面。 */
+ * 返回值是 scheduler 只读 observer；当前生产入口忽略返回值，既有测试仍覆盖此 API。
+ * 世代 token 永不出现在公开面。 */
 export function registerTaskSchedulerAdapter(pi, options = {}) {
-  const { upstreamExtension: injectedExtension, env = process.env, clock = globalThis, pollMs = FOOTER_POLL_MS } = options as {
+  const { upstreamExtension: injectedExtension, env = process.env, clock = globalThis } = options as {
     upstreamExtension?: unknown;
     env?: NodeJS.ProcessEnv;
     clock?: typeof globalThis;
-    pollMs?: number;
   };
   let upstreamExtension = injectedExtension;
   upstreamExtension ??= loadUpstreamDefaultExtension();
@@ -371,14 +368,12 @@ export function registerTaskSchedulerAdapter(pi, options = {}) {
   let sessionManager;
   let sessionId;
   let epoch = 0;
-  let timer;
   let listing;
   let wrappedGet;
   let refreshingEpoch;
   let needsRefresh = false;
   let cache: SchedulerActivityCache = { availability: "unavailable", observedAt: 0, records: EMPTY_ACTIVITY_RECORDS };
   const listeners = new Set<() => void>();
-  const clearTimer = () => { if (timer !== undefined) { clock.clearInterval(timer); timer = undefined; } };
   const nowMs = () => { try { if (typeof clock?.now === "function") return clock.now(); } catch { /* 回退墙钟 */ } return Date.now(); };
   // F4g R2 §2 规则4：token 三字段（manager/sessionId/epoch）与 adapter 当前状态全等才有效；
   // sessionId 相同不豁免 manager/epoch 校验（§8 反例 G/H），同 manager reload 也靠 epoch 拒绝（§8 正例 B）。
@@ -432,12 +427,6 @@ export function registerTaskSchedulerAdapter(pi, options = {}) {
       }
     }
   };
-  const beginPolling = (token) => {
-    clearTimer();
-    if (typeof clock.setInterval !== "function") return;
-    timer = clock.setInterval(() => { void refresh(token); }, pollMs);
-    timer?.unref?.();
-  };
   const hooks = {
     captureOwner: (toolCtx) => {
       // F4g R2 §2 规则1：execute 进入时、await 原调用之前一次性捕获 owner 三字段；
@@ -452,7 +441,7 @@ export function registerTaskSchedulerAdapter(pi, options = {}) {
     },
     refresh: async (token) => {
       // F4g R2 §5 规则2：只有 mutator 合法完成（token 三字段全等）才置同代脏标记并请求刷新；
-      // timer tick / initial 刷新不置标记（规则5：重跑只由实际 mutator 完成触发，不形成无穷链）。
+      // initial 刷新不置标记；重跑只由实际 mutator 完成触发，不形成无穷链。
       if (tokenMatches(token)) needsRefresh = true;
       await refresh(token);
     },
@@ -502,8 +491,7 @@ export function registerTaskSchedulerAdapter(pi, options = {}) {
       if (!ALLOWED_EVENTS.has(event) || typeof handler !== "function") { diagnostic(`dropped event: ${event || "unknown"}`); return; }
       return pi.on.call(pi, event, async (payload, ctx) => {
         if (event === "session_shutdown") {
-          // F4g R2 §2 规则5 顺序冻结：clearTimer → epoch 失效 → 清脏标记/缓存 → publish(undefined) → 清 sessionCtx/sessionCwd。
-          clearTimer();
+          // epoch 失效 → 清脏标记/缓存 → publish(undefined) → 清 sessionCtx/sessionCwd。
           epoch += 1;
           needsRefresh = false;
           cache = { availability: "unavailable", observedAt: 0, records: EMPTY_ACTIVITY_RECORDS };
@@ -532,12 +520,10 @@ export function registerTaskSchedulerAdapter(pi, options = {}) {
         needsRefresh = false;
         listeners.clear(); // F4g R2 §7 失效清场：新 session_start 清空全部 listener
         cache = { availability: "unavailable", observedAt: 0, records: EMPTY_ACTIVITY_RECORDS };
-        clearTimer();
         try {
           const result = await handler(payload, ctx);
           const token = { manager: capturedManager, sessionId: capturedSessionId, epoch: expected };
           await refresh(token);
-          beginPolling(token);
           return result;
         } finally { sessionCwd = undefined; }
       });

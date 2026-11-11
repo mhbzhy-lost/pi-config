@@ -52,7 +52,6 @@
     "pi/extensions/task-scheduler.ts",
     "src/subagent/**/*.ts",
     "pi/extensions/subagent.ts",
-    "src/tui/**/*.ts",
     "pi/extensions/custom-footer.ts"
   ]
 }
