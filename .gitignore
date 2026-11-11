@@ -55,9 +55,9 @@ __pycache__/
 /pi/models-store.json
 
 # Secrets
-/skill-overrides/external-llm-review/.env
-/skill-overrides/exa-search/.env
-/skill-overrides/deepseek-search/.env
+/skills/external-llm-review/.env
+/skills/exa-search/.env
+/skills/deepseek-search/.env
 /pi/models.json
 /pi/settings.json
 .opencode/

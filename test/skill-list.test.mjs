@@ -10,7 +10,7 @@ const repoRoot = new URL("..", import.meta.url);
 
 test("repository has no retired Skill list files", async () => {
   for (const file of ["skills.list", "skills.local.list"]) {
-    await assert.rejects(access(new URL(`../skill-overrides/${file}`, import.meta.url)), { code: "ENOENT" });
+    await assert.rejects(access(new URL(`../skills/${file}`, import.meta.url)), { code: "ENOENT" });
   }
 });
 
@@ -19,8 +19,8 @@ test("discoverManagedSkills automatically finds valid direct Skill directories i
   try {
     await addSkill(root, "writing-plans");
     await addSkill(root, "alpha-skill");
-    await mkdir(join(root, "skill-overrides", ".hidden"));
-    await writeFile(join(root, "skill-overrides", "README.md"), "supporting file\n");
+    await mkdir(join(root, "skills", ".hidden"));
+    await writeFile(join(root, "skills", "README.md"), "supporting file\n");
 
     const skills = await discoverManagedSkills(root);
     assert.deepEqual([...skills.keys()], ["alpha-skill", "writing-plans"]);
@@ -49,7 +49,7 @@ test("discoverManagedSkills fails closed when a direct Skill source escapes its 
   const outside = await mkdtemp(join(tmpdir(), "escaped-skill-"));
   try {
     await writeFile(join(outside, "SKILL.md"), "---\nname: writing-plans\ndescription: fixture\n---\n");
-    await symlink(outside, join(root, "skill-overrides", "writing-plans"));
+    await symlink(outside, join(root, "skills", "writing-plans"));
     await assert.rejects(discoverManagedSkills(root), /skill source escapes allowed root: writing-plans/);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -68,7 +68,7 @@ test("resolveSkillSource retains frontmatter fail-closed validation", async () =
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("repository overrides are all automatically discoverable", async () => {
+test("repository skills are all automatically discoverable", async () => {
   const skills = await discoverManagedSkills(new URL("..", import.meta.url).pathname);
   assert.ok(skills.size > 0);
   for (const source of skills.values()) assert.match(await readFile(join(source, "SKILL.md"), "utf8"), /^---/);

@@ -5,7 +5,7 @@ description: Use when creating new skills, editing existing skills, or verifying
 
 # 编写与维护 Skill
 
-Skill 是可复用的操作说明、技术方法或参考资料。共享目录为 `~/.agents/skills/`，仓库管理的源文件优先在 `skill-overrides/<name>/` 修改，再沿既有同步路径发布。先核对 symlink 的真实来源，保留用户已有改动。
+Skill 是可复用的操作说明、技术方法或参考资料。共享目录为 `~/.agents/skills/`，仓库管理的源文件优先在 `skills/<name>/` 修改，再沿既有同步路径发布。先核对 symlink 的真实来源，保留用户已有改动。
 
 ## 编写方法
 

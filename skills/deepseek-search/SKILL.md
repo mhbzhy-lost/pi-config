@@ -29,8 +29,8 @@ wrapper 不含 MCP、JSON-RPC 或 SSE 实现；search / fetch 都把服务端结
 export DEEPSEEK_API_KEY="<your key>"
 
 # 方式二：写入本 skill 目录的 .env（长期有效，免 source、免重启 shell）
-cp ~/pi-config/skill-overrides/deepseek-search/.env.example \
-   ~/pi-config/skill-overrides/deepseek-search/.env
+cp ~/pi-config/skills/deepseek-search/.env.example \
+   ~/pi-config/skills/deepseek-search/.env
 # 然后编辑该 .env，填入 DEEPSEEK_API_KEY=<your key>
 ```
 
@@ -41,7 +41,7 @@ cp ~/pi-config/skill-overrides/deepseek-search/.env.example \
 
 ## 命令
 
-`<skill-dir>` 指本文件所在目录（源仓库 `~/pi-config/skill-overrides/deepseek-search/`，安装后 `~/.agents/skills/deepseek-search/` 是同一目录的 symlink）。安装后可直接运行：
+`<skill-dir>` 指本文件所在目录（源仓库 `~/pi-config/skills/deepseek-search/`，安装后 `~/.agents/skills/deepseek-search/` 是同一目录的 symlink）。安装后可直接运行：
 
 ```bash
 python3 ~/.agents/skills/deepseek-search/deepseek.py search 'DeepSeek 官方 Search API site:api-docs.deepseek.com' 5

@@ -38,8 +38,8 @@ pi-lite() {
     -na \
     --no-extensions \
     --no-prompt-templates \
-    --skill "$_PI_CONFIG_ROOT/skill-overrides/deepseek-search/SKILL.md" \
-    --skill "$_PI_CONFIG_ROOT/skill-overrides/playwright/SKILL.md" \
+    --skill "$_PI_CONFIG_ROOT/skills/deepseek-search/SKILL.md" \
+    --skill "$_PI_CONFIG_ROOT/skills/playwright/SKILL.md" \
     --tools read,bash \
     "$@"
 }

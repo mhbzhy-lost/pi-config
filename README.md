@@ -46,6 +46,6 @@ basic-memory doctor --local
 
 ## Skill
 
-仓库共享 Skill 放在 `skill-overrides/`，由 `scripts/sync-skills.ts` 同步；个人 Skill 放在 `~/.agents/skills`。仓库项目 Skill 位于 `.agents/skills/`。
+仓库共享 Skill 放在 `skills/`，由 `scripts/sync-skills.ts` 同步；个人 Skill 放在 `~/.agents/skills`。仓库项目 Skill 位于 `.agents/skills/`。
 
 工作文档保留在本机 `docs/`，该目录不纳入 Git，也不随仓库推送或分发。

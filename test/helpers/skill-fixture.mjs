@@ -5,12 +5,12 @@ import { join } from "node:path";
 export async function createFixture() {
   const root = await mkdtemp(join(tmpdir(), "pi-config-skills-"));
   await mkdir(join(root, "agents"), { recursive: true });
-  await mkdir(join(root, "skill-overrides"), { recursive: true });
+  await mkdir(join(root, "skills"), { recursive: true });
   return root;
 }
 
 export async function addSkill(root, name, marker = name) {
-  const directory = join(root, "skill-overrides", name);
+  const directory = join(root, "skills", name);
   await mkdir(directory, { recursive: true });
   await writeFile(
     join(directory, "SKILL.md"),

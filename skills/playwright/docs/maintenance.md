@@ -2,12 +2,12 @@
 
 ## 目录边界
 
-实现、依赖、测试、fixture、验收和二级文档必须留在 `skill-overrides/playwright/`。入口 `playwright.ts` 只调用 `src/index.ts`；不要把实现搬回仓库根 `src/`、`scripts/` 或根测试目录。
+实现、依赖、测试、fixture、验收和二级文档必须留在 `skills/playwright/`。入口 `playwright.ts` 只调用 `src/index.ts`；不要把实现搬回仓库根 `src/`、`scripts/` 或根测试目录。
 
 ## 本地验证
 
 ```bash
-cd skill-overrides/playwright
+cd skills/playwright
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts
 npm run typecheck
 npm test

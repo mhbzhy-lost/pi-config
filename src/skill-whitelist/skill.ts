@@ -63,7 +63,7 @@ function validateSkillFrontmatter(name, content) {
 
 export async function resolveSkillSource(repoRoot, name) {
   if (!SKILL_NAME_PATTERN.test(name)) throw new Error(`invalid managed skill directory: ${name}`);
-  const sourceRoot = join(repoRoot, "skill-overrides");
+  const sourceRoot = join(repoRoot, "skills");
   const candidate = join(sourceRoot, name);
   let realRoot;
   let realCandidate;
@@ -85,7 +85,7 @@ export async function resolveSkillSource(repoRoot, name) {
 }
 
 export async function discoverManagedSkills(repoRoot) {
-  const sourceRoot = join(repoRoot, "skill-overrides");
+  const sourceRoot = join(repoRoot, "skills");
   const entries = await readdir(sourceRoot, { withFileTypes: true });
   const names = entries
     .filter((entry) => !entry.name.startsWith(".") && (entry.isDirectory() || entry.isSymbolicLink()))
