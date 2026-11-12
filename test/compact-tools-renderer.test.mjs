@@ -144,12 +144,12 @@ test("collapsed SKILL.md reads render as skill loads and expand back to read out
   const collapsedCall = renderers.read.renderCall(args, plainTheme, { expanded: false });
   const collapsedResult = renderers.read.renderResult(result, { expanded: false }, plainTheme, { args });
 
-  assert.match(collapsedCall.render(120)[0], /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] ∗ skill test-driven-development$/);
+  assert.match(collapsedCall.render(120)[0], /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] skill test-driven-development$/);
   assert.deepEqual(collapsedResult.render(120), [""]);
 
   const expandedCall = renderers.read.renderCall(args, plainTheme, { expanded: true });
   const expandedResult = renderers.read.renderResult(result, { expanded: true }, plainTheme, { args });
-  assert.match(expandedCall.render(120)[0], /^[✓⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] ∗ read .*\/SKILL\.md$/);
+  assert.match(expandedCall.render(120)[0], /^[✓⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] read .*\/SKILL\.md$/);
   assert.deepEqual(expandedResult.render(120), [
     "│ first line",
     "│ second line",
@@ -185,11 +185,11 @@ test("skill invocations use the compact tool shell in collapsed and expanded mod
     content: "first line\nsecond line",
   });
 
-  assert.deepEqual(component.render(120), ["∗ skill test-driven-development"]);
+  assert.deepEqual(component.render(120), ["skill test-driven-development"]);
 
   component.setExpanded(true);
   assert.deepEqual(component.render(120), [
-    "∗ skill test-driven-development",
+    "skill test-driven-development",
     "│ first line",
     "│ second line",
     "└─",
@@ -210,7 +210,7 @@ test("narrow path calls stay on one line and preserve the file name", () => {
 
   assert.equal(lines.length, 1);
   assert.ok(lines[0].length <= 40, JSON.stringify(lines));
-  assert.match(lines[0], /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] ∗ write …/);
+  assert.match(lines[0], /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] write …/);
   assert.match(lines[0], /recovery\.md$/);
 });
 
@@ -250,7 +250,7 @@ test("错误转为成功skill读取时清理旧失败摘要", () => {
   assert.match(failed.render(100).join("\n"), /permission denied/);
   context.isError = false;
   renderers.read.renderResult(result, { expanded: false }, plainTheme, context);
-  assert.deepEqual(renderers.read.renderCall(args, plainTheme, context).render(100), ["✓ ∗ skill test-driven-development"]);
+  assert.deepEqual(renderers.read.renderCall(args, plainTheme, context).render(100), ["✓ skill test-driven-development"]);
 });
 
 test("expanded output is bounded and never falls through to an undefined component", () => {
@@ -301,7 +301,7 @@ test("bash_async 合法launch回执折叠只显示已接受待完成摘要，展
   const output = renderers.bash_async.renderResult(result, { expanded: false, isPartial: false }, plainTheme, ctx);
   const lines = [...call.render(120), ...output.render(120)].filter((line) => line.trim());
   assert.equal(lines.length, 1);
-  assert.match(lines[0], /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] ∗ bash_async "sleep 5" · 已接受，待完成 \(550e8400\)$/);
+  assert.match(lines[0], /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] bash_async "sleep 5" · 已接受，待完成 \(550e8400\)$/);
   assert.doesNotMatch(lines.join("\n"), /succeeded|已完成|命令成功|exitCode|sessionId|generation|branchEpoch|acceptedAt/);
   // 展开显示完整身份（receipt JSON 原文），折叠摘要仍是接受语义。
   const expanded = renderers.bash_async.renderResult(result, { expanded: true, isPartial: false }, plainTheme, { ...ctx, expanded: true });

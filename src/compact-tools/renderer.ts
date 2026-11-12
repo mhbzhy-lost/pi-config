@@ -40,7 +40,7 @@ function nonEmptyLineCount(text) {
 }
 
 function title(name, detail, theme) {
-  return `${theme.fg("dim", "∗")} ${theme.fg("toolTitle", theme.bold(name))}${detail ? ` ${detail}` : ""}`;
+  return `${theme.fg("toolTitle", theme.bold(name))}${detail ? ` ${detail}` : ""}`;
 }
 
 function expandedBlock(text, theme, Text, Container) {

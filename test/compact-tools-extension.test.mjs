@@ -77,7 +77,7 @@ test("compact resolver绑定bash_async显示，launch摘要已接受待完成且
   // 调用显示真实工具名 bash_async 与命令，不伪装同步 bash。
   const theme = { bold: (text) => text, fg: (_color, text) => text };
   const args = { command: "sleep 5", cwd: "/tmp", timeout: 15 };
-  assert.match(mine.renderCall(args, theme, { expanded: false, state: {} }).render(100).join(""), /∗ bash_async "sleep 5"/);
+  assert.match(mine.renderCall(args, theme, { expanded: false, state: {} }).render(100).join(""), /bash_async "sleep 5"/);
   // 显示字段覆盖，next 其余 metadata（含 execute）原样保留。
   const nativeExecute = async () => ({ content: [] });
   const sentinel = {};
@@ -116,7 +116,7 @@ test("Host折叠入口在展开错误后恢复成功摘要且不重复添加状�
   const success = { content: [{ type: "text", text: "updated" }], details: undefined };
   const output = tool.renderResult(success, { expanded: false, isPartial: false }, theme, context);
   const lines = [...tool.renderCall(args, theme, context).render(100), ...output.render(100)].filter((line) => line.trim());
-  assert.deepEqual(lines, ["✓ ∗ edit /tmp/fixture.txt (1 edit) · done"]);
+  assert.deepEqual(lines, ["✓ edit /tmp/fixture.txt (1 edit) · done"]);
 });
 
 test("compact不注册或激活工具，原生definition/metadata/execute身份保持", () => {
