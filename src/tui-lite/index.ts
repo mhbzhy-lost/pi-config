@@ -85,12 +85,16 @@ function createSubagentView(pi: ExtensionAPI, close: () => void, tui: TUI, getRu
       selectedId = row?.id;
       if (row) {
         const requestedId = row.id;
-        const detail = await callRpc(pi, "status", { runId: row.id });
+        // 本仓 facade 每个 run 只有一个 executor；普通 status 可能没有顶层 sessionFile，
+        // 必须选中 child 0，使用上游 transcript 元数据中的实际子会话路径。
+        const detail = await callRpc(pi, "status", { runId: row.id, view: "transcript", index: 0, lines: 1 });
         if (disposed || selectedId !== requestedId) return;
         if (!detail.success) throw new Error(`历史或运行详情不可用，任务记录保留（产物可能已清理）：${detail.error?.message ?? "查询失败"}`);
         const state = /^State: (\S+)/m.exec(detail.data?.text ?? "")?.[1];
         if (state) row.state = state;
-        const sessionFile = /^Session: (.+)$/m.exec(detail.data?.text ?? "")?.[1];
+        // 只解析 Artifacts 区，不能把 transcript 正文中形似 Session 的文本当作文件路径。
+        const artifacts = /^Artifacts:\n((?:  [^\n]*(?:\n|$))*)/m.exec(detail.data?.text ?? "")?.[1] ?? "";
+        const sessionFile = /^  Session: (.+)$/m.exec(artifacts)?.[1];
         if (!sessionFile) {
           conversation = undefined;
           transcript = [row.state === "running" || row.state === "queued" ? "等待子会话建立…" : "该历史 run 没有可读取的子会话文件，产物可能已清理。"];
