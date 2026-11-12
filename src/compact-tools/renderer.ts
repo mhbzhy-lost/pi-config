@@ -1,5 +1,6 @@
 import { basename, dirname } from "node:path";
 import { homedir } from "node:os";
+import { COMPACT_STATUS_KEY, statusGlyph, syncStatusAnimation, type CompactRenderStatus } from "./status.ts";
 
 const TOOL_NAMES = ["read", "bash", "bash_async", "edit", "write", "find", "grep", "ls"];
 const COMPACT_SKILL_PATCH = Symbol.for("pi-config.compact-skill-renderer");
@@ -17,7 +18,7 @@ export const sampleArgs = {
 
 function shortPath(path) {
   const home = homedir();
-  return path?.startsWith(home) ? `~${path.slice(home.length)}` : path || ".";
+  return path === home || path?.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path || ".";
 }
 
 function skillName(args) {
@@ -42,23 +43,54 @@ function title(name, detail, theme) {
   return `${theme.fg("dim", "∗")} ${theme.fg("toolTitle", theme.bold(name))}${detail ? ` ${detail}` : ""}`;
 }
 
-function expandedBlock(text, theme, Text, Container, maxLines) {
+function expandedBlock(text, theme, Text, Container) {
   const lines = text.split("\n");
-  while (lines.length > 0 && !lines.at(-1).trim()) lines.pop();
   const container = new Container();
-  for (const line of lines.slice(0, maxLines)) {
+  for (const line of lines) {
     container.addChild(new Text(`${theme.fg("dim", "│")} ${theme.fg("toolOutput", line)}`, 1, 0));
-  }
-  if (lines.length > maxLines) {
-    container.addChild(new Text(theme.fg("dim", `│ ... (${lines.length} total lines)`), 1, 0));
   }
   container.addChild(new Text(theme.fg("dim", "└─"), 1, 0));
   return container;
 }
 
+function serializedBlock(block) {
+  if (block && typeof block === "object" && block.type === "text" && typeof block.text === "string") {
+    const keys = Object.keys(block);
+    if (keys.every((key) => key === "type" || key === "text")) return block.text;
+    return `${block.text}\ncontentBlock:\n${serializedValue(block)}`;
+  }
+  const serialized = JSON.stringify(block, null, 2);
+  return serialized === undefined ? String(block) : serialized;
+}
+
+function serializedValue(value) {
+  const serialized = JSON.stringify(value, null, 2);
+  return serialized === undefined ? String(value) : serialized;
+}
+
+function fullResultText(result, context, getStructuredContent) {
+  const content = typeof result?.content === "string"
+    ? [result.content]
+    : Array.isArray(result?.content) ? result.content.map(serializedBlock) : [];
+  const sections = [...content];
+  if (result?.details !== undefined) sections.push(`details:\n${serializedValue(result.details)}`);
+  if (result?.structuredContent !== undefined) sections.push(`structuredContent:\n${serializedValue(result.structuredContent)}`);
+  const captured = context?.toolCallId && getStructuredContent?.(context.toolCallId);
+  if (result?.structuredContent === undefined && captured !== undefined) {
+    sections.push(`structuredContent:\n${serializedValue(captured)}`);
+  }
+  return sections.join("\n");
+}
+
+function setStatus(context, status) {
+  if (!context?.state) return;
+  context.state[COMPACT_STATUS_KEY] = status;
+  syncStatusAnimation(context, status);
+}
+
 // 失败原因组件：先按终端列宽换行，再限制物理行，原始结果始终不变；invalidate 后以当前主题重建。
 function failedResult({ Text, truncateToWidth, text, theme }) {
-  const errorText = `✗ ${text.trim() || "工具执行失败（未提供错误信息）"}`;
+  const errorText = text.trim() || "工具执行失败（未提供错误信息）";
   let body = new Text(theme.fg("error", errorText), 1, 0);
   return {
     render(width) {
@@ -74,17 +106,23 @@ function failedResult({ Text, truncateToWidth, text, theme }) {
   };
 }
 
-function resultRenderer({ Text, Container, truncateToWidth, summary, maxLines = 60 }) {
+function resultRenderer({ Text, Container, truncateToWidth, summary, getStructuredContent }) {
   return (result, options, theme, context) => {
     const text = textOutput(result);
     const failed = context?.isError === true || result?.isError === true;
+    const partial = options?.isPartial === true;
     const resultSummary = failed ? "失败" : summary(text);
-    if (failed && context?.state) delete context.state[COMPACT_SUMMARY_KEY];
+    if (context?.state) {
+      setStatus(context, failed ? "failure" : partial ? "loading" : "success");
+      if (failed || partial || options.expanded) delete context.state[COMPACT_SUMMARY_KEY];
+    }
     if (options.expanded) {
-      if (text) return expandedBlock(text, theme, Text, Container, maxLines);
+      const expanded = fullResultText(result, context, getStructuredContent);
+      if (expanded) return expandedBlock(expanded, theme, Text, Container);
       return new Text(theme.fg("dim", `  └ ${resultSummary}`), 1, 0);
     }
     if (failed) return failedResult({ Text, truncateToWidth, text, theme });
+    if (partial) return new Text("", 0, 0);
     if (context?.state) context.state[COMPACT_SUMMARY_KEY] = resultSummary;
     return new Text("", 0, 0);
   };
@@ -122,7 +160,7 @@ export function installCompactSkillRenderer({ SkillInvocationMessageComponent, T
   };
 }
 
-export function createCompactToolRenderers({ Text, Container, visibleWidth, sliceByColumn, truncateToWidth, nativeEditRenderers = undefined as { current?: import("@earendil-works/pi-coding-agent").ToolRenderers } | undefined }) {
+export function createCompactToolRenderers({ Text, Container, visibleWidth, sliceByColumn, truncateToWidth, nativeEditRenderers = undefined as { current?: import("@earendil-works/pi-coding-agent").ToolRenderers } | undefined, getStructuredContent = undefined as ((toolCallId: string) => unknown) | undefined }) {
   const summarySuffix = (theme, context) => {
     const summary = !context?.expanded ? context?.state?.[COMPACT_SUMMARY_KEY] : undefined;
     return summary ? theme.fg("dim", ` · ${summary}`) : "";
@@ -130,9 +168,12 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
 
   const singleLine = (text, theme, context) => ({
     render(width) {
-      const status = summarySuffix(theme, context);
-      const textBudget = Math.max(0, width - visibleWidth(status));
-      return [`${truncateToWidth(text, textBudget, "…")}${status}`];
+      const status = context?.state?.[COMPACT_STATUS_KEY] as CompactRenderStatus | undefined;
+      syncStatusAnimation(context, status);
+      const glyph = statusGlyph(theme, status);
+      const summary = summarySuffix(theme, context);
+      const textBudget = Math.max(0, width - visibleWidth(glyph) - 1 - visibleWidth(summary));
+      return [`${glyph} ${truncateToWidth(text, textBudget, "…")}${summary}`];
     },
     invalidate() {},
   });
@@ -140,8 +181,11 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
   const pathCall = (name, path, suffix, theme, context) => ({
     render(width) {
       const prefix = `${title(name, "", theme)} `;
-      const status = summarySuffix(theme, context);
-      const fixedWidth = visibleWidth(prefix) + visibleWidth(suffix) + visibleWidth(status);
+      const status = context?.state?.[COMPACT_STATUS_KEY] as CompactRenderStatus | undefined;
+      syncStatusAnimation(context, status);
+      const glyph = statusGlyph(theme, status);
+      const summary = summarySuffix(theme, context);
+      const fixedWidth = visibleWidth(glyph) + 1 + visibleWidth(prefix) + visibleWidth(suffix) + visibleWidth(summary);
       const pathBudget = Math.max(0, width - fixedWidth);
       const pathWidth = visibleWidth(path);
       let displayedPath = path;
@@ -151,28 +195,36 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
           : `…${sliceByColumn(path, pathWidth - pathBudget + 1, pathBudget - 1, true)}`;
       }
       const call = `${prefix}${theme.fg("accent", displayedPath)}${suffix}`;
-      const callBudget = Math.max(0, width - visibleWidth(status));
-      return [`${truncateToWidth(call, callBudget, "…")}${status}`];
+      const callBudget = Math.max(0, width - visibleWidth(summary));
+      return [`${glyph} ${truncateToWidth(call, Math.max(0, callBudget - visibleWidth(glyph) - 1), "…")}${summary}`];
     },
     invalidate() {},
   });
 
   // edit 的既有 compact result 渲染：折叠单行摘要、失败组件与展开文本块全部保留。
-  const editCompactResultRenderer = resultRenderer({ Text, Container, truncateToWidth, summary: () => "done", maxLines: 30 });
+  const editCompactResultRenderer = resultRenderer({ Text, Container, truncateToWidth, summary: () => "done", getStructuredContent });
   // 展开成功非 partial 且 resolver 注入了原生 edit renderResult 时委托原生（原生消费 details.diff 渲染 +/- diff，
   // 不自造 diff/parser/ANSI）；失败、partial、折叠或 native 缺失时保持 compact 语义，错误原因仍由失败组件可见。
   // 委托时浅拷贝 context 并置空 lastComponent：compact 上一帧组件可能是无 clear() 的 Text/普通对象，
   // 而原生会对其调用 component.clear()；不修改调用方 context 对象，也不触碰 raw result/details。
   const editRenderResult = (result, options, theme, context) => {
     const failed = context?.isError === true || result?.isError === true;
+    const partial = options?.isPartial === true;
     const native = nativeEditRenderers?.current;
+    setStatus(context, failed ? "failure" : partial ? "loading" : "success");
     if (
       options?.expanded === true
       && !failed
-      && options?.isPartial !== true
+      && !partial
       && typeof native?.renderResult === "function"
     ) {
-      return native.renderResult(result, options, theme, { ...context, lastComponent: undefined });
+      const nativeComponent = native.renderResult(result, options, theme, { ...context, lastComponent: undefined });
+      const raw = fullResultText(result, context, getStructuredContent);
+      if (!raw) return nativeComponent;
+      const container = new Container();
+      if (nativeComponent) container.addChild(nativeComponent);
+      container.addChild(expandedBlock(raw, theme, Text, Container));
+      return container;
     }
     return editCompactResultRenderer(result, options, theme, context);
   };
@@ -190,10 +242,13 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
       },
       renderResult(result, options, theme, context) {
         if (!options.expanded && skillName(context?.args) && context?.isError !== true && result?.isError !== true) {
-          if (context?.state) delete context.state[COMPACT_SUMMARY_KEY];
+          if (context?.state) {
+            setStatus(context, options.isPartial === true ? "loading" : "success");
+            delete context.state[COMPACT_SUMMARY_KEY];
+          }
           return new Text("", 0, 0);
         }
-        return resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} lines` })(
+         return resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} lines`, getStructuredContent })(
           result,
           options,
           theme,
@@ -206,7 +261,7 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
         const command = truncate(String(args?.command || "...").replace(/\s+/g, " ").trim(), 70);
         return singleLine(title("bash", theme.fg("accent", `"${command}"`), theme), theme, context);
       },
-      renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} lines` }),
+       renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} lines`, getStructuredContent }),
     },
     // bash_async 专用精简显示：不 alias 同步 bash（其 "1 lines" 摘要既无接受语义又用错标题）。
     bash_async: {
@@ -217,8 +272,9 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
       renderResult(result, options, theme, context) {
         const text = textOutput(result);
         const failed = context?.isError === true || result?.isError === true;
+        const partial = options.isPartial === true;
         // 已接受语义只来自合法 typed receipt：错误以 context.isError 为权威，partial 不提前接受。
-        const launch = !failed && options.isPartial !== true && result?.details?.kind === "bash-async-launch"
+        const launch = !failed && !partial && result?.details?.kind === "bash-async-launch"
           ? result.details
           : undefined;
         const shortJob = launch && typeof launch.jobId === "string" && launch.jobId
@@ -226,23 +282,25 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
           : "";
         const launchSummary = launch ? `已接受，待完成${shortJob}` : undefined;
         if (options.expanded) {
-          // 展开态显示完整原文：launch 的完整身份（receipt JSON）仅在此可见；错误保留完整原因。
-          if (text) return expandedBlock(text, theme, Text, Container, 60);
+          setStatus(context, failed || (!launch && !partial) ? "failure" : "loading");
+          const expanded = fullResultText(result, context, getStructuredContent);
+          if (expanded) return expandedBlock(expanded, theme, Text, Container);
           return new Text(theme.fg("dim", `  └ ${failed ? "失败" : launchSummary || "（未识别的回执格式）"}`), 1, 0);
         }
         if (launch) {
-          if (context?.state) context.state[COMPACT_SUMMARY_KEY] = launchSummary;
+          if (context?.state) {
+            setStatus(context, "loading");
+            context.state[COMPACT_SUMMARY_KEY] = launchSummary;
+          }
           return new Text("", 0, 0);
         }
         // 失败/未知回执不保留旧摘要，避免“已接受”叠加在失败或未识别状态上。
+        setStatus(context, failed || !partial ? "failure" : "loading");
         if (context?.state) delete context.state[COMPACT_SUMMARY_KEY];
         if (failed) return failedResult({ Text, truncateToWidth, text, theme });
         // 未知格式中性显示原文：不猜接受/成功，也不做 production 执行输出兼容。
-        return singleLine(
-          theme.fg("dim", text ? truncate(text.replace(/\s+/g, " ").trim(), 100) : "（未识别的回执格式）"),
-          theme,
-          context,
-        );
+        const unknownText = text ? truncate(text.replace(/\s+/g, " ").trim(), 100) : "（未识别的回执格式）";
+        return new Text(theme.fg("dim", unknownText), 1, 0);
       },
     },
     edit: {
@@ -262,7 +320,7 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
       renderCall(args, theme, context) {
         return pathCall("write", shortPath(args?.path || args?.file_path), "", theme, context);
       },
-      renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: () => "done", maxLines: 20 }),
+       renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: () => "done", getStructuredContent }),
     },
     find: {
       renderCall(args, theme, context) {
@@ -270,7 +328,7 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
         const detail = `${theme.fg("accent", `"${pattern}"`)} ${theme.fg("dim", `in ${shortPath(args?.path || args?.dir)}`)}`;
         return singleLine(title("find", detail, theme), theme, context);
       },
-      renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} matches`, maxLines: 40 }),
+       renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} matches`, getStructuredContent }),
     },
     grep: {
       renderCall(args, theme, context) {
@@ -278,13 +336,13 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
         const detail = `${theme.fg("accent", `"${pattern}"`)} ${theme.fg("dim", `in ${shortPath(args?.path || args?.dir)}`)}`;
         return singleLine(title("grep", detail, theme), theme, context);
       },
-      renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} matches`, maxLines: 40 }),
+       renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} matches`, getStructuredContent }),
     },
     ls: {
       renderCall(args, theme, context) {
         return pathCall("ls", shortPath(args?.path), "", theme, context);
       },
-      renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} entries`, maxLines: 40 }),
+       renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} entries`, getStructuredContent }),
     },
   };
 

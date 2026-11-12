@@ -1,65 +1,22 @@
 # 共享 Agent 规范
 
-本规范适用于本仓库的全部工作，是仓库级通用安全与工程约束：skill、文档、tool 回执文案不得诱导违反本文件。本规范按系统提示优先序执行，不授予系统未授予的权限。
-
 ## 测试与逻辑变更
 
-未经用户明确授权，agent 严禁主动新增测试。
-
-## 拒绝语义与恢复出口（INV-EXIT）
-
-拒绝或失败应说明触发条件和可执行的下一步；无法安全恢复时明确报告阻塞。
+未经用户明确授权，agent 严禁主动新增测试、全新 fixture 或压力场景。
 
 ## Pi 内置 shell 工具
 
 Pi shell 的受限 PATH 包含仓库 `pi/bin/` 中的原生工具：使用 `fd` 查找文件，使用 `rg` 搜索文本；需要表达多文件增删改时，使用 `apply_patch`，通过 stdin 提交完整的 `*** Begin Patch ... *** End Patch` 结构化补丁。三个工具都在当前 bash 工作目录执行。
 
-
-密钥、凭据和证书不得直接访问，可用临时脚本间接访问。
-Git 管理的信息必须脱敏。
-发现凭据泄露时不得自动轮换，记录影响并在任务结束时报告处理建议。
-
-严禁过度脱敏，debug 用途的日志在用户授权下可完全不脱敏。
-
 ## Git Commit 规范
-
-提交、修改提交信息和起草 PR 标题时遵守以下规范：
 
 - 格式为 `type(scope): 中文祈使句`，`scope` 可选；type 仅允许英文小写 `feat`、`fix`、`refactor`、`perf`、`test`、`docs`、`style`、`chore`、`build`、`ci`、`revert`。
 - subject 必须包含至少一个中文字符，不超过 50 字，不以 `。` 或 `.` 结尾；以祈使句动词开头（如“增加”“修复”“重构”），不用“已修复”“实现了”“修复了”等过去时。
-- 禁止以零信息词单独作为 subject：`fix`、`update`、`bugfix`、`wip`、“修改”、“更新”。subject 说明做了什么，body 解释为什么（why），不重复 diff 已说明的 what。
-- 提交信息任何位置禁止 AI 署名或等效辅助标识，包括 `Co-Authored-By: Claude/Copilot/Cursor`（及其他 AI 工具名）、`Generated with Claude`、`AI-assisted`。改动描述中提及 AI 工具文件名（如 `claude-config`）不受此限制。
-- 一次 commit 对应一个逻辑变更，不合并无关改动；修复与对应测试可放同一 commit，重构与修复必须拆开。PR 标题遵循上述 subject 规则。
-- Pi `security-gates` Extension 自动校验 type 白名单、中文字符、句号结尾、过去时、零信息 subject、AI 署名等可机械判定规则；失败会拦截 commit 并返回错误码。机械检查不能代替对祈使句、body 质量、逻辑拆分与 PR 标题的人工核对，也不授予提交权限。
+- 禁止以零信息词单独作为 subject：`fix`、`update`、`bugfix`、`wip`、“修改”、“更新”。subject 说明做了什么，body 解释为什么，不重复 diff 已说明的内容。
+- 提交信息任何位置禁止 AI 署名或等效辅助标识，包括 `Co-Authored-By: Claude/Copilot/Cursor`、`Generated with Claude`、`AI-assisted`。
+- 一次 commit 对应一个逻辑变更，不合并无关改动；修复与对应测试可放同一 commit，重构与修复必须拆开。PR 标题遵循同一规则。
+- Pi `security-gates` Extension 会自动校验 type 白名单、中文字符、句号结尾、过去时、零信息 subject 和 AI 署名；机械检查不能代替人工核对，也不授予提交权限。
 
 ## 输出语言
 
-文档、skill 正文、代码注释等必须使用中文，仅专业用词可豁免。
-
-## 工单
-
-任何工单、申请流程，必须取得用户确认，不得自主提交或绕过确认流程。
-
-## 辅助脚本
-
-遇到大量数据操作时，必须编写辅助脚本进行批量处理，禁止通过大量 bash 调用挨个进行数据分析，浪费时间。
-反例：需要检查 100 个告警在 dp3 中是否有详细数据，执行了 100 次 bash tool。
-正解：编写脚本循环 100 次调用 dp3 tool。必要时可进行并发处理，若目标服务出现并发拒绝，则回退到串行操作。
-
-## 安全边界
-
-- 不输出 token/credential/authorization 内容。
-- TUI 只渲染精简投影，不改写 raw payload；agent 实际收到的消息、tool result、session 内容及其结构化 details 不得为展示目的被改写（根目录 TUI 精简边界同样适用）。
-- 不覆盖 dirty 现场；不对受管 workspace 执行 stash、reset 或 raw git worktree 操作，需要清理时报告并等待指示。
-- completion/status 回执不等于 terminal proof，完成与否以实际验证证据为准。
-
-## 停止条件
-
-发现下列情况时停止相关越界操作并报告阻塞；未经决策不得扩大 scope 或放宽标准：
-
-- 前提与现场证据矛盾时；
-- 需要写入声明写路径之外的文件时；
-- 任务的多项验收标准与实际观测不可能同时满足时；
-- 遇到权限、凭据、产品语义等自身无法决策的阻塞时。
-
-本文件不授予额外工具权限。
+文档、工具指导正文、代码注释等必须使用中文，仅专业用词可豁免。

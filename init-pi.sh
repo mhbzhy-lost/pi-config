@@ -36,7 +36,6 @@ export PI_PACKAGE_DIR="$PI_HOST_ROOT"
 export PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT="$PI_HOST_ROOT"
 
 
-node "$SCRIPT_DIR/scripts/sync-skills.ts"
 node "$SCRIPT_DIR/scripts/ensure-pi-settings.ts"
 
 chmod +x "$PI_LAUNCHER"

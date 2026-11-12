@@ -68,11 +68,11 @@ function failureReason(receipt: BashAsyncTerminalReceipt, truncate: BashAsyncRen
 function foldedProjection(receipt: BashAsyncTerminalReceipt | undefined, truncate: BashAsyncRendererDeps['truncateToWidth']): { text: string; failed: boolean } {
   if (!receipt) {
     // 详情结构未识别：中性保留可见信息，不猜测成功；原文完整保存在 content，可展开查看。
-    return { text: `· ${TOOL_TITLE} 完成回执 · 详情未识别（展开查看原文）`, failed: false };
+    return { text: `✗ ${TOOL_TITLE} 完成回执 · 详情未识别（展开查看原文）`, failed: true };
   }
   const outcome = receipt.outcome;
   const known = outcome === 'succeeded' || FAILURE_OUTCOMES.has(outcome);
-  const mark = outcome === 'succeeded' ? OUTCOME_MARKS.succeeded : FAILURE_OUTCOMES.has(outcome) ? OUTCOME_MARKS[outcome] : '·';
+  const mark = outcome === 'succeeded' ? OUTCOME_MARKS.succeeded : '✗';
   const segments = [
     [TOOL_TITLE, shortJob(receipt.jobId)].filter(Boolean).join(' '),
     previewCommand(receipt.command, truncate),
@@ -81,7 +81,7 @@ function foldedProjection(receipt: BashAsyncTerminalReceipt | undefined, truncat
   if (typeof receipt.exitCode === 'number') segments.push(`exit ${receipt.exitCode}`);
   const elapsed = formatElapsed(receipt.elapsedMs);
   if (elapsed) segments.push(elapsed);
-  const failed = FAILURE_OUTCOMES.has(outcome);
+  const failed = outcome !== 'succeeded';
   const lines = [`${mark} ${segments.join(' · ')}`];
   // 失败原因必须可见：error 形态输出的首行原因截断后跟随回执，原生输出全文仍在展开/raw。
   const reason = failed ? failureReason(receipt, truncate) : '';
@@ -90,14 +90,20 @@ function foldedProjection(receipt: BashAsyncTerminalReceipt | undefined, truncat
 }
 
 function rawTextBlocks(content: CompletionMessage['content']): string[] {
-  if (typeof content === 'string') return content ? [content] : [];
+  if (typeof content === 'string') return [content];
   if (!Array.isArray(content)) return [];
-  return content
-    .filter(block => typeof block === 'object' && block !== null
+  return content.map(block => {
+    if (typeof block === 'object' && block !== null
       && (block as { type?: unknown }).type === 'text'
-      && typeof (block as { text?: unknown }).text === 'string'
-      && (block as { text: string }).text.length > 0)
-    .map(block => (block as { text: string }).text);
+      && typeof (block as { text?: unknown }).text === 'string') {
+      const record = block as unknown as Record<string, unknown>;
+      const keys = Object.keys(record);
+      if (keys.every(key => key === 'type' || key === 'text')) return record.text as string;
+      return `${record.text as string}\ncontentBlock:\n${JSON.stringify(block, null, 2)}`;
+    }
+    const serialized = JSON.stringify(block, null, 2);
+    return serialized === undefined ? String(block) : serialized;
+  });
 }
 
 /**
@@ -112,7 +118,10 @@ export function createBashAsyncCompleteRenderer({ Text, truncateToWidth }: BashA
     const { text, failed } = foldedProjection(receipt, truncateToWidth);
     if (options.expanded) {
       const blocks = rawTextBlocks(message.content);
-      const expanded = blocks.length > 0 ? [text, '', ...blocks].join('\n') : text;
+      const details = message.details === undefined ? [] : [`details:\n${JSON.stringify(message.details, null, 2)}`];
+      const structuredContent = (message as CompletionMessage & { structuredContent?: unknown }).structuredContent;
+      const structured = structuredContent === undefined ? [] : [`structuredContent:\n${JSON.stringify(structuredContent, null, 2)}`];
+      const expanded = [text, ...blocks, ...details, ...structured].join('\n\n');
       // 展开态遵循 SDK outputPad（防非整数触发 Text repeat 异常）；原文仅做视觉换行不改写。
       return new Text(theme.fg(failed ? 'error' : 'dim', expanded), Math.max(0, Math.floor(options.outputPad ?? 1)), 0);
     }

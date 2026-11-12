@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { createBashAsyncCompleteRenderer, createBashAsyncController, createBashAsyncExtension } from '../src/bash-async/index.ts';
 import { createBashToolDefinition } from '@earendil-works/pi-coding-agent';
 import { Text, truncateToWidth, visibleWidth } from '@earendil-works/pi-tui';
-import bashCwdExtension from '../src/bash-cwd/entry.ts';
+import bashCwdExtension from '../src/bash-cwd/bash-cwd.ts';
 
 const deferred = () => Promise.withResolvers();
 const native = (exit = 0, output = 'fixture') => ({ content: [{ type: 'text', text: output }], details: { fixture: true }, structuredContent: { output, exit_code: exit, wall_time_seconds: 0.1 }, ...(exit ? { isError: true } : {}) });
@@ -107,8 +107,8 @@ test('原生definition实际复用：cwd/prefix/trust/session捕获一次，无o
     const c = createBashAsyncExtension({ registerTool: t => tools.push(t), on: (k, h) => events.set(k, h), registerCommand() {}, sendMessage: (...a) => sent.push(a) }, options);
     let sid = 's1'; const ctx = context({ cwd: root, isProjectTrusted: () => false, sessionManager: { getSessionId: () => sid, getSessionFile: () => '/fixture-session' }, model: { provider: 'fixture', id: 'launch-model' } });
     await events.get('session_start')({}, ctx); const tool = tools[0]; assert.equal(tool.outputSchema, undefined); assert.equal(tool.exposure, 'model-only');
-    let updates = 0; const result = await tool.execute('native-id', { command: 'pwd', cwd: 'sub' }, undefined, () => updates++, ctx);
-    const e = await executed.promise; assert.match(e.command, /fixture-prefix\npwd/); assert.equal(e.cwd, join(root, 'sub')); assert.equal(e.env.PI_MODEL, 'launch-model');
+     let updates = 0; const result = await tool.execute('native-id', { command: 'pwd' }, undefined, () => updates++, ctx);
+     const e = await executed.promise; assert.match(e.command, /fixture-prefix\npwd/); assert.equal(e.cwd, root); assert.equal(e.env.PI_MODEL, 'launch-model');
     ctx.model.id = 'later-model'; gate.resolve(); await settled(c);
     assert.equal(e.env.PI_MODEL, 'launch-model'); assert.equal(settings, 1); assert.equal(updates, 0); assert.equal(result.details.kind, 'bash-async-launch');
     assert.equal(sent[0][0].details.output.structuredContent.output, 'native-data'); await c.shutdown('quit');
@@ -200,7 +200,7 @@ test('完成回执renderer：失败/超时/取消/异常清晰可见，不以del
   }
 });
 
-test('完成回执renderer：未知详情中性保留不报成功，空输出不占折叠正文', () => {
+test('完成回执renderer：未知详情统一失败glyph，空输出不占折叠正文', () => {
   const renderer = createBashAsyncCompleteRenderer({ Text, truncateToWidth });
   for (const details of [undefined, null, { kind: 'other' }, { kind: 'bash-async-complete' }]) {
     const { message } = completionMessage();
@@ -208,9 +208,9 @@ test('完成回执renderer：未知详情中性保留不报成功，空输出不
     const { tokens, theme } = themeCapture();
     const lines = renderer(message, { expanded: false, outputPad: 1 }, theme).render(80);
     assert.equal(lines.length, 1);
-    assert.ok(lines[0].includes('·'));
+    assert.ok(lines[0].includes('✗'));
     assert.ok(!lines[0].includes('succeeded') && !lines[0].includes('✓'));
-    assert.deepEqual(tokens, ['dim']);
+    assert.deepEqual(tokens, ['error']);
   }
   const empty = completionMessage();
   empty.message.content = [{ type: 'text', text: '异步 Bash 完成回执：{}\n以下为原生 Bash 输出。' }, { type: 'text', text: '(no output)' }];
@@ -230,7 +230,15 @@ test('完成回执renderer：expanded按outputPad显示原始blocks/错误/nativ
   assert.ok(expanded instanceof Text);
   const lines = expanded.render(2000); // 足够宽避免视觉换行，逐行验证原文完整可达
   const stripped = lines.map(line => line.slice(2).trimEnd()).join('\n'); // 去除outputPad=2左缘与右缘补齐
-  assert.equal(stripped, [foldedLine, '', header.text, 'fixture-native-output'].join('\n'));
+  assert.equal(stripped, [
+    foldedLine,
+    '',
+    header.text,
+    '',
+    'fixture-native-output',
+    '',
+    `details:\n${JSON.stringify(message.details, null, 2)}`,
+  ].join('\n'));
   assert.ok(lines.every(line => line.startsWith('  '))); // 遵循outputPad=2
   // raw不变：引用身份+deepEqual双重断言，renderer独立只读
   assert.equal(message.content, contentRef);

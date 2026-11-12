@@ -17,19 +17,19 @@ source ~/.zshrc
 
 第三方扩展先加入根依赖，再在 `pi/settings.json` 的 `packages` 中使用相对配置根的本地包路径，例如 `../node_modules/@arhen/pi-core-ask`；Pi 会读取包 manifest 的资源声明。共享默认启用项才写入模板，本机启用项只保留在本机 settings。不要通过 `pi install npm:…` 或手工补装 peer 恢复第二套依赖树。
 
-启动入口为 `pi`，`pi-inline` 使用 regular TUI，`pi-lite` 为不自动加载 extension 和 skill 的只读探索模式。
+启动入口只保留 `pi` 和 `pi-lite`；`pi` 使用完整配置，`pi-lite` 使用精简只读环境，并显式提供 deferred `search`/`browser` 工具与 `tool_search`。
 
-扩展代码统一位于 `src/<feature>/`：`entry.ts` 只负责宿主接线，具体实现与它同目录；加载列表由 `pi/settings.template.json` 的 `extensions` 显式声明，已有安装运行 `node scripts/ensure-pi-settings.ts` 同步。本机额外扩展在 `pi/settings.json` 中显式声明；`pi/extensions/` 仅保留上游固定读取的 `subagent/config.json`，不再放扩展代码。
+扩展代码统一位于 `src/<feature>/`：`<feature>.ts` 只负责宿主接线，具体实现与它同目录；加载列表由 `pi/settings.template.json` 的 `extensions` 显式声明，已有安装运行 `node scripts/ensure-pi-settings.ts` 同步。本机额外扩展在 `pi/settings.json` 中显式声明；`pi/extensions/` 不再放本仓扩展代码。
 
 ## 最小 Subagent
 
-当前暴露五个 `pi-subagents` RPC facade：`subagent_spawn({ task, skills? })`、`subagent_status({ runId })`、`subagent_steer({ runId, message })`、`subagent_stop({ runId })` 和 `subagent_resume({ runId, message })`。child 固定使用 `pi/agents/executor.md` profile；工具面、system prompt、skills、extensions 和 nested policy 均由该 Markdown 声明。启动时只将本仓 `pi/agents/` 中同时声明 `advertise: true` 且在 RPC allowlist 内的 profile 元数据注入主会话；`skills` 只选择本次显式指定的 skill 名称。
+当前暴露五个 `pi-subagents` RPC facade：`subagent_spawn({ task })`、`subagent_status({ runId })`、`subagent_steer({ runId, message })`、`subagent_stop({ runId })` 和 `subagent_resume({ runId, message })`。child 固定使用 `pi/agents/executor.md` profile；工具面、system prompt、extensions 和 nested policy 均由该 Markdown 声明。
 
 接线层当前不暴露角色选择、工作区隔离、schedule 或 supervisor。`runId` 是上游返回的 async run 标识；控制工具只接受本接线层的 `runId` 和必要消息，不透传上游的其它定位字段。上游异步 runner 的生命周期与普通短命子进程不同，运行数据和 child session 会持久化。
 
 ## TUI
 
-主会话 footer 第一行展示 cwd、model 和 thinking，第二行展示运行中的 subagent 与折叠的历史数量。按 `Alt+O` 打开只读子会话：正文直接复用 Pi 主会话的消息、Markdown 和工具调用/结果组件；已加载子会话时，footer 展示子会话元数据，不重复显示主会话活动列表。使用 `↑/↓`（或 `k/j`）切换代理，`PgUp/PgDn` 翻页，`End` 回到尾部跟随；`Esc`、`Alt+O` 或 `Ctrl+C` 关闭。查看器每 750ms 通过公开 status RPC 定位选中 run 的 Session 文件，再只读解析结构化会话；不把 transcript 日志解析成消息。刷新受上游落盘时机限制，不是逐 token 流，单个会话读取上限为 64 MiB。查看器不调用 steer、stop 或 resume，也不聚合 bash 活动。
+主会话 footer 只显示三部分：首行左对齐当前会话 cwd，右对齐 `provider/model thinking context/contextWindow`；第二行为空行；第三行起每个运行中的 subagent 或 bash_async 后台任务各占一行。按 `Alt+O` 打开只读子会话：正文直接复用 Pi 主会话的消息、Markdown 和工具调用/结果组件。使用 `↑/↓`（或 `k/j`）切换代理，`PgUp/PgDn` 翻页，`End` 回到尾部跟随；`Esc`、`Alt+O` 或 `Ctrl+C` 关闭。查看器每 750ms 通过公开 status RPC 定位选中 run 的 Session 文件，再只读解析结构化会话；不把 transcript 日志解析成消息。刷新受上游落盘时机限制，不是逐 token 流，单个会话读取上限为 64 MiB。
 
 子会话查看器支持触控板/鼠标滚轮滚动正文；向上滚动进入历史浏览，向下滚动至底部或按 `End` 恢复尾部跟随。
 
@@ -39,15 +39,15 @@ source ~/.zshrc
 
 ## Basic Memory
 
-`src/basic-memory/entry.ts` 提供本地记忆工具。诊断可使用：
+`src/basic-memory/basic-memory.ts` 提供本地记忆工具。诊断可使用：
 
 ```bash
 basic-memory status --local --json
 basic-memory doctor --local
 ```
 
-## Skill
+## Progressive tools
 
-仓库共享 Skill 放在 `skills/`，由 `scripts/sync-skills.ts` 同步；个人 Skill 放在 `~/.agents/skills`。仓库项目 Skill 位于 `.agents/skills/`。
+联网搜索、浏览器自动化、iOS IPA 重签和文档编写指导均已内化为 `src/progressive-tools/<tool>/` 下的 deferred custom tools。每个工具独立维护实现、运行时和 Markdown 资料，不依赖外部文档发现、同步或软链。
 
 工作文档保留在本机 `docs/`，该目录不纳入 Git，也不随仓库推送或分发。

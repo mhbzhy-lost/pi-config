@@ -8,15 +8,15 @@ Pi config root is `pi/` (not `~/.pi`). Agent 规范入口：`pi/AGENTS_SHARED.md
 - Node 原生可执行的 production/CLI 代码统一使用 `.ts`；`scripts/*.ts`、`scripts/probes/*.ts` 和 package 内直接由 Node 调用的 `scripts/*.ts` 仍可通过 shebang/npm script 直接运行。`.mjs` 仅用于 `test/` 下的测试、fixture、测试辅助模块，以及第三方入口或尚未迁移的外部兼容文件；不得为新的 production/CLI 实现选择 `.mjs`。
 - 仓库和 package 的最低 Node 版本固定为 `>=22.19.0`，依赖其原生 TypeScript type-stripping 能力；type-stripping 不等于类型检查，新增或迁移 TypeScript 实现应由 `tsc --noEmit` 或等价静态检查覆盖。
 - `scripts/lib/` 是待迁移的历史目录，不是共享基础库。禁止在其中新增文件、扩大依赖或把新调用方接入其中；修改存量模块时，应优先将实现迁到所属 `src/<feature>/` 或 `packages/<name>/src/`，并在调用方清零后删除旧路径，不保留一行 re-export facade。
-- 本仓扩展统一放在 `src/<feature>/`，每个扩展以 `entry.ts` 负责 Host API 绑定、依赖注入和资源注册，由 `pi/settings.template.json` 显式声明加载。实现与入口同目录，不在 `pi/extensions/` 保留转发壳；该目录仅保留上游固定路径要求的配置文件。
+- 本仓扩展统一放在 `src/<feature>/`，每个扩展以 `<feature>.ts` 负责 Host API 绑定、依赖注入和资源注册，由 `pi/settings.template.json` 显式声明加载。实现与入口同目录，不在 `pi/extensions/` 保留转发壳或本仓配置文件。
 - 根 `src/<feature>/` 存放尚未独立发行的 feature-owned 实现；代码、状态机、codec 和 renderer 按领域归属，不建立根级 `lib/`、`common/`、`utils/` 通用收容目录。
 - `packages/<name>/extensions/` 只放该 package manifest 声明的主 Host 入口，`packages/<name>/child-extensions/` 只放显式注入 child 的入口，实际实现放在 `packages/<name>/src/`。主 Host 与 child 入口不得因复用方便混用发现边界。
-- 跨 feature 依赖只能通过对方明确的公开入口或 package `exports`；禁止深层引用其他 feature 的内部文件，不得把其他 feature 的 `entry.ts` 作为实现库，也禁止从 `src/**` 或 `packages/**/src/**` 反向依赖 `scripts/**` 等宿主入口。
+- 跨 feature 依赖只能通过对方明确的公开入口或 package `exports`；禁止深层引用其他 feature 的内部文件，不得把其他 feature 的 `<feature>.ts` 作为实现库，也禁止从 `src/**` 或 `packages/**/src/**` 反向依赖 `scripts/**` 等宿主入口。
 - 只有具备稳定领域边界、明确 owner 和独立发行/版本价值的能力才可抽为共享 package；不得仅为消除少量重复创建新的通用库。
 
 ## 外部工具接入规范
 
-本仓禁止通过 MCP 接入、注册或直接使用任何工具，包括运行 MCP server 和调用其暴露的 tools。外部工具能力统一通过 skill wrapper 封装调用：任何原 MCP 工具一律改为 skill wrapper 形式使用，不得绕开本规范直接调用 MCP。wrapper 必须消费受支持的 CLI、SDK、HTTP 等非 MCP 入口，不得把 MCP client 藏在 skill 内以 wrapper 名义继续走 MCP。本规范仅约束 MCP 接入形态，不泛化禁止 web browser 等非 MCP 普通工具。
+本仓禁止通过 MCP 接入、注册或直接使用任何工具，包括运行 MCP server 和调用其暴露的 tools。外部工具能力统一通过仓库内受控 custom tool 封装调用；不得把 MCP client 藏在 custom tool 内绕过本规范。custom tool 必须消费受支持的 CLI、SDK、HTTP 等非 MCP 入口。本规范仅约束 MCP 接入形态，不泛化禁止 web browser 等非 MCP 普通工具。
 
 ## npm 源规范
 

@@ -9,8 +9,6 @@ const RPC_REPLY = "subagents:rpc:v1:reply:";
 const AGENT_NAME = "executor";
 const MAX_TASK_BYTES = 32 * 1024;
 const MAX_MESSAGE_BYTES = 32 * 1024;
-const MAX_SKILLS = 32;
-const MAX_SKILL_NAME_BYTES = 256;
 const RPC_TIMEOUT_MS = 60_000;
 const AGENT_CATALOG_ALLOWLIST = new Set([AGENT_NAME]);
 const AGENT_CATALOG_ROOT = join(import.meta.dirname, "..", "..", "pi", "agents");
@@ -79,7 +77,7 @@ function formatAdvertisedAgents(agents: readonly AdvertisedAgent[]): string | un
   const lines = ["可用子代理（仅限本仓 RPC facade 暴露的 agent）："];
   for (const agent of agents) {
     lines.push(`- ${agent.name}：${agent.description}`);
-    lines.push(`  调用：subagent_spawn({ task, skills? })`);
+    lines.push(`  调用：subagent_spawn({ task })`);
     if (agent.tools?.length) lines.push(`  工具：${agent.tools.join(", ")}`);
   }
   return lines.join("\n");
@@ -126,21 +124,6 @@ function toolParameters(required: string[], properties: Record<string, unknown>)
   return { type: "object", additionalProperties: false, required, properties };
 }
 
-function skillListInput(input: unknown): string[] | undefined {
-  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("skills 参数必须是字符串数组");
-  const value = (input as Record<string, unknown>).skills;
-  if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.length > MAX_SKILLS) throw new Error("skills 参数必须是最多 32 项的字符串数组");
-  const skills = value.map((entry, index) => {
-    if (typeof entry !== "string" || !entry.trim()) throw new Error(`skills[${index}] 必须是非空字符串`);
-    const skill = entry.trim();
-    if (Buffer.byteLength(skill, "utf8") > MAX_SKILL_NAME_BYTES) throw new Error(`skills[${index}] 参数过长`);
-    return skill;
-  });
-  if (new Set(skills).size !== skills.length) throw new Error("skills 参数不能包含重复名称");
-  return skills;
-}
-
 function rpcTool(pi: ExtensionAPI, name: string, method: string, description: string, parameters: Record<string, unknown>, buildParams: (input: unknown, ctx: RpcToolBuildContext) => Record<string, unknown>, prompt?: { snippet?: string; guidelines?: string[] }) {
   return {
     name,
@@ -149,7 +132,7 @@ function rpcTool(pi: ExtensionAPI, name: string, method: string, description: st
     ...(prompt?.snippet !== undefined ? { promptSnippet: prompt.snippet } : {}),
     ...(prompt?.guidelines !== undefined ? { promptGuidelines: prompt.guidelines } : {}),
     parameters,
-    exposure: "model-only" as const,
+    exposure: "deferred" as const,
     async execute(_toolCallId: string, input: unknown, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: RpcToolContext) {
       const modelRef = ctx.model
         ? `${ctx.model.provider}/${ctx.model.id}${ctx.thinkingLevel ? `:${ctx.thinkingLevel}` : ""}`
@@ -173,7 +156,7 @@ export function createMinimalSubagentExtension(pi: ExtensionAPI): void {
   // 上游其余工具（subagent、subagents_enable、bg_wait、contact_supervisor 等）仍全部屏蔽，
   // 保持本集成的最小工具面。
   upstream.registerTool = (definition) => {
-    if (definition?.name === "subagent_supervisor") pi.registerTool(definition);
+    if (definition?.name === "subagent_supervisor") pi.registerTool({ ...definition, exposure: "deferred", defaultActive: false });
   };
   upstream.registerCommand = () => {};
   upstream.registerShortcut = () => {};
@@ -189,10 +172,9 @@ export function createMinimalSubagentExtension(pi: ExtensionAPI): void {
     pi,
     "subagent_spawn",
     "spawn",
-    "异步派发一个只读子代理执行独立任务。child 为 fresh context 的只读代理（仅 read/grep/find/ls），不继承项目上下文与任何 skill，继承当前模型。立即返回 runId，不阻塞等待结果；run 结束后会自动唤醒本会话送达结果，不要轮询 status 等待。task 必须自包含：child 看不到本会话历史与项目规范。skills 可选，用于显式注入 child 需要的 skill。后续用返回的 runId 调 status/steer/stop 管理。",
+    "异步派发一个 fresh context 的编码执行代理完成独立任务。child 不继承本会话历史或项目上下文，可使用 read/write/edit/bash/grep/find/ls；只修改任务合同允许的范围。立即返回 runId，不阻塞等待结果；run 结束后会自动唤醒本会话送达结果，不要轮询 status 等待。task 必须自包含：child 看不到本会话历史与项目规范。后续用返回的 runId 调 status/steer/stop 管理。",
     toolParameters(["task"], {
       task: { type: "string", minLength: 1, maxLength: MAX_TASK_BYTES, description: "委派给子代理的完整任务描述，需自包含（child 无本会话上下文）" },
-      skills: { type: "array", maxItems: MAX_SKILLS, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: MAX_SKILL_NAME_BYTES }, description: "可选：显式注入 child 的 skill 名称列表，默认不继承任何 skill" },
     }),
     (input, ctx) => ({
       agent: AGENT_NAME,
@@ -202,13 +184,9 @@ export function createMinimalSubagentExtension(pi: ExtensionAPI): void {
       async: true,
       mission: false,
       ...(ctx.modelRef ? { model: ctx.modelRef } : {}),
-      ...(() => {
-        const skills = skillListInput(input);
-        return skills === undefined ? {} : { skill: skills };
-      })(),
     }),
     {
-      snippet: "异步派发只读子代理执行独立任务；返回 runId，结果完成时自动唤醒本会话",
+      snippet: "异步派发编码执行代理完成独立任务；返回 runId，结果完成时自动唤醒本会话",
       guidelines: [
         "subagent_spawn 派发的 run 结束后会自动唤醒本会话；不要循环调用 subagent_status 轮询等待结果。",
         "subagent_spawn 的 task 必须自包含：child 是 fresh context，看不到本会话历史与项目规范。",

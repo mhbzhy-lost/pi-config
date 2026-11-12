@@ -10,7 +10,7 @@ after(() => {
 });
 
 const { codingAgent, jiti } = await loadPiTestRuntime(import.meta.url);
-const compactToolsModule = await jiti.import("../src/compact-tools/entry.ts");
+const compactToolsModule = await jiti.import("../src/compact-tools/compact-tools.ts");
 const compactTools = compactToolsModule.default;
 const names = ["read", "bash", "edit", "write", "find", "grep", "ls"];
 const factories = Object.fromEntries(names.map((name) => [
@@ -110,13 +110,13 @@ test("Host折叠入口在展开错误后恢复成功摘要且不重复添加状�
   tool.renderResult(failure, { expanded: true, isPartial: false }, theme, context);
   context.expanded = false;
   const failed = tool.renderResult(failure, { expanded: false, isPartial: false }, theme, context);
-  assert.match(failed.render(100).join("\n"), /✗ edit conflict/);
+  assert.match(failed.render(100).join("\n"), /edit conflict/);
   context.isError = false;
   context.expanded = false;
   const success = { content: [{ type: "text", text: "updated" }], details: undefined };
   const output = tool.renderResult(success, { expanded: false, isPartial: false }, theme, context);
   const lines = [...tool.renderCall(args, theme, context).render(100), ...output.render(100)].filter((line) => line.trim());
-  assert.deepEqual(lines, ["∗ edit /tmp/fixture.txt (1 edit) · done"]);
+  assert.deepEqual(lines, ["✓ ∗ edit /tmp/fixture.txt (1 edit) · done"]);
 });
 
 test("compact不注册或激活工具，原生definition/metadata/execute身份保持", () => {

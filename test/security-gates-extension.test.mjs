@@ -29,7 +29,7 @@ test("tool_call blocks bash commands using event input and context cwd", async (
   assert.match(result.reason, /workspace 外 rm/);
 });
 
-test("tool_call keeps ctx.cwd as shell-policy workspaceRoot while using a valid declared cwd", async () => {
+test("tool_call rejects a declared bash cwd because the tool uses the session workspace", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "bash-gate-workspace-"));
   const declaredCwd = resolve(root, "packages", "app");
   await mkdir(declaredCwd, { recursive: true });
@@ -44,10 +44,9 @@ test("tool_call keeps ctx.cwd as shell-policy workspaceRoot while using a valid 
       { cwd: root },
     );
 
-    assert.equal(declaredResult, undefined);
-    assert.equal(policyCalls.length, 1);
-    assert.equal(policyCalls[0].workspaceRoot, root);
-    assert.equal(policyCalls[0].cwd, await realpath(declaredCwd));
+    assert.equal(declaredResult?.block, true);
+    assert.match(declaredResult.reason, /不支持 cwd/);
+    assert.equal(policyCalls.length, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -142,7 +141,7 @@ test("tool_call blocks destructive git via bash shell-policy", async () => {
   assert.match(result.reason, /不可逆 Git/);
 });
 
-test("bash_async 与 bash 共用 shell policy/cwd，不因改工具名放行", async () => {
+test("bash_async 与 bash 共用 shell policy，且都拒绝 cwd 参数", async () => {
   const handlers = setup();
   const gate = handlers.get('tool_call');
   for (const command of ['git reset --hard HEAD~1', 'rm -rf /Users/shared']) {

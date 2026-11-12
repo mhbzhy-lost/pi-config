@@ -9,7 +9,7 @@ const template = {
   hideThinkingBlock: true,
   cacheWarming: "streaming",
   packages: [],
-  extensions: ["../src/compact-tools/entry.ts"],
+  extensions: ["../src/compact-tools/compact-tools.ts"],
 };
 
 async function fixture(existing) {
@@ -82,13 +82,13 @@ test("replaying ensure is idempotent", async () => {
 });
 
 test('existing settings增量启用codemode并禁tool_search/llama，保留本机enabledModels',async()=>{
- const paths=await fixture({enabledModels:['local/model'],defaultTools:['read','bash'],extensions:['custom.ts'],skills:['old-skill']});
- try {await writeFile(paths.templatePath,JSON.stringify({...template,defaultTools:['+codemode','-tool_search'],extensions:['-builtin:tool-search','-builtin:llama.cpp'],skills:['!**/plan-runner-dispatch/**']}));await ensureSettings({target:paths.target,template:paths.templatePath});const value=JSON.parse(await readFile(paths.target,'utf8'));assert.deepEqual(value.defaultTools,['read','bash','+codemode','-tool_search']);assert.deepEqual(value.extensions,['custom.ts','-builtin:tool-search','-builtin:llama.cpp']);assert.deepEqual(value.skills,['old-skill','!**/plan-runner-dispatch/**']);assert.deepEqual(value.enabledModels,['local/model']);}
+ const paths=await fixture({enabledModels:['local/model'],defaultTools:['read','bash'],extensions:['custom.ts']});
+ try {await writeFile(paths.templatePath,JSON.stringify({...template,defaultTools:['+codemode','-tool_search'],extensions:['-builtin:tool-search','-builtin:llama.cpp']}));await ensureSettings({target:paths.target,template:paths.templatePath});const value=JSON.parse(await readFile(paths.target,'utf8'));assert.deepEqual(value.defaultTools,['read','bash','+codemode','-tool_search']);assert.deepEqual(value.extensions,['custom.ts','-builtin:tool-search','-builtin:llama.cpp']);assert.deepEqual(value.enabledModels,['local/model']);}
  finally{await rm(paths.root,{recursive:true,force:true});}
 });
 
 test('ensure和check在相反精确resource selector存在时拒绝且不写入', async () => {
-  for (const field of ['extensions', 'defaultTools', 'skills']) for (const selector of ['builtin:mcp', 'builtin:code-mode', 'builtin:tool-search']) {
+   for (const field of ['extensions', 'defaultTools']) for (const selector of ['builtin:mcp', 'builtin:code-mode', 'builtin:tool-search']) {
     const paths = await fixture({ enabledModels: ['local/model'], [field]: [`+${selector}`] });
     try {
       await writeFile(paths.templatePath, JSON.stringify({ ...template, [field]: [`-${selector}`] }));
@@ -105,7 +105,7 @@ test('ensure和check在相反精确resource selector存在时拒绝且不写入'
 });
 
 test('已有双方精确token和template自身相反token在写入前拒绝', async () => {
-  for (const field of ['extensions', 'defaultTools', 'skills']) {
+   for (const field of ['extensions', 'defaultTools']) {
     const both = await fixture({ enabledModels: ['local/model'], [field]: ['+builtin:tool-search', '-builtin:tool-search'] });
     try {
       await writeFile(both.templatePath, JSON.stringify({ ...template, [field]: ['-builtin:tool-search'] }));
@@ -115,7 +115,7 @@ test('已有双方精确token和template自身相反token在写入前拒绝', as
       assert.equal(await readFile(both.target, 'utf8'), before);
     } finally { await rm(both.root, { recursive: true, force: true }); }
   }
-  for (const field of ['extensions', 'defaultTools', 'skills']) {
+   for (const field of ['extensions', 'defaultTools']) {
     const paths = await fixture({ enabledModels: ['local/model'] });
     try {
       await writeFile(paths.templatePath, JSON.stringify({ ...template, [field]: ['+builtin:mcp', '-builtin:mcp'] }));

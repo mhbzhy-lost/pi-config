@@ -6,7 +6,6 @@ models:
   - codex-pool/gpt-6.1-terra
 thinking: high
 systemPromptMode: append
-inheritSkills: false
 extensions: []
 allowNestedSubagents: false
 tools: read,write,edit,bash,grep,find,ls

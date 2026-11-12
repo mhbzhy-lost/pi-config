@@ -8,8 +8,6 @@ export PI_CODING_AGENT_SESSION_DIR="${PI_CODING_AGENT_SESSION_DIR:-$_PI_CONFIG_R
 export PI_CODING_GOAL_DIR="${PI_CODING_AGENT_GOAL_DIR:-${PI_CODING_GOAL_DIR:-$_PI_CONFIG_ROOT/var/goals}}"
 export PI_CODING_WORKSPACE_DIR="${PI_CODING_AGENT_WORKSPACE_DIR:-${PI_CODING_WORKSPACE_DIR:-$_PI_CONFIG_ROOT/var/workspaces}}"
 
-# 普通入口使用 Pi 原生 Skill 发现，不隐式传 --no-skills；
-# 用户显式 --no-skills 经 "$@" 原样转发，pi-lite 在自身分支显式禁用。
 _pi_config_invoke() {
   "$_PI_CONFIG_ROOT/scripts/pi-launcher.zsh" "$@"
 }
@@ -19,27 +17,17 @@ pi() {
   _pi_config_invoke --tui-mode fullscreen "$@"
 }
 
-pi-inline() {
-  _pi_config_invoke --tui-mode regular "$@"
-}
-
-pi-full() {
-  pi "$@"
-}
-
-# 精简版只读探索模式：不加载上下文文件/extensions/skills 发现与 prompt 模板，
-# 仅显式挂载 deepseek-search 与 playwright 两个 skill，且只保留 read/bash 工具。
-# 依赖：deepseek-search 使用 Python CLI，playwright 使用 Node TypeScript SDK 入口，均不依赖 extension；
-# launcher 显式追加的 session-owner extension 在 --no-extensions 下仍会加载。
+# 精简版只读探索模式：不加载上下文文件和普通 extensions，只显式加载 progressive tools
+# 与 tool_search，因此可按需发现 search/browser；launcher 追加的 session-owner extension
+# 在 --no-extensions 下仍会加载。
 pi-lite() {
   _pi_config_invoke \
-    --no-skills \
     -nc \
     -na \
     --no-extensions \
     --no-prompt-templates \
-    --skill "$_PI_CONFIG_ROOT/skills/deepseek-search/SKILL.md" \
-    --skill "$_PI_CONFIG_ROOT/skills/playwright/SKILL.md" \
-    --tools read,bash \
+    -e "$_PI_CONFIG_ROOT/src/progressive-tools/progressive-tools.ts" \
+    -e builtin:tool-search \
+    --tools read,bash,tool_search \
     "$@"
 }

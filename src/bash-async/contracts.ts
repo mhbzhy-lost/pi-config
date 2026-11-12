@@ -1,7 +1,10 @@
 import type { AgentToolResult } from '@earendil-works/pi-agent-core';
 import type { ExtensionToolContext } from '@earendil-works/pi-coding-agent';
 
-export type BashAsyncRequest = { command: string; timeout?: number; cwd?: string };
+export type BashAsyncRequest = { command: string; timeout?: number };
+export const BASH_ASYNC_FOOTER_EVENT = 'bash-async:footer:v1';
+export type BashAsyncFooterTask = Readonly<{ id: string; command: string; state: 'running' }>;
+export type BashAsyncFooterSnapshot = Readonly<{ tasks: readonly BashAsyncFooterTask[] }>;
 export type BashAsyncLaunchReceipt = {
   kind: 'bash-async-launch'; jobId: string; toolCallId: string; sessionId: string;
   generation: number; branchEpoch: number; command: string; cwd: string; acceptedAt: string;

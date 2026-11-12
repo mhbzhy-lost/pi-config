@@ -144,12 +144,12 @@ test("collapsed SKILL.md reads render as skill loads and expand back to read out
   const collapsedCall = renderers.read.renderCall(args, plainTheme, { expanded: false });
   const collapsedResult = renderers.read.renderResult(result, { expanded: false }, plainTheme, { args });
 
-  assert.deepEqual(collapsedCall.render(120), ["∗ skill test-driven-development"]);
+  assert.match(collapsedCall.render(120)[0], /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] ∗ skill test-driven-development$/);
   assert.deepEqual(collapsedResult.render(120), [""]);
 
   const expandedCall = renderers.read.renderCall(args, plainTheme, { expanded: true });
   const expandedResult = renderers.read.renderResult(result, { expanded: true }, plainTheme, { args });
-  assert.match(expandedCall.render(120)[0], /^∗ read .*\/SKILL\.md$/);
+  assert.match(expandedCall.render(120)[0], /^[✓⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] ∗ read .*\/SKILL\.md$/);
   assert.deepEqual(expandedResult.render(120), [
     "│ first line",
     "│ second line",
@@ -210,7 +210,7 @@ test("narrow path calls stay on one line and preserve the file name", () => {
 
   assert.equal(lines.length, 1);
   assert.ok(lines[0].length <= 40, JSON.stringify(lines));
-  assert.match(lines[0], /^∗ write …/);
+  assert.match(lines[0], /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] ∗ write …/);
   assert.match(lines[0], /recovery\.md$/);
 });
 
@@ -247,10 +247,10 @@ test("错误转为成功skill读取时清理旧失败摘要", () => {
   const context = { args, state: {}, isError: true, expanded: false };
   const failure = { content: [{ type: "text", text: "permission denied" }], details: undefined };
   const failed = renderers.read.renderResult(failure, { expanded: false }, plainTheme, context);
-  assert.match(failed.render(100).join("\n"), /✗ permission denied/);
+  assert.match(failed.render(100).join("\n"), /permission denied/);
   context.isError = false;
   renderers.read.renderResult(result, { expanded: false }, plainTheme, context);
-  assert.deepEqual(renderers.read.renderCall(args, plainTheme, context).render(100), ["∗ skill test-driven-development"]);
+  assert.deepEqual(renderers.read.renderCall(args, plainTheme, context).render(100), ["✓ ∗ skill test-driven-development"]);
 });
 
 test("expanded output is bounded and never falls through to an undefined component", () => {
@@ -265,7 +265,7 @@ test("expanded output is bounded and never falls through to an undefined compone
   ]);
 });
 
-test("expanded output removes trailing empty lines without removing internal empty lines", () => {
+test("expanded output preserves trailing empty lines and internal empty lines", () => {
   const renderers = setup();
   const trailingNewlineResult = {
     content: [{ type: "text", text: "first line\n\nthird line\n" }],
@@ -277,6 +277,7 @@ test("expanded output removes trailing empty lines without removing internal emp
     "<dim>│</dim> <toolOutput>first line</toolOutput>",
     "<dim>│</dim> <toolOutput></toolOutput>",
     "<dim>│</dim> <toolOutput>third line</toolOutput>",
+    "<dim>│</dim> <toolOutput></toolOutput>",
     "<dim>└─</dim>",
   ]);
 });
@@ -299,7 +300,8 @@ test("bash_async 合法launch回执折叠只显示已接受待完成摘要，展
   const call = renderers.bash_async.renderCall(args, plainTheme, ctx);
   const output = renderers.bash_async.renderResult(result, { expanded: false, isPartial: false }, plainTheme, ctx);
   const lines = [...call.render(120), ...output.render(120)].filter((line) => line.trim());
-  assert.deepEqual(lines, ["∗ bash_async \"sleep 5\" · 已接受，待完成 (550e8400)"]);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] ∗ bash_async "sleep 5" · 已接受，待完成 \(550e8400\)$/);
   assert.doesNotMatch(lines.join("\n"), /succeeded|已完成|命令成功|exitCode|sessionId|generation|branchEpoch|acceptedAt/);
   // 展开显示完整身份（receipt JSON 原文），折叠摘要仍是接受语义。
   const expanded = renderers.bash_async.renderResult(result, { expanded: true, isPartial: false }, plainTheme, { ...ctx, expanded: true });
@@ -322,9 +324,11 @@ test("bash_async 错误以context.isError为准显示原因并清理旧接受摘
 
   const failure = { content: [{ type: "text", text: "cwd 不存在：/nope" }], details: undefined, isError: true };
   const before = structuredClone(failure);
-  const failed = renderers.bash_async.renderResult(failure, { expanded: false, isPartial: false }, plainTheme, { ...ctx, isError: true });
-  const lines = failed.render(100);
-  assert.match(lines.join("\n"), /✗ cwd 不存在：\/nope/);
+   const failedContext = { ...ctx, isError: true };
+   const failed = renderers.bash_async.renderResult(failure, { expanded: false, isPartial: false }, plainTheme, failedContext);
+   const lines = [...renderers.bash_async.renderCall(args, plainTheme, failedContext).render(100), ...failed.render(100)];
+   assert.match(lines.join("\n"), /✗/);
+   assert.match(lines.join("\n"), /cwd 不存在：\/nope/);
   assert.equal(state.compactToolsSummary, undefined);
   const expanded = renderers.bash_async.renderResult(failure, { expanded: true, isPartial: false }, plainTheme, { ...ctx, isError: true, expanded: true });
   assert.match(expanded.render(100).join("\n"), /cwd 不存在：\/nope/);
@@ -333,7 +337,7 @@ test("bash_async 错误以context.isError为准显示原因并清理旧接受摘
   // 直接result.isError调用兼容（无context.isError）。
   const direct = { content: [{ type: "text", text: "explicit failure" }], details: undefined, isError: true };
   const directOutput = renderers.bash_async.renderResult(direct, { expanded: false, isPartial: false }, plainTheme, ctx);
-  assert.match(directOutput.render(100).join("\n"), /✗ explicit failure/);
+  assert.match(directOutput.render(100).join("\n"), /explicit failure/);
 });
 
 test("bash_async partial与未知格式中性显示，不提前接受、不猜成功", () => {
@@ -418,13 +422,14 @@ test("edit展开成功经resolver next()委托原生renderResult渲染details.di
   assert.match(visible, /-1 old line/);
   assert.match(visible, /\+1 new line/);
   assert.match(visible, /保留的上下文/);
-  // 原生展开渲染 diff（与原生 Pi 一致），不以 compact 文本块替代，也不丢失 content 之外的新增语义。
-  assert.doesNotMatch(visible, /Updated fixture\.txt/);
+  // 原生 diff 作为补充视图，同时完整 content/details 也必须保留。
+  assert.match(visible, /Updated fixture\.txt/);
+  assert.match(visible, /firstChangedLine/);
   assert.deepEqual(result, before);
   assertReferencesUnchanged([result.content, result.details, result.content[0]], references);
   // 原 context/state/result/details 不被修改：lastComponent 置空只发生在传给原生的浅拷贝上。
   assert.equal(ctx.state, state);
-  assert.deepEqual(ctx.state, {});
+  assert.deepEqual(ctx.state, { compactToolsStatus: "success" });
   assert.deepEqual({ ...ctx }, ctxSnapshot);
 });
 
@@ -479,9 +484,10 @@ test("edit失败展开显示错误、partial与折叠不委托native（spy经nex
   const failureReferences = [failure.content, failure.details];
   const failed = edit.renderResult(failure, { expanded: true, isPartial: false }, passthroughTheme, editContext({ isError: true, expanded: true }));
   const failedVisible = failed.render(100).join("\n");
-  // 既有 compact 展开态显示完整错误原文；✗ 是折叠失败组件的标记，不强加到展开合同。
+  // 展开态显示完整错误原文与 details；失败 glyph 只由调用头部负责。
   assert.match(failedVisible, /edit conflict：oldText 未匹配/);
-  assert.doesNotMatch(failedVisible, /old line|new line|native-diff/);
+  assert.match(failedVisible, /old line|new line/);
+  assert.doesNotMatch(failedVisible, /native-diff/);
   assert.equal(nativeCalls, 0);
   assert.deepEqual(failure, failureBefore);
   assertReferencesUnchanged([failure.content, failure.details], failureReferences);
@@ -490,7 +496,8 @@ test("edit失败展开显示错误、partial与折叠不委托native（spy经nex
   const partial = edit.renderResult(success, { expanded: true, isPartial: true }, passthroughTheme, editContext({ expanded: true, isPartial: true }));
   const partialVisible = partial.render(120).join("\n");
   assert.match(partialVisible, /first line/);
-  assert.doesNotMatch(partialVisible, /old line|new line|native-diff/);
+  assert.match(partialVisible, /old line|new line/);
+  assert.doesNotMatch(partialVisible, /native-diff/);
   assert.equal(nativeCalls, 0);
 
   // 折叠成功：单行摘要，不委托 native。

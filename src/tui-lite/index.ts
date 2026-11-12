@@ -1,11 +1,13 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, wrapTextWithAnsi, matchesKey, Key, type Component, type TUI } from "@earendil-works/pi-tui";
+import { truncateToWidth, wrapTextWithAnsi, matchesKey, Key, type Component, type TUI, visibleWidth } from "@earendil-works/pi-tui";
+import { homedir } from "node:os";
+import { BASH_ASYNC_FOOTER_EVENT, type BashAsyncFooterSnapshot } from "../bash-async/index.ts";
 import { NativeConversation } from "./native-conversation.ts";
 
 const RPC_REQUEST = "subagents:rpc:v1:request";
 const RPC_REPLY = "subagents:rpc:v1:reply:";
 type RpcReply = { success: boolean; data?: { text?: string; asyncSnapshot?: { runs?: AsyncNode[] } }; error?: { message?: string } };
-type AsyncNode = { id: string; label?: string; state?: string; agent?: string; model?: string; activity?: { currentTool?: string } };
+type AsyncNode = { id: string; kind?: string; label?: string; state?: string; agent?: string; model?: string; activity?: { currentTool?: string } };
 
 function callRpc(pi: ExtensionAPI, method: string, params: Record<string, unknown>): Promise<RpcReply> {
   const requestId = crypto.randomUUID();
@@ -27,6 +29,18 @@ function stateLabel(state: string | undefined): string {
   return ({ history: "历史", queued: "排队中", running: "运行中", complete: "已完成", partial: "部分完成", rejected: "已拒绝", failed: "失败", paused: "已暂停", stopped: "已停止" } as Record<string, string>)[state ?? ""] ?? state ?? "未知";
 }
 
+function formatTokens(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "?";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
+  return String(Math.round(value));
+}
+
+function displayCwd(cwd: string): string {
+  const home = homedir();
+  return cwd === home ? "~" : cwd.startsWith(`${home}/`) ? `~${cwd.slice(home.length)}` : cwd;
+}
+
 function activityRows(runs: readonly AsyncNode[]): AsyncNode[] {
   return runs.filter((run) => typeof run.id === "string" && run.id.length > 0);
 }
@@ -46,7 +60,7 @@ function sessionHistory(ctx: ExtensionContext): AsyncNode[] {
   return [...runs.values()];
 }
 
-function createSubagentView(pi: ExtensionAPI, close: () => void, tui: TUI, getRuns: () => Promise<AsyncNode[]>, onSelection: (rows: AsyncNode[], id?: string, conversation?: NativeConversation) => void, initialId?: string): Component & { dispose(): void } {
+function createSubagentView(pi: ExtensionAPI, close: () => void, tui: TUI, getRuns: () => Promise<AsyncNode[]>, onSelection: (rows: AsyncNode[], id?: string) => void, initialId?: string): Component & { dispose(): void } {
   const requestRender = () => tui.requestRender();
   let rows: AsyncNode[] = [];
   let selected = 0;
@@ -92,7 +106,7 @@ function createSubagentView(pi: ExtensionAPI, close: () => void, tui: TUI, getRu
           conversation = next;
           transcript = [];
         }
-        onSelection(rows, selectedId, conversation);
+        onSelection(rows, selectedId);
       } else { conversation = undefined; transcript = ["暂无 subagent run"]; onSelection(rows, undefined); }
     } catch (error) {
       conversation = undefined;
@@ -157,16 +171,22 @@ export function createTuiRuntime(pi: ExtensionAPI): void {
   let footerTimer: ReturnType<typeof setInterval> | undefined;
   let footerRows: AsyncNode[] = [];
   let footerSelectedId: string | undefined;
-  let overlayFooter: { cwd: string; model: string; thinking: string } | undefined;
+  let bashAsyncTasks: BashAsyncFooterSnapshot['tasks'] = [];
+  let footerRequestRender: (() => void) | undefined;
   let getRuns: (() => Promise<AsyncNode[]>) | undefined;
-  const close = () => { closeOverlay?.(); closeOverlay = undefined; overlayFooter = undefined; };
-  const stopFooter = () => { clearInterval(footerTimer); footerTimer = undefined; footerRows = []; };
+  const close = () => { closeOverlay?.(); closeOverlay = undefined; };
+  const stopFooter = () => { clearInterval(footerTimer); footerTimer = undefined; footerRows = []; bashAsyncTasks = []; };
 
   pi.on("session_start", (_event, ctx) => {
     close();
     stopFooter();
     if (ctx.mode !== "tui") { current = undefined; return; }
     current = ctx;
+    const unsubscribeBashAsync = pi.events.on(BASH_ASYNC_FOOTER_EVENT, (value) => {
+      const snapshot = value as BashAsyncFooterSnapshot;
+      bashAsyncTasks = Array.isArray(snapshot?.tasks) ? snapshot.tasks : [];
+      footerRequestRender?.();
+    });
     const history = new Map(sessionHistory(ctx).map(row => [row.id, row]));
     let entryCount = ctx.sessionManager.getEntries().length;
     getRuns = async () => {
@@ -183,6 +203,7 @@ export function createTuiRuntime(pi: ExtensionAPI): void {
     };
     const loadRuns = getRuns;
     ctx.ui.setFooter((tui, theme) => {
+      footerRequestRender = () => tui.requestRender();
       let busy = false;
       const refresh = async () => {
         if (busy || closeOverlay || current !== ctx) return;
@@ -199,18 +220,23 @@ export function createTuiRuntime(pi: ExtensionAPI): void {
       void refresh().catch(() => {});
       return {
         render(width: number) {
-           const footerSource = closeOverlay ? overlayFooter : undefined;
-           const model = footerSource?.model ?? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "no-model");
-           const line = `${footerSource?.cwd ?? ctx.cwd} · ${model} · ${footerSource?.thinking ?? ctx.thinkingLevel ?? "off"}`;
-           if (closeOverlay) return [theme.fg("dim", truncateToWidth(line, width, "…"))];
-           const active = footerRows.filter(row => row.state === "queued" || row.state === "running" || row.state === "paused");
-          const tasks = active.map(row => `${row.id === footerSelectedId ? "> " : ""}${row.label || row.agent || row.id} · ${stateLabel(row.state)}`);
-          const history = footerRows.length - active.length;
-          if (history) tasks.push(`◯ history ${history}`);
-          return [theme.fg("dim", truncateToWidth(line, width, "…")), ...(tasks.length ? [truncateToWidth(tasks.join("  │  "), width, "…")] : [])];
+          const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "no-model";
+          const usage = ctx.getContextUsage();
+          const context = `${formatTokens(usage?.tokens)}/${formatTokens(usage?.contextWindow)}`;
+          const right = `${model} ${ctx.thinkingLevel ?? "off"} ${context}`;
+          const rightText = truncateToWidth(right, Math.max(0, width), "…");
+          const leftBudget = Math.max(0, width - visibleWidth(rightText) - (rightText ? 1 : 0));
+          const leftText = truncateToWidth(displayCwd(ctx.cwd), leftBudget, "…");
+          const first = rightText && leftText
+            ? `${leftText}${" ".repeat(Math.max(1, width - visibleWidth(leftText) - visibleWidth(rightText)))}${rightText}`
+            : truncateToWidth(leftText || rightText, Math.max(0, width), "…");
+          const active = footerRows.filter(row => row.state === "queued" || row.state === "running" || row.state === "paused");
+          const subagents = active.map(row => `subagent ${row.label || row.agent || row.id} · ${stateLabel(row.state)}`);
+          const bash = bashAsyncTasks.map(task => `bash_async "${task.command.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim()}" · ${stateLabel(task.state)}`);
+          return [theme.fg("dim", first), "", ...[...subagents, ...bash].map(task => truncateToWidth(task, Math.max(0, width), "…"))];
         },
         invalidate() { tui.requestRender(); },
-        dispose() { stopFooter(); },
+        dispose() { footerRequestRender = undefined; unsubscribeBashAsync(); stopFooter(); },
       };
     });
   });
@@ -222,7 +248,7 @@ export function createTuiRuntime(pi: ExtensionAPI): void {
       if (!current || !getRuns || shortcutCtx.sessionManager !== current.sessionManager) return;
       const owner = current;
       const loadRuns = getRuns;
-      void owner.ui.custom((tui, theme, _keybindings, done) => {
+          void owner.ui.custom((tui, theme, _keybindings, done) => {
         let finished = false;
         let view: ReturnType<typeof createSubagentView> | undefined;
         const finish = () => {
@@ -233,11 +259,9 @@ export function createTuiRuntime(pi: ExtensionAPI): void {
           done(undefined);
         };
         closeOverlay = finish;
-         view = createSubagentView(pi, finish, tui, loadRuns, (rows, id, conversation) => {
-           footerRows = rows; footerSelectedId = id;
-           const selected = rows.find(row => row.id === id);
-           overlayFooter = conversation ? { cwd: conversation.getCwd(), model: conversation.getModel(), thinking: conversation.getThinking() } : undefined;
-           tui.requestRender();
+          view = createSubagentView(pi, finish, tui, loadRuns, (rows, id) => {
+            footerRows = rows; footerSelectedId = id;
+            tui.requestRender();
          }, footerSelectedId);
         return {
           render(width: number) { return view.render(width); },
@@ -253,5 +277,5 @@ export function createTuiRuntime(pi: ExtensionAPI): void {
     },
   });
 
-  pi.on("session_shutdown", () => { close(); stopFooter(); current = undefined; getRuns = undefined; });
+  pi.on("session_shutdown", () => { close(); stopFooter(); bashAsyncTasks = []; current = undefined; getRuns = undefined; });
 }

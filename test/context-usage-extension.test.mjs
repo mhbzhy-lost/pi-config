@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import contextUsageExtension from "../src/context-usage/entry.ts";
+import contextUsageExtension from "../src/context-usage/context-usage.ts";
 import { ContextUsageOutputSchema } from "../src/context-usage/snapshot.ts";
 
 function fakePi() {

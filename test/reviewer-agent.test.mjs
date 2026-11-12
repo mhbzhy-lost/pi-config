@@ -29,10 +29,6 @@ test("agent profiles keep runtime configuration in frontmatter and cannot grant 
   assertModelChain(reviewer, "reviewer");
   assertModelChain(executor, "executor");
   assertModelChain(delegate, "delegate");
-  const subagentConfig = JSON.parse(await readFile(new URL("../pi/extensions/subagent/config.json", import.meta.url), "utf8"));
-  // 用户裁决（2026-10-19）：移除 provider 硬编码黑名单。该 key 既不被上游消费，也不被本仓 runtime 读取，
-  // 保留会造成“仍有黑名单”的误导；模型可用性权威是 registry/profile 候选链与 runtime 校验。
-  assert.equal(Object.hasOwn(subagentConfig, "providerBlacklist"), false, "config.json 不得保留已废弃的 providerBlacklist");
   // systemPromptMode: append 是用户明确授权的 M07 决策：Pi 原生 preamble/tools/rules 保留，
   // 角色正文作为 addendum 追加；配置事实必须留在 frontmatter，正文不承担配置职责。
   // 工具面即权限面：逐字固定三份 profile 的 tools，角色正文或后续改动不得扩大；

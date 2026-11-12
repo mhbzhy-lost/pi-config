@@ -6,7 +6,6 @@ models:
 thinking: low
 systemPromptMode: append
 inheritProjectContext: true
-inheritSkills: false
 extensions: []
 allowNestedSubagents: false
 tools: read,write,edit,bash,grep,find,ls

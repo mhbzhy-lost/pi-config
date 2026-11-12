@@ -162,57 +162,6 @@ test("bare pi forwards without shell ANSI output", async () => {
   }
 });
 
-test("pi-inline requests official regular TUI mode", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-inline-"));
-  try {
-    const output = join(root, "args.txt");
-    const fakePi = join(root, "pi-real");
-    await writeFile(fakePi, "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$OUTPUT\"\n");
-    await chmod(fakePi, 0o755);
-
-    const result = spawnSync(
-      "zsh",
-      ["-f", "-c", `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; pi-inline --version`],
-      {
-        encoding: "utf8",
-        env: { ...process.env, ...physicalLauncherFixture(fakePi), PI_ALT_SCREEN: "always", OUTPUT: output },
-      },
-    );
-
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, "");
-    assert.equal(await readFile(output, "utf8"), "--tui-mode\nregular\n--version\n");
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("pi-full requests official fullscreen TUI mode", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-full-"));
-  try {
-    const output = join(root, "args.txt");
-    const fakePi = join(root, "pi-real");
-    await writeFile(fakePi, "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$OUTPUT\"\n");
-    await chmod(fakePi, 0o755);
-
-    const result = spawnSync(
-      "zsh",
-      ["-f", "-c", `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; pi-full --version`],
-      {
-        encoding: "utf8",
-        env: { ...process.env, ...physicalLauncherFixture(fakePi), OUTPUT: output },
-      },
-    );
-
-    assert.equal(result.error, undefined, result.error?.message);
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, "");
-    assert.equal(await readFile(output, "utf8"), "--tui-mode\nfullscreen\n--version\n");
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
 test("pi-lite launches the lean read-only exploration mode", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-shell-explore-"));
   try {
@@ -236,17 +185,16 @@ test("pi-lite launches the lean read-only exploration mode", async () => {
     assert.equal(
       await readFile(output, "utf8"),
       [
-        "--no-skills",
         "-nc",
         "-na",
         "--no-extensions",
         "--no-prompt-templates",
-        "--skill",
-        join(repoRoot, "skills", "deepseek-search", "SKILL.md"),
-        "--skill",
-        join(repoRoot, "skills", "playwright", "SKILL.md"),
+        "-e",
+        join(repoRoot, "src", "progressive-tools", "progressive-tools.ts"),
+        "-e",
+        "builtin:tool-search",
         "--tools",
-        "read,bash",
+        "read,bash,tool_search",
         "--version",
         "",
       ].join("\n"),
@@ -256,27 +204,8 @@ test("pi-lite launches the lean read-only exploration mode", async () => {
   }
 });
 
-// Catches a compatibility entry that bypasses pi and maintains its own defaults.
-test("pi-full reuses the pi entry when its launch policy is overridden", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-full-entry-"));
-  try {
-    const output = join(root, "args.txt");
-    const fakePi = join(root, "pi-real");
-    await writeFile(fakePi, "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$OUTPUT\"\n");
-    await chmod(fakePi, 0o755);
-    const result = spawnSync("zsh", ["-f", "-c",
-      `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; pi() { _pi_config_invoke --tui-mode regular "$@"; }; pi-full --version`,
-    ], { encoding: "utf8", env: { ...process.env, ...physicalLauncherFixture(fakePi), OUTPUT: output } });
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(await readFile(output, "utf8"), "--tui-mode\nregular\n--version\n");
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
 // Catches defaults appended after explicit options, lost quoting/--, or divergent entries.
-// explicit 分支同时断言用户显式 --no-skills 原样转发（helper 不再隐式禁用）。
-for (const entry of ["pi", "pi-full"]) {
+for (const entry of ["pi"]) {
   for (const explicit of [false, true]) {
     test(`${entry} forwards ${explicit ? "explicit regular ahead of the prompt" : "fullscreen defaults"} and package environment`, async () => {
       const root = await mkdtemp(join(tmpdir(), "pi-tui-forward-"));
@@ -286,13 +215,13 @@ for (const entry of ["pi", "pi-full"]) {
         await writeFile(fakePi, `#!/usr/bin/env bash\nnode -e 'require("fs").writeFileSync(process.env.OUTPUT, JSON.stringify({ args: process.argv.slice(1), packageDir: process.env.PI_PACKAGE_DIR, config: process.env.PI_CODING_AGENT_DIR, owner: process.env.PI_SESSION_OWNER_ID ?? null }))' -- "$@"\n`);
         await chmod(fakePi, 0o755);
         const result = spawnSync("zsh", ["-f", "-c",
-          `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; ${entry} ${explicit ? "--no-skills --tui-mode regular" : ""} --version -- 'prompt with spaces' '--tui-mode' 'regular'`,
+          `source ${join(repoRoot, "scripts", "pi-shell.zsh")}; ${entry} ${explicit ? "--tui-mode regular" : ""} --version -- 'prompt with spaces' '--tui-mode' 'regular'`,
         ], { encoding: "utf8", env: { ...process.env, ...physicalLauncherFixture(fakePi), OUTPUT: output,
           PI_CODING_AGENT_DIR: "/stale-repo/pi", PI_SESSION_OWNER_ID: "stale-owner" } });
         assert.equal(result.status, 0, result.stderr);
         assert.equal(result.stdout, "");
         assert.deepEqual(JSON.parse(await readFile(output, "utf8")), {
-          args: ["--tui-mode", "fullscreen", ...(explicit ? ["--no-skills", "--tui-mode", "regular"] : []),
+          args: ["--tui-mode", "fullscreen", ...(explicit ? ["--tui-mode", "regular"] : []),
             "--version", "--", "prompt with spaces", "--tui-mode", "regular"],
           packageDir: realpathSync(join(root,"physical/node_modules/@earendil-works/pi-coding-agent")), config: join(repoRoot, "pi"), owner: null,
         });

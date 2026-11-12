@@ -4,7 +4,7 @@ import { join } from "node:path";
 // 默认路径锚定本 feature 模块所在仓库的 pi/AGENTS_MAIN.md：以 import.meta 定位
 // 物理仓库根，不随进程 cwd 或 HOME 漂移，worktree 进程也不用 cwd 识别角色。
 // MAIN 仅由 main 会话经 Host binding 显式加载；child 不读取本文件（见
-// 同目录 entry.ts 的 child guard）。
+// 同目录 feature 入口文件的 child guard）。
 const DEFAULT_AGENTS_GLOBAL_PATH = join(
   import.meta.dirname,
   "..",

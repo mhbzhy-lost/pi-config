@@ -319,6 +319,13 @@ export async function inspectAgentProfiles({ expectedRoster } = {}) {
 const IGNORED_BASENAMES = new Set([".DS_Store", "Thumbs.db"]);
 const SKIPPED_DIRECTORY_NAMES = new Set(["node_modules", "dist", "var", "vendor", ".git", "sessions", "logs", "run-history"]);
 
+function isProgressiveToolDocumentation(relPath) {
+  if (!relPath.startsWith("src/progressive-tools/")) return false;
+  if (relPath.includes("/docs/")) return true;
+  if (/^src\/progressive-tools\/search\/\.env(?:\.|$)/.test(relPath)) return true;
+  return /\.(?:py|applescript)$/.test(relPath);
+}
+
 function* walkFiles(root) {
   if (!existsSync(root)) return;
   const entries = readdirSync(root, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1));
@@ -942,6 +949,10 @@ export function scanPromptOverridePolicy({ roots, whitelist = [], dataDtoSites =
       const base = file.split(sep).at(-1);
       const extension = extname(base).toLowerCase();
       if (IGNORED_BASENAMES.has(base)) {
+        files.ignored.push(relPath);
+        continue;
+      }
+      if (isProgressiveToolDocumentation(relPath)) {
         files.ignored.push(relPath);
         continue;
       }

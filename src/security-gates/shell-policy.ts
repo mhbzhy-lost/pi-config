@@ -110,7 +110,7 @@ function containsSleepCommand(command, cwd) {
 
 export function checkSynchronousBash(command, cwd) {
   return containsSleepCommand(command, cwd)
-    ? violation("SYNC_BASH_SLEEP", "同步 bash 禁止执行 sleep；需要一次性提醒时请使用 bash_async")
+    ? violation("SYNC_BASH_SLEEP", "禁止执行 sleep；需要等待操作时请使用 bash_async")
     : undefined;
 }
 

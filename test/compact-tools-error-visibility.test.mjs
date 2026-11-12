@@ -6,9 +6,13 @@ import { createCompactToolRenderers, sampleArgs } from "../src/compact-tools/ren
 
 const { codingAgent: sdk, piTui: tui, jiti } = await loadPiTestRuntime(import.meta.url);
 sdk.initTheme("dark", false);
-const compactFactory = (await jiti.import("../src/compact-tools/entry.ts")).default;
+const compactFactory = (await jiti.import("../src/compact-tools/compact-tools.ts")).default;
 const resolvers = [];
-const api = { registerToolRenderer(resolver) { resolvers.push(resolver); }, on() {} };
+const events = new Map();
+const api = {
+  registerToolRenderer(resolver) { resolvers.push(resolver); },
+  on(name, handler) { events.set(name, handler); },
+};
 // 仅绑定显示 resolver，不初始化 bash 执行 owner、设置存储或 Host session。
 compactFactory(api);
 const shared = createCompactToolRenderers(tui);
@@ -68,7 +72,7 @@ for (const [source, renderers] of Object.entries({ shared, host })) {
         const lines = collapsed.render(width);
         assert.equal(lines.length, 4, JSON.stringify(lines));
         assert.ok(lines.every((line) => tui.visibleWidth(line) <= width));
-        assert.match(plain(lines), /✗ 权限拒绝/);
+        assert.match(plain(lines), /权限拒绝/);
         assert.match(plain(lines), /展开查看完整错误/);
         collapsed.invalidate();
         assert.deepEqual(collapsed.render(width), lines);
@@ -109,8 +113,10 @@ for (const { label, name, args } of cases) {
     const failure = { content: [{ type: "text", text: "权限拒绝\nwrite conflict\n第三行\n第四行\n最后错误" }], details: { nested: [2] }, structuredContent: { ok: false }, isError: true };
     const before = structuredClone({ success, failure, args });
     const references = [success.content, success.details, success.structuredContent, failure.content, failure.details, failure.structuredContent, success.content[1]];
+    events.get("tool_execution_end")?.({ toolCallId: "fixture-call", result: success });
     card.updateResult(success);
     assert.equal(card.render(100).filter((line) => line.trim()).length, 1);
+    events.get("tool_execution_end")?.({ toolCallId: "fixture-call", result: failure });
     card.updateResult(failure);
     for (const width of [40, 100]) {
       for (const expanded of [false, true, false]) {
@@ -120,10 +126,15 @@ for (const { label, name, args } of cases) {
         assert.ok(lines.every((line) => tui.visibleWidth(line) <= width));
         assert.match(plain(lines), /权限拒绝/);
         assert.doesNotMatch(plain(lines), /done/);
-        if (expanded) assert.match(plain(lines), /最后错误/);
+        if (expanded) {
+          assert.match(plain(lines), /最后错误/);
+          assert.match(plain(lines), /structuredContent/);
+          assert.match(plain(lines), /"ok": false/);
+        }
         else assert.match(plain(lines), /✗/);
       }
     }
+    events.get("tool_execution_end")?.({ toolCallId: "fixture-call", result: success });
     card.updateResult(success);
     card.invalidate();
     const visible = card.render(100).filter((line) => line.trim());
@@ -157,7 +168,7 @@ for (const [source, renderers] of Object.entries({ shared, host })) {
     const next = output.render(100).join("\n");
     assert.ok(next.includes("\u001b[32m"));
     assert.ok(!next.includes("\u001b[31m"));
-    assert.match(stripVTControlCharacters(next), /✗ permission denied/);
+        assert.match(stripVTControlCharacters(next), /permission denied/);
   });
 
   test(`${source}: 空错误仍可见，直接result.isError调用兼容`, () => {
@@ -169,7 +180,6 @@ for (const [source, renderers] of Object.entries({ shared, host })) {
           const ctx = { ...context(args, true), isError: direct ? undefined : true };
           const output = renderers[name].renderResult(result, { expanded: false, isPartial: false }, theme, ctx);
           const visible = plain(output.render(40));
-          assert.match(visible, /✗/);
           assert.match(visible, text.trim() ? /explicit failure/ : /工具执行失败/);
           assert.deepEqual(result, before);
         }
@@ -244,7 +254,7 @@ test("真实Host bash_async: 失败原因可见、旧接受摘要清理且raw不
   references.forEach((value, index) => assert.equal(value, [launch.content, launch.details, failure.content, failure.details][index]));
 });
 
-test("真实Host bash_async: partial不提前已接受，unknown格式中性显示且直接isError兼容", () => {
+test("真实Host bash_async: partial保留原文，unknown格式失败显示且直接isError兼容", () => {
   const args = { command: "sleep 5" };
   const receipt = { kind: "bash-async-launch", jobId: "aabbccdd-1234", toolCallId: "fixture-async-partial", command: "sleep 5", cwd: "/tmp", acceptedAt: "t" };
   const partialLaunch = { content: [{ type: "text", text: JSON.stringify(receipt) }], details: receipt };
@@ -263,8 +273,10 @@ test("真实Host bash_async: partial不提前已接受，unknown格式中性显�
   assert.doesNotMatch(visible, /已接受|succeeded|done|1 lines/);
   // 直接result.isError调用兼容（无context.isError）。
   const direct = { content: [{ type: "text", text: "explicit failure" }], details: undefined, isError: true };
-  const directOutput = host.bash_async.renderResult(direct, { expanded: false, isPartial: false }, theme, context(args, undefined));
-  assert.match(plain(directOutput.render(100)), /✗ explicit failure/);
+   const directContext = context(args, undefined);
+   const directOutput = host.bash_async.renderResult(direct, { expanded: false, isPartial: false }, theme, directContext);
+   const directCall = host.bash_async.renderCall(args, theme, directContext);
+   assert.match([...directCall.render(100), ...directOutput.render(100)].join("\n"), /✗/);
   assert.deepEqual(direct, { content: [{ type: "text", text: "explicit failure" }], details: undefined, isError: true });
   assert.deepEqual({ args, partialLaunch, unknown }, before);
 });

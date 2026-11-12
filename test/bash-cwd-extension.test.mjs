@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -59,7 +59,7 @@ function setup({ workspaceRoot, options = { commandPrefix: "source ~/.profile", 
   return { registered, factoryCalls, executions };
 }
 
-test("registers a same-name bash override with the base presentation fields and cwd parameter", async () => {
+test("registers a same-name bash override with the native parameter contract", async () => {
   await withWorkspace(async (workspaceRoot) => {
     const { registered } = setup({ workspaceRoot });
 
@@ -67,14 +67,10 @@ test("registers a same-name bash override with the base presentation fields and 
     assert.equal(registered.description, "base description");
     assert.equal(registered.renderCall, "render-call");
     assert.equal(registered.renderResult, "render-result");
-    // 结构不变量：原生 guidelines 原样保留，末尾恰好追加一条本地 cwd 指引；文案本身不在此重复锁定
-    assert.equal(registered.promptGuidelines.length, 2);
+    // 原生 guidelines 与参数 schema 原样保留，不再追加声明式 cwd。
+    assert.equal(registered.promptGuidelines.length, 1);
     assert.equal(registered.promptGuidelines[0], "base guideline");
-    assert.equal(typeof registered.promptGuidelines[1], "string");
-    assert.ok(registered.promptGuidelines[1].length > 0);
-    assert.equal(registered.parameters.properties.cwd.type, "string");
-    assert.equal(typeof registered.parameters.properties.cwd.description, "string");
-    assert.ok(registered.parameters.properties.cwd.description.length > 0);
+    assert.equal(registered.parameters.properties.cwd, undefined);
   });
 });
 
@@ -120,112 +116,10 @@ test("delegates bash without cwd using current context options and native cwd pr
   });
 });
 
-test("delegates bash with validated cwd through native spawnHook and fake operations", async () => {
-  await withWorkspace(async (workspaceRoot) => {
-    const nested = join(workspaceRoot, "packages", "app");
-    await mkdir(nested, { recursive: true });
-    const { codingAgent } = await loadPiTestRuntime(import.meta.url);
-    const factoryCalls = [];
-    const optionContexts = [];
-    const executions = [];
-    const hookContexts = [];
-    const signal = new AbortController().signal;
-    const updates = [];
-    const onUpdate = (update) => updates.push(update);
-    const ctx = {
-      cwd: workspaceRoot,
-      sessionManager: { getSessionId: () => "fake-session", getSessionFile: () => "/fake/session.jsonl" },
-      model: { provider: "fake-provider", id: "fake-model" },
-      thinkingLevel: "high",
-      isProjectTrusted: () => true,
-    };
-    const options = {
-      commandPrefix: "fake-prefix",
-      shellPath: "/fake/shell",
-      operations: { async exec(command, cwd, backendOptions) {
-        executions.push({ command, cwd, backendOptions });
-        backendOptions.onData(Buffer.from("fake-output"));
-        return { exitCode: 0 };
-      } },
-      spawnHook(spawnContext) {
-        hookContexts.push(spawnContext);
-        return { command: `hook:${spawnContext.command}`, cwd: "/hook/cwd", env: { ...spawnContext.env, FAKE_HOOK: "1" } };
-      },
-    };
-    let registered;
-    createBashCwdExtension({ registerTool: (tool) => { registered = tool; } }, {
-      workspaceRoot,
-      getBashOptions(context) { optionContexts.push(context); return options; },
-      createBashToolDefinition(cwd, factoryOptions) {
-        factoryCalls.push({ cwd, options: factoryOptions });
-        const definition = codingAgent.createBashToolDefinition(cwd, factoryOptions);
-        const execute = definition.execute;
-        return { ...definition, execute(id, input, forwardedSignal, forwardedUpdate, forwardedCtx) {
-          assert.equal(forwardedCtx, ctx);
-          assert.equal(forwardedSignal, signal);
-          assert.equal(forwardedUpdate, onUpdate);
-          assert.equal(input.cwd, undefined);
-          return execute(id, input, forwardedSignal, forwardedUpdate, forwardedCtx);
-        } };
-      },
-    });
-    assert.deepEqual(optionContexts, []);
-    const result = await registered.execute("call-2", { command: "pwd", timeout: 5, cwd: "packages/app" }, signal, onUpdate, ctx);
-    assert.deepEqual(optionContexts, [ctx]);
-    assert.equal(factoryCalls.length, 2);
-    assert.deepEqual(factoryCalls[0], { cwd: workspaceRoot, options: {} });
-    assert.equal(factoryCalls[1].options.operations, options.operations);
-    assert.equal(factoryCalls[1].options.shellPath, "/fake/shell");
-    assert.equal(hookContexts[0].cwd, workspaceRoot);
-    assert.equal(executions[0].cwd, await realpath(nested));
-    assert.equal(executions[0].command, "hook:fake-prefix\npwd");
-    assert.equal(executions[0].backendOptions.signal, signal);
-    assert.equal(executions[0].backendOptions.timeout, 5);
-    assert.equal(executions[0].backendOptions.env.FAKE_HOOK, "1");
-    assert.equal(executions[0].backendOptions.env.PI_SESSION_ID, "fake-session");
-    assert.equal(executions[0].backendOptions.env.PI_SESSION_FILE, "/fake/session.jsonl");
-    assert.equal(executions[0].backendOptions.env.PI_PROVIDER, "fake-provider");
-    assert.equal(executions[0].backendOptions.env.PI_MODEL, "fake-model");
-    assert.equal(executions[0].backendOptions.env.PI_REASONING_LEVEL, "high");
-    assert.equal(result.structuredContent.exit_code, 0);
-    assert.equal(result.structuredContent.output, "fake-output");
-    assert.ok(updates.length > 0);
-    assert.ok(registered.outputSchema);
-    assert.equal(registered.promptSnippet, codingAgent.createBashToolDefinition(workspaceRoot, {}).promptSnippet);
-  });
-});
-
-test("accepts an existing directory outside the workspace", async () => {
-  await withWorkspace(async (workspaceRoot) => {
-    const outside = await mkdtemp(join(tmpdir(), "bash-cwd-outside-"));
-    try {
-      const { registered, factoryCalls, executions } = setup({ workspaceRoot });
-      await registered.execute("call-outside", { command: "pwd", cwd: outside }, undefined, undefined, { cwd: workspaceRoot });
-      assert.equal(factoryCalls[1].cwd, workspaceRoot);
-      assert.equal(executions[0].spawnContext.cwd, await realpath(outside));
-    } finally {
-      await rm(outside, { recursive: true, force: true });
-    }
-  });
-});
-
-test("rejects invalid declared cwd before executing bash", async () => {
-  await withWorkspace(async (workspaceRoot) => {
-    const { registered, factoryCalls, executions } = setup({ workspaceRoot });
-
-    await assert.rejects(
-      registered.execute("call-3", { command: "pwd", cwd: "../outside" }, undefined, undefined, { cwd: workspaceRoot }),
-      /工作区|cwd/i,
-    );
-    assert.equal(factoryCalls.length, 1);
-    assert.deepEqual(executions, []);
-  });
-});
-
 test("bash-cwd preserves native renderers and resolves settings only from execution context", async () => {
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "bash-cwd-renderer-"));
   try {
-    const extensionSource = await readFile(new URL("../src/bash-cwd/entry.ts", import.meta.url), "utf8");
+    const extensionSource = await readFile(new URL("../src/bash-cwd/bash-cwd.ts", import.meta.url), "utf8");
     const mockPath = join(temporaryDirectory, "pi-mock.mjs");
     const extensionPath = join(temporaryDirectory, "bash-cwd.ts");
     const bashCwdExtensionUrl = pathToFileURL(new URL("../src/bash-cwd/index.ts", import.meta.url).pathname).href;
@@ -302,9 +196,9 @@ export function createBashToolDefinition(cwd, options = {}) {
       options: { projectTrusted: false },
     });
     const trustedCtx = { cwd: process.cwd(), isProjectTrusted: () => true };
-    const trustedResult = await registered[0].execute("with-cwd", { command: "pwd", cwd: temporaryDirectory }, undefined, undefined, trustedCtx);
+    const trustedResult = await registered[0].execute("trusted", { command: "pwd" }, undefined, undefined, trustedCtx);
     assert.equal(trustedResult.command, "project-prefix");
-    assert.equal(trustedResult.cwd, await realpath(temporaryDirectory));
+    assert.equal(trustedResult.cwd, process.cwd());
     assert.deepEqual(mock.storageReads, ["global", "global", "project"]);
     assert.deepEqual(mock.settingsCalls[1], {
       cwd: process.cwd(),
@@ -320,7 +214,7 @@ export function createBashToolDefinition(cwd, options = {}) {
 });
 
 test("bash-cwd leaves compact display binding to the renderer-only owner", async () => {
-  const extensionSource = await readFile(new URL("../src/bash-cwd/entry.ts", import.meta.url), "utf8");
+  const extensionSource = await readFile(new URL("../src/bash-cwd/bash-cwd.ts", import.meta.url), "utf8");
 
   // renderShell/renderCall/renderResult/compact-tools 仍不得进入执行 owner；
   // pi-tui 仅作为已授权 completion MessageRenderer 的依赖注入能力放行，不承担工具渲染。

@@ -13,7 +13,7 @@ type JsonObject = Record<string, unknown>;
 type DirectoryProbe = { exists: boolean; error?: NodeJS.ErrnoException };
 
 export const R2C_ADAPTER_SOURCE = "../../.r2c/integrations/pi-adapter";
-const SELECTOR_FIELDS = ["defaultTools", "extensions", "skills"] as const;
+const SELECTOR_FIELDS = ["defaultTools", "extensions"] as const;
 const SHARED_SCALAR_FIELDS = ["hideThinkingBlock", "cacheWarming"] as const;
 
 const moduleRoot = resolve(dirname(new URL(import.meta.url).pathname), "../..");

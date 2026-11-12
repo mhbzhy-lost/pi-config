@@ -28,7 +28,7 @@ test("minimal extension registers prefixed subagent RPC tools plus supervisor re
     for (const name of markers) delete process.env[name];
     process.env.PI_CODING_AGENT_DIR = agentDir;
     process.env.PI_CODING_WORKSPACE_DIR = join(agentDir, "workspaces");
-    await writeFile(join(agentDir, "settings.json"), JSON.stringify({ extensions: [join(repoRoot, "src/subagent/entry.ts")] }));
+    await writeFile(join(agentDir, "settings.json"), JSON.stringify({ extensions: [join(repoRoot, "src/subagent/subagent.ts")] }));
     const host = await import(pathToFileURL(piPackage).href);
     const resourceLoader = new host.DefaultResourceLoader({
       cwd: repository,
@@ -57,6 +57,7 @@ test("minimal extension registers prefixed subagent RPC tools plus supervisor re
     assert.deepEqual(errors, []);
     assert.equal(extensions.length, 1);
     assert.deepEqual(toolNames, ["subagent_resume", "subagent_spawn", "subagent_status", "subagent_steer", "subagent_stop", "subagent_supervisor"]);
+    for (const name of toolNames) assert.equal(session.getToolDefinition(name)?.exposure, "deferred", `${name} must be deferred`);
     assert.equal(session.getAllTools().some((tool) => tool.name === "subagent_roster"), false);
     assert.equal(session.getActiveToolNames().includes("subagent_roster"), false);
     assert.equal(session.getCallableToolNames().includes("subagent_roster"), false);
