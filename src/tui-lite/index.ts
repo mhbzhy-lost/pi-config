@@ -7,7 +7,7 @@ import { NativeConversation } from "./native-conversation.ts";
 const RPC_REQUEST = "subagents:rpc:v1:request";
 const RPC_REPLY = "subagents:rpc:v1:reply:";
 type RpcReply = { success: boolean; data?: { text?: string; asyncSnapshot?: { runs?: AsyncNode[] } }; error?: { message?: string } };
-type AsyncNode = { id: string; kind?: string; label?: string; state?: string; agent?: string; model?: string; activity?: { currentTool?: string } };
+type AsyncNode = { id: string; kind?: string; label?: string; title?: string; state?: string; agent?: string; model?: string; activity?: { currentTool?: string } };
 
 function callRpc(pi: ExtensionAPI, method: string, params: Record<string, unknown>): Promise<RpcReply> {
   const requestId = crypto.randomUUID();
@@ -41,21 +41,47 @@ function displayCwd(cwd: string): string {
   return cwd === home ? "~" : cwd.startsWith(`${home}/`) ? `~${cwd.slice(home.length)}` : cwd;
 }
 
+function agentIdentity(row: AsyncNode): string {
+  const name = row.agent || row.label || "executor";
+  const title = row.title?.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  return `${name} · ${title || "未命名任务"}`;
+}
+
+function footerLine(left: string, right: string, width: number): string {
+  const rightText = truncateToWidth(right, Math.max(0, width), "…");
+  const leftBudget = Math.max(0, width - visibleWidth(rightText) - (rightText ? 1 : 0));
+  const leftText = truncateToWidth(left, leftBudget, "…");
+  return rightText && leftText
+    ? `${leftText}${" ".repeat(Math.max(1, width - visibleWidth(leftText) - visibleWidth(rightText)))}${rightText}`
+    : truncateToWidth(leftText || rightText, Math.max(0, width), "…");
+}
+
 function activityRows(runs: readonly AsyncNode[]): AsyncNode[] {
   return runs.filter((run) => typeof run.id === "string" && run.id.length > 0);
 }
 
-// Spawn receipts belong to the authoritative parent session, survive `pi -c`,
-// and already carry structured run IDs. No directory scan or new registry.
+// 成功派发回执与同一父会话中的原始工具调用配对，恢复身份和标题；不扫描目录或另建注册表。
 function sessionHistory(ctx: ExtensionContext): AsyncNode[] {
   const runs = new Map<string, AsyncNode>();
+  const titles = new Map<string, string | undefined>();
   for (const entry of ctx.sessionManager.getEntries()) {
-    if (entry.type !== "message" || entry.message.role !== "toolResult") continue;
+    if (entry.type !== "message") continue;
     const message = entry.message;
+    if (message.role === "assistant") {
+      for (const part of message.content) {
+        if (part.type !== "toolCall" || part.name !== "subagent_spawn") continue;
+        const args = part.arguments as { title?: unknown; task?: unknown };
+        const title = typeof args.title === "string" && args.title.trim() ? args.title
+          : typeof args.task === "string" ? args.task.split(/\r?\n/).find(line => line.trim()) : undefined;
+        titles.set(part.id, title);
+      }
+      continue;
+    }
+    if (message.role !== "toolResult") continue;
     if (message.toolName !== "subagent_spawn" || message.isError) continue;
     const details = message.details as { asyncId?: unknown; runId?: unknown } | undefined;
     const id = details?.asyncId ?? details?.runId;
-    if (typeof id === "string" && id.length > 0) runs.set(id, { id, label: "executor", state: "history" });
+    if (typeof id === "string" && id.length > 0) runs.set(id, { id, agent: "executor", title: titles.get(message.toolCallId), state: "history" });
   }
   return [...runs.values()];
 }
@@ -125,9 +151,16 @@ function createSubagentView(pi: ExtensionAPI, close: () => void, tui: TUI, getRu
   const component: Component & { dispose(): void } = {
     render(width) {
       if (disposed) return [];
-      const height = Math.max(1, tui.terminal.rows - 2);
+      const height = Math.max(1, tui.terminal.rows);
       const selectedRow = rows[selected];
-      pageSize = Math.max(1, height - 3);
+      const identity = selectedRow ? agentIdentity(selectedRow) : "暂无 subagent";
+      const status = selectedRow ? `${stateLabel(selectedRow.state)} · ${selected + 1}/${rows.length}` : "";
+      const metadata = conversation
+        ? footerLine(displayCwd(conversation.getCwd()), `${conversation.getModel()} ${conversation.getThinking()}`, width)
+        : "子会话信息尚不可用";
+      const footer = [footerLine(identity, status, width), metadata].slice(0, height);
+      const gap = height > footer.length ? 1 : 0;
+      pageSize = Math.max(0, height - footer.length - gap);
       const wrapped = conversation ? conversation.render(Math.max(1, width))
         : transcript.flatMap((line) => wrapTextWithAnsi(line, Math.max(1, width)));
       maxScrollBack = Math.max(0, wrapped.length - pageSize);
@@ -136,6 +169,8 @@ function createSubagentView(pi: ExtensionAPI, close: () => void, tui: TUI, getRu
       const body = wrapped.slice(Math.max(0, end - pageSize), end);
       const lines = [...body];
       while (lines.length < pageSize) lines.push(" ".repeat(Math.max(0, width)));
+      if (gap) lines.push("");
+      lines.push(...footer);
       return lines.map(line => truncateToWidth(line, Math.max(0, width), "…")).slice(0, height);
     },
     handleInput(data) {
@@ -203,7 +238,7 @@ export function createTuiRuntime(pi: ExtensionAPI): void {
       if (!status.success) throw new Error(status.error?.message ?? "子代理列表不可用");
       const live = activityRows(status.data?.asyncSnapshot?.runs ?? []);
       const liveIds = new Set(live.map(row => row.id));
-      return [...live, ...[...history.values()].filter(row => !liveIds.has(row.id))];
+      return [...live.map(row => ({ ...row, title: history.get(row.id)?.title })), ...[...history.values()].filter(row => !liveIds.has(row.id))];
     };
     const loadRuns = getRuns;
     ctx.ui.setFooter((tui, theme) => {
@@ -228,14 +263,9 @@ export function createTuiRuntime(pi: ExtensionAPI): void {
           const usage = ctx.getContextUsage();
           const context = `${formatTokens(usage?.tokens)}/${formatTokens(usage?.contextWindow)}`;
           const right = `${model} ${ctx.thinkingLevel ?? "off"} ${context}`;
-          const rightText = truncateToWidth(right, Math.max(0, width), "…");
-          const leftBudget = Math.max(0, width - visibleWidth(rightText) - (rightText ? 1 : 0));
-          const leftText = truncateToWidth(displayCwd(ctx.cwd), leftBudget, "…");
-          const first = rightText && leftText
-            ? `${leftText}${" ".repeat(Math.max(1, width - visibleWidth(leftText) - visibleWidth(rightText)))}${rightText}`
-            : truncateToWidth(leftText || rightText, Math.max(0, width), "…");
+          const first = footerLine(displayCwd(ctx.cwd), right, width);
           const active = footerRows.filter(row => row.state === "queued" || row.state === "running" || row.state === "paused");
-          const subagents = active.map(row => `subagent ${row.label || row.agent || row.id} · ${stateLabel(row.state)}`);
+          const subagents = active.map(row => `subagent ${agentIdentity(row)} · ${stateLabel(row.state)}`);
           const bash = bashAsyncTasks.map(task => `bash_async "${task.command.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim()}" · ${stateLabel(task.state)}`);
           return [theme.fg("dim", first), "", ...[...subagents, ...bash].map(task => truncateToWidth(task, Math.max(0, width), "…"))];
         },

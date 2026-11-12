@@ -7,6 +7,7 @@ import registerSubagents from "pi-subagents";
 const RPC_REQUEST = "subagents:rpc:v1:request";
 const RPC_REPLY = "subagents:rpc:v1:reply:";
 const AGENT_NAME = "executor";
+const MAX_TITLE_BYTES = 240;
 const MAX_TASK_BYTES = 32 * 1024;
 const MAX_MESSAGE_BYTES = 32 * 1024;
 const RPC_TIMEOUT_MS = 60_000;
@@ -77,7 +78,7 @@ function formatAdvertisedAgents(agents: readonly AdvertisedAgent[]): string | un
   const lines = ["可用子代理（仅限本仓 RPC facade 暴露的 agent）："];
   for (const agent of agents) {
     lines.push(`- ${agent.name}：${agent.description}`);
-    lines.push(`  调用：subagent_spawn({ task })`);
+    lines.push(`  调用：subagent_spawn({ title, task })`);
     if (agent.tools?.length) lines.push(`  工具：${agent.tools.join(", ")}`);
   }
   return lines.join("\n");
@@ -172,22 +173,28 @@ export function createMinimalSubagentExtension(pi: ExtensionAPI): void {
     pi,
     "subagent_spawn",
     "spawn",
-    "异步派发一个 fresh context 的编码执行代理完成独立任务。child 不继承本会话历史或项目上下文，可使用 read/write/edit/bash/grep/find/ls；只修改任务合同允许的范围。立即返回 runId，不阻塞等待结果；run 结束后会自动唤醒本会话送达结果，不要轮询 status 等待。task 必须自包含：child 看不到本会话历史与项目规范。后续用返回的 runId 调 status/steer/stop 管理。",
+    "异步派发一个 fresh context 的编码执行代理完成独立任务。用 title 概括任务目标，便于在面板中区分多个 executor。child 不继承本会话历史或项目上下文，可使用 read/write/edit/bash/grep/find/ls；只修改任务合同允许的范围。立即返回 runId，不阻塞等待结果；run 结束后会自动唤醒本会话送达结果，不要轮询 status 等待。task 必须自包含：child 看不到本会话历史与项目规范。后续用返回的 runId 调 status/steer/stop 管理。",
     toolParameters(["task"], {
+      title: { type: "string", minLength: 1, maxLength: 80, description: "用于面板显示的简短任务标题，概括具体目标，不要重复 executor 或角色说明" },
       task: { type: "string", minLength: 1, maxLength: MAX_TASK_BYTES, description: "委派给子代理的完整任务描述，需自包含（child 无本会话上下文）" },
     }),
-    (input, ctx) => ({
-      agent: AGENT_NAME,
-      task: stringInput(input, "task", MAX_TASK_BYTES),
-      cwd: ctx.cwd,
-      context: "fresh",
-      async: true,
-      mission: false,
-      ...(ctx.modelRef ? { model: ctx.modelRef } : {}),
-    }),
+    (input, ctx) => {
+      if (input && typeof input === "object" && "title" in input) stringInput(input, "title", MAX_TITLE_BYTES);
+      // title 保留在父会话的原始工具参数中供 TUI 读取，不改写任务或上游执行回执。
+      return {
+        agent: AGENT_NAME,
+        task: stringInput(input, "task", MAX_TASK_BYTES),
+        cwd: ctx.cwd,
+        context: "fresh",
+        async: true,
+        mission: false,
+        ...(ctx.modelRef ? { model: ctx.modelRef } : {}),
+      };
+    },
     {
       snippet: "异步派发编码执行代理完成独立任务；返回 runId，结果完成时自动唤醒本会话",
       guidelines: [
+        "为 subagent_spawn 提供简短明确的 title，说明任务目标，便于区分多个 executor。",
         "subagent_spawn 派发的 run 结束后会自动唤醒本会话；不要循环调用 subagent_status 轮询等待结果。",
         "subagent_spawn 的 task 必须自包含：child 是 fresh context，看不到本会话历史与项目规范。",
       ],

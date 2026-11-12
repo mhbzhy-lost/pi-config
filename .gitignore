@@ -26,6 +26,8 @@ __pycache__/
 /pi/missions/
 /pi/profiles/
 /pi/crashes.json
+# 上游 pi-subagents 的本机配置，不作为本仓扩展或配置模板提交。
+/pi/extensions/subagent/config.json
 
 # Sessions and logs
 /var/
