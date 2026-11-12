@@ -1,7 +1,9 @@
 {
   "hideThinkingBlock": true,
   "cacheWarming": "streaming",
-  "packages": [],
+  "packages": [
+    "../node_modules/@snowy117/pi-dcp"
+  ],
   "defaultTools": [
     "+codemode",
     "+tool_search",
