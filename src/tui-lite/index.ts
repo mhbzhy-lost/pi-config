@@ -146,8 +146,6 @@ function createSubagentView(pi: ExtensionAPI, close: () => void, tui: TUI, getRu
       if (!disposed) requestRender();
     }
   };
-  const timer = setInterval(() => { void refresh(); }, 750);
-  timer.unref?.();
   const component: Component & { dispose(): void } = {
     render(width) {
       if (disposed) return [];
@@ -198,7 +196,7 @@ function createSubagentView(pi: ExtensionAPI, close: () => void, tui: TUI, getRu
       return { handled: true };
     },
     invalidate() { conversation?.invalidate(); requestRender(); },
-    dispose() { disposed = true; clearInterval(timer); },
+    dispose() { disposed = true; },
   };
   void refresh();
   return component;
@@ -207,14 +205,13 @@ function createSubagentView(pi: ExtensionAPI, close: () => void, tui: TUI, getRu
 export function createTuiRuntime(pi: ExtensionAPI): void {
   let current: ExtensionContext | undefined;
   let closeOverlay: (() => void) | undefined;
-  let footerTimer: ReturnType<typeof setInterval> | undefined;
   let footerRows: AsyncNode[] = [];
   let footerSelectedId: string | undefined;
   let bashAsyncTasks: BashAsyncFooterSnapshot['tasks'] = [];
   let footerRequestRender: (() => void) | undefined;
   let getRuns: (() => Promise<AsyncNode[]>) | undefined;
   const close = () => { closeOverlay?.(); closeOverlay = undefined; };
-  const stopFooter = () => { clearInterval(footerTimer); footerTimer = undefined; footerRows = []; bashAsyncTasks = []; };
+  const stopFooter = () => { footerRows = []; bashAsyncTasks = []; };
 
   pi.on("session_start", (_event, ctx) => {
     close();
@@ -240,23 +237,8 @@ export function createTuiRuntime(pi: ExtensionAPI): void {
       const liveIds = new Set(live.map(row => row.id));
       return [...live.map(row => ({ ...row, title: history.get(row.id)?.title })), ...[...history.values()].filter(row => !liveIds.has(row.id))];
     };
-    const loadRuns = getRuns;
     ctx.ui.setFooter((tui, theme) => {
       footerRequestRender = () => tui.requestRender();
-      let busy = false;
-      const refresh = async () => {
-        if (busy || closeOverlay || current !== ctx) return;
-        busy = true;
-        try {
-          const rows = await loadRuns();
-            if (current !== ctx) return;
-            footerRows = rows;
-          tui.requestRender();
-        } finally { busy = false; }
-      };
-      footerTimer = setInterval(() => { void refresh().catch(() => {}); }, 750);
-      footerTimer.unref?.();
-      void refresh().catch(() => {});
       return {
         render(width: number) {
           const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "no-model";
