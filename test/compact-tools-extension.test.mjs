@@ -76,8 +76,10 @@ test("compact resolver绑定bash_async显示，launch摘要已接受待完成且
   assert.equal(typeof mine.renderResult, "function");
   // 调用显示真实工具名 bash_async 与命令，不伪装同步 bash。
   const theme = { bold: (text) => text, fg: (_color, text) => text };
-  const args = { command: "sleep 5", cwd: "/tmp", timeout: 15 };
-  assert.match(mine.renderCall(args, theme, { expanded: false, state: {} }).render(100).join(""), /bash_async "sleep 5"/);
+  const longCommand = "printf 'this is a deliberately long bash command whose complete tail must remain visible'";
+  const args = { command: longCommand, cwd: "/tmp", timeout: 15 };
+  assert.match(mine.renderCall(args, theme, { expanded: false, state: {} }).render(100).join(""), /bash_async .*\.\.\./);
+  assert.match(mine.renderCall(args, theme, { expanded: true, state: {} }).render(32).join("\n"), /complete tail must remain\s+visible/);
   // 显示字段覆盖，next 其余 metadata（含 execute）原样保留。
   const nativeExecute = async () => ({ content: [] });
   const sentinel = {};
@@ -91,7 +93,7 @@ test("compact resolver绑定bash_async显示，launch摘要已接受待完成且
   assert.deepEqual(registered, []);
   assert.deepEqual(activated, []);
   // 合法 launch 回执折叠只表达接受/待完成语义，不误报命令成功。
-  const receipt = { kind: "bash-async-launch", jobId: "aabbccdd-1234", toolCallId: "call-x", command: "sleep 5", cwd: "/tmp", acceptedAt: "t" };
+  const receipt = { kind: "bash-async-launch", jobId: "aabbccdd-1234", toolCallId: "call-x", command: longCommand, cwd: "/tmp", acceptedAt: "t" };
   const result = { content: [{ type: "text", text: JSON.stringify(receipt) }], details: receipt };
   const ctx = { args, state: {}, isError: false, expanded: false, isPartial: false };
   const output = mine.renderResult(result, { expanded: false, isPartial: false }, theme, ctx);

@@ -178,6 +178,18 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
     invalidate() {},
   });
 
+  // 展开态的 tool call 不能复用折叠态的 truncate 逻辑；Text 负责按终端宽度换行，
+  // 但保留完整原始文本，确保长 Bash 命令可被查看。
+  const expandedLine = (text, theme, context) => ({
+    render(width) {
+      const status = context?.state?.[COMPACT_STATUS_KEY] as CompactRenderStatus | undefined;
+      syncStatusAnimation(context, status);
+      const glyph = statusGlyph(theme, status);
+      return new Text(`${glyph} ${text}`, 0, 0).render(width);
+    },
+    invalidate() {},
+  });
+
   const pathCall = (name, path, suffix, theme, context) => ({
     render(width) {
       const prefix = `${title(name, "", theme)} `;
@@ -258,7 +270,11 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
     },
     bash: {
       renderCall(args, theme, context) {
-        const command = truncate(String(args?.command || "...").replace(/\s+/g, " ").trim(), 70);
+        const rawCommand = String(args?.command || "...");
+        if (context?.expanded) {
+          return expandedLine(title("bash", theme.fg("accent", `"${rawCommand}"`), theme), theme, context);
+        }
+        const command = truncate(rawCommand.replace(/\s+/g, " ").trim(), 70);
         return singleLine(title("bash", theme.fg("accent", `"${command}"`), theme), theme, context);
       },
        renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} lines`, getStructuredContent }),
@@ -266,7 +282,11 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
     // bash_async 专用精简显示：不 alias 同步 bash（其 "1 lines" 摘要既无接受语义又用错标题）。
     bash_async: {
       renderCall(args, theme, context) {
-        const command = truncate(String(args?.command || "...").replace(/\s+/g, " ").trim(), 70);
+        const rawCommand = String(args?.command || "...");
+        if (context?.expanded) {
+          return expandedLine(title("bash_async", theme.fg("accent", `"${rawCommand}"`), theme), theme, context);
+        }
+        const command = truncate(rawCommand.replace(/\s+/g, " ").trim(), 70);
         return singleLine(title("bash_async", theme.fg("accent", `"${command}"`), theme), theme, context);
       },
       renderResult(result, options, theme, context) {
