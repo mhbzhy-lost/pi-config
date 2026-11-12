@@ -193,6 +193,8 @@ test("pi-lite launches the lean read-only exploration mode", async () => {
         join(repoRoot, "src", "progressive-tools", "progressive-tools.ts"),
         "-e",
         "builtin:tool-search",
+        "-e",
+        join(repoRoot, "src", "tool-timing", "tool-timing.ts"),
         "--tools",
         "read,bash,tool_search",
         "--version",

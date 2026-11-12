@@ -17,8 +17,8 @@ pi() {
   _pi_config_invoke --tui-mode fullscreen "$@"
 }
 
-# 精简版只读探索模式：不加载上下文文件和普通 extensions，只显式加载 progressive tools
-# 与 tool_search，因此可按需发现 search/browser；launcher 追加的 session-owner extension
+# 精简版只读探索模式：不加载上下文文件和普通 extensions，显式加载 progressive tools、
+# tool_search 与工具调用时间注入，因此可按需发现 search/browser；launcher 追加的 session-owner extension
 # 在 --no-extensions 下仍会加载。
 pi-lite() {
   _pi_config_invoke \
@@ -28,6 +28,7 @@ pi-lite() {
     --no-prompt-templates \
     -e "$_PI_CONFIG_ROOT/src/progressive-tools/progressive-tools.ts" \
     -e builtin:tool-search \
+    -e "$_PI_CONFIG_ROOT/src/tool-timing/tool-timing.ts" \
     --tools read,bash,tool_search \
     "$@"
 }

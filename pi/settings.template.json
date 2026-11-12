@@ -29,6 +29,7 @@
     "../src/security-gates/security-gates.ts",
     "../src/session-owner/session-owner.ts",
     "../src/subagent/subagent.ts",
+    "../src/tool-timing/tool-timing.ts",
     "+builtin:tool-search",
     "-builtin:llama.cpp",
     "-builtin:codemode",
