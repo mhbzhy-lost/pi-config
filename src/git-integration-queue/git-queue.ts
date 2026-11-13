@@ -56,7 +56,7 @@ export async function enqueueHandoffPath(handoffPath: string, metadata: Record<s
 
 const inspectParameters = Type.Object({ worktreePath: Type.Optional(Type.String({ minLength: 1 })), handoffPath: Type.Optional(Type.String({ minLength: 1 })), baseCommit: Type.Optional(Type.String()), targetRef: Type.Optional(Type.String()) }, { additionalProperties: false });
 const statusParameters = Type.Object({}, { additionalProperties: false });
-const enqueueParameters = Type.Object({ targetRef: Type.String({ minLength: 1 }), requestId: Type.Optional(Type.String({ minLength: 1 })), sourceCommit: Type.Optional(Type.String({ minLength: 1 })), handoffPath: Type.Optional(Type.String({ minLength: 1 })), metadata: Type.Optional(Type.Record(Type.String(), Type.String())) }, { additionalProperties: false });
+const enqueueParameters = Type.Object({ targetRef: Type.String({ minLength: 1 }), requestId: Type.Optional(Type.String({ minLength: 1 })), sourceCommit: Type.Optional(Type.String({ minLength: 1 })), worktreePath: Type.Optional(Type.String({ minLength: 1 })), handoffPath: Type.Optional(Type.String({ minLength: 1 })), metadata: Type.Optional(Type.Record(Type.String(), Type.String())) }, { additionalProperties: false });
 
 export default function gitQueue(pi: ExtensionAPI): void {
   pi.registerTool(defineTool({ name: "git_queue_inspect", label: "git_queue_inspect", description: "只读检查 Git worktree 或 pi-subagents handoff 的集成资格。不会修改 Git 或 queue。", parameters: inspectParameters, exposure: "deferred", defaultActive: false, async execute(_id, input, _signal, _update, ctx) {
@@ -76,7 +76,14 @@ export default function gitQueue(pi: ExtensionAPI): void {
       const candidate = classifyHandoff(input.handoffPath).find((entry) => entry.receipt.outcome === "enqueued" && entry.source);
       if (!candidate?.source) throw new Error("handoff is not eligible for enqueue");
       source = candidate.source;
-    } else if (input.sourceCommit) source = { kind: "commit", commit: input.sourceCommit };
+    } else if (input.sourceCommit) {
+      if (!input.worktreePath) throw new Error("worktreePath is required with sourceCommit");
+      const facts = inspectWorktree({ worktreePath: input.worktreePath });
+      if (facts.repositoryId !== connection.repositoryId) throw new Error("source worktree belongs to another repository");
+      if (!facts.clean) throw new Error("source worktree must be clean before enqueue");
+      if (facts.headCommit !== input.sourceCommit) throw new Error("sourceCommit must equal the source worktree HEAD");
+      source = { kind: "commit", commit: input.sourceCommit };
+    }
     else throw new Error("sourceCommit or handoffPath is required");
     const result = await queueRequest(connection.socket, "enqueue", { targetRef: input.targetRef, requestId: input.requestId, source, metadata: input.metadata });
     return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
