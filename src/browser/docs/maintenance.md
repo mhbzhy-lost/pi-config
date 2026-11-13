@@ -2,12 +2,12 @@
 
 ## 目录边界
 
-实现、依赖、测试、fixture、验收和二级文档必须留在 `src/progressive-tools/browser/`。browser tool 直接调用本目录的 runtime；不要恢复外部 skill 或 CLI 入口。
+实现、依赖、测试、fixture、验收和二级文档必须留在 `src/browser/`。browser tool 直接调用本目录的 runtime；不要恢复外部 skill 或 CLI 入口。
 
 ## 本地验证
 
 ```bash
-cd src/progressive-tools/browser
+cd src/browser
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts
 npm run typecheck
 npm test

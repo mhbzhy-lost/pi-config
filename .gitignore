@@ -56,6 +56,7 @@ __pycache__/
 # Secrets
 /skills/external-llm-review/.env
 /src/progressive-tools/search/.env
+/src/search/.env
 /pi/models.json
 /pi/settings.json
 .opencode/

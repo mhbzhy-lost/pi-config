@@ -772,12 +772,12 @@ test("policy#scan-coverage-accounts-for-every-file-and-excludes-state-dirs", () 
   // 干净 clone 里没有任何 .DS_Store 时允许为空，但只要出现被忽略条目，就必须同时满足
   // 「显式登记的 OS 垃圾文件名 + 落在显式枚举的扫描根内 + 磁盘上真实存在 + 不进源码/文本证据」。
   const registeredJunkBasenames = [".DS_Store", "Thumbs.db"];
-  const progressiveToolDocumentation = (path) => path.startsWith("src/progressive-tools/") && (
+  const progressiveToolDocumentation = (path) => /^src\/(?:browser|resign-ios-ipa|search|writing-skills)\//.test(path) && (
     path.includes("/docs/") || path.endsWith(".py") || path.endsWith(".applescript") || path.includes("/search/.env")
   );
   for (const path of report.files.ignored) {
     const basename = path.split("/").at(-1);
-    assert.ok(registeredJunkBasenames.includes(basename) || progressiveToolDocumentation(path), `只有显式登记的 OS 垃圾文件或 progressive tool 文档可以被忽略，实际出现：${path}`);
+     assert.ok(registeredJunkBasenames.includes(basename) || progressiveToolDocumentation(path), `只有显式登记的 OS 垃圾文件或工具文档可以被忽略，实际出现：${path}`);
     assert.ok(
       SCAN_ROOTS.some((root) => path.startsWith(`${root}/`)),
       `被忽略条目必须落在显式枚举的扫描根内：${path}`,

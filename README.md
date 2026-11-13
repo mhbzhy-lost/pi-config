@@ -48,6 +48,6 @@ basic-memory doctor --local
 
 ## Progressive tools
 
-联网搜索、浏览器自动化、iOS IPA 重签和文档编写指导均已内化为 `src/progressive-tools/<tool>/` 下的 deferred custom tools。每个工具独立维护实现、运行时和 Markdown 资料，不依赖外部文档发现、同步或软链。
+联网搜索、浏览器自动化、iOS IPA 重签和文档编写指导均已内化为 `src/<tool>/` 下的 deferred custom tools。每个工具独立维护实现、运行时和 Markdown 资料，不依赖外部文档发现、同步或软链。
 
 工作文档保留在本机 `docs/`，该目录不纳入 Git，也不随仓库推送或分发。

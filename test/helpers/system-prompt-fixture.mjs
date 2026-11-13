@@ -320,9 +320,9 @@ const IGNORED_BASENAMES = new Set([".DS_Store", "Thumbs.db"]);
 const SKIPPED_DIRECTORY_NAMES = new Set(["node_modules", "dist", "var", "vendor", ".git", "sessions", "logs", "run-history"]);
 
 function isProgressiveToolDocumentation(relPath) {
-  if (!relPath.startsWith("src/progressive-tools/")) return false;
+  if (!/^src\/(?:browser|resign-ios-ipa|search|writing-skills)\//.test(relPath)) return false;
   if (relPath.includes("/docs/")) return true;
-  if (/^src\/progressive-tools\/search\/\.env(?:\.|$)/.test(relPath)) return true;
+  if (/^src\/search\/\.env(?:\.|$)/.test(relPath)) return true;
   return /\.(?:py|applescript)$/.test(relPath);
 }
 

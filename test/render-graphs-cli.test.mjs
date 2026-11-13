@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 test("render-graphs CLI runs directly from its TypeScript entrypoint", () => {
-  const result = spawnSync(process.execPath, ["src/progressive-tools/writing-skills/runtime/render-graphs.ts"], {
+  const result = spawnSync(process.execPath, ["src/writing-skills/runtime/render-graphs.ts"], {
     cwd: new URL("..", import.meta.url),
     encoding: "utf8",
   });

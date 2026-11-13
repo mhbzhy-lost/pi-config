@@ -24,8 +24,8 @@ search 工具默认先调用 DeepSeek；DeepSeek 不可用时自动尝试 Exa fa
 export DEEPSEEK_API_KEY="<your key>"
 
 # 方式二：写入 search 工具目录的 .env（长期有效，免 source、免重启 shell）
-cp src/progressive-tools/search/.env.example \
-   src/progressive-tools/search/.env
+cp src/search/.env.example \
+   src/search/.env
 # 然后编辑该 .env，填入 DEEPSEEK_API_KEY=<your key>
 ```
 
