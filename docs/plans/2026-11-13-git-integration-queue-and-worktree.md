@@ -2,7 +2,7 @@
 
 ## 目标
 
-使用上游 `pi-subagents` 的 `worktree: true` 能力，增加一个独立的、repository-scoped 的 Git Durable FIFO Queue。Queue 只处理显式提交的 Git 集成请求，不管理 subagent、Pi session 或 worktree 生命周期。
+使用上游 `pi-subagents` 的 `worktree: true` 能力，增加一个独立的、repository-scoped 的 Git Durable FIFO Queue。Queue 只处理显式提交的 Git 集成请求，不管理 subagent、Pi session 或 worktree 生命周期。由于上游 clean handoff 会回收 worktree/branch 且 manifest 不稳定地提供最终 commit hash，queue 第一阶段同时支持已验证 commit 和已验证 handoff patch 两种 Git 输入。
 
 完成后：
 
@@ -76,17 +76,17 @@
 
 **依赖：** T0。
 
-核对 `pi-subagents` 在 child 结束和 worktree cleanup 前提供的事实：
+已核对 `pi-subagents` 当前版本在 child 结束和 worktree cleanup 前提供的事实：
 
 - worktree path；
 - base commit；
-- head commit；
 - branch/ref；
-- clean/dirty 状态；
-- 是否存在 completion/handoff hook；
-- dirty worktree 是否能在 cleanup 前保留。
+- direct async worktree 会在 `asyncDir/parallel-handoff.json` 写入 `repoRoot`、`baseCommit`、`patch.path`、`patch.branch`、`patch.changed` 和 cleanup task；
+- clean 且 handoff patch 可验证的 worktree 会被 upstream 回收；
+- dirty、patch 无法验证或 cleanup proof 不完整的 worktree 会被 upstream 保留；
+- completion details 会携带 `handoffPath`，但不保证提供最终 commit hash。
 
-**停止条件：** 如果上游只在 cleanup 后提供结果，且无法保留 dirty worktree 或提供可靠 patch/handoff，则停止自动集成实现，先报告生命周期阻塞。
+**停止条件：** 如果上游不再提供可验证的 handoff manifest/patch，或 completion 时 handoff 已不可读，则停止自动集成实现，先报告生命周期阻塞。adapter 不能等待已经被 upstream 回收的 worktree，也不能把 branch 名当作 commit 身份。
 
 ### T2：抽取 Git repository identity 与状态探针
 
@@ -122,13 +122,19 @@ packages/git-integration-queue/src/daemon.ts
 packages/git-integration-queue/src/protocol.ts
 ```
 
-queue 接收 Git 事实，不接收 subagent/session 绑定：
+queue 接收 Git 事实或经校验的 handoff artifact，不接收 subagent/session 绑定：
 
 ```ts
 enqueue({
   repositoryRoot,
   targetRef,
-  sourceCommit,
+  source: {
+    kind: "commit" | "handoff-patch",
+    commit?,
+    patchPath?,
+    baseCommit?,
+    handoffPath?,
+  },
   requestId,
   metadata,
 })
@@ -141,7 +147,7 @@ queued → admitted → integrating → completed
                               ↘ preserved/conflict
 ```
 
-第一阶段只支持已验证 source commit 的 fast-forward。source 不是当前 target 的安全后代时，进入 preserved/conflict，不自动启动 agent 或解决冲突。
+第一阶段优先支持已验证 source commit 的 fast-forward；对 upstream handoff patch，queue 在自己的受控临时 Git 集成环境中验证并应用 patch，再生成可审计的 candidate commit。source 不是当前 target 的安全后代、patch 无法验证或 target 漂移时，进入 preserved/conflict，不自动启动 agent 或解决语义冲突。
 
 ### T4：提供三个最小 Pi 专用 tool
 
@@ -155,7 +161,7 @@ git_queue_status
 git_queue_enqueue
 ```
 
-`inspect` 只读 worktree/repository/queue eligibility；`status` 读取 repository queue；`enqueue` 从 worktree 读取 Git 事实，只允许 clean 且可验证的 commit 进入 queue。
+`inspect` 只读 worktree/repository/queue eligibility；`status` 读取 repository queue；`enqueue` 接收 adapter 验证过的 commit 或 handoff manifest，只允许 clean 且可验证的输入进入 queue。handoff patch 必须绑定 `repoRoot`、`baseCommit`、patch path、cleanup evidence 和 immutable digest。
 
 不提供 `git_worktree_commit`、`git_worktree_add`、`git_worktree_remove` 或 force merge tool。主 agent 在 worktree 内的修复、测试和 commit 使用 `bash`，但目标分支集成必须经过 queue tool。
 
@@ -163,17 +169,20 @@ git_queue_enqueue
 
 **依赖：** T1、T2、T4。
 
-判定矩阵：
+判定矩阵（基于 upstream handoff manifest）：
 
 ```text
-clean + HEAD == base                  → NO_CHANGE
-clean + HEAD 是 base 的后代           → ENQUEUE
-dirty + HEAD == base                  → PRESERVE
-dirty + HEAD 是 base 的后代            → PRESERVE
-无法确认 Git/worktree 事实             → FAIL_CLOSED
+patch.changed == false + worktreeRemoved == true
+  → NO_CHANGE
+patch.changed == true + worktreeRemoved == true + patch 可验证
+  → ENQUEUE（handoff-patch）
+cleanup task preserved/未回收或 patch 无法验证
+  → PRESERVE
+manifest、repoRoot、baseCommit、cleanup 或 digest 无法确认
+  → FAIL_CLOSED
 ```
 
-`NO_CHANGE` 和 `ENQUEUE` 自动处理；`PRESERVE` 与 `FAIL_CLOSED` 保留 worktree 并要求主 agent 介入。禁止自动 commit、stash、reset 和删除。
+`NO_CHANGE` 和 `ENQUEUE` 自动处理；`PRESERVE` 与 `FAIL_CLOSED` 保留现场并要求主 agent 介入。禁止自动 stash、reset、覆盖和删除。`ENQUEUE` 可以提交 source commit，也可以提交 upstream handoff patch；queue 不删除 worktree，upstream 已经完成的 cleanup 事实只作为输入证据。
 
 ### T6：统一结构化 integration receipt
 
@@ -262,3 +271,12 @@ queue FIFO 并发、幂等、重启恢复、target 漂移、四状态判定、di
 - 当前 bugfix 已独立提交，queue 新能力尚未开始实现。
 
 在用户选择执行模式前，计划保持未执行状态。
+
+## 执行进度
+
+- T0：完成，已包含在 `955b9bc` bugfix commit；
+- T1：完成。已确认 upstream direct async worktree 的 `parallel-handoff.json`、patch、cleanup task 和 `handoffPath` 契约；
+- T2：完成 repository identity/Git facts 初版；
+- T3：完成 durable FIFO queue、Unix socket daemon、requestId 幂等、commit fast-forward 与 handoff-patch candidate 集成初版；
+- T4：完成 `git_queue_inspect`、`git_queue_status`、`git_queue_enqueue` deferred tools；
+- T5–T8：未完成，当前不得宣称整体计划完成。

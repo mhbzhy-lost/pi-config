@@ -28,7 +28,7 @@ test("minimal extension registers prefixed subagent RPC tools plus supervisor re
     for (const name of markers) delete process.env[name];
     process.env.PI_CODING_AGENT_DIR = agentDir;
     process.env.PI_CODING_WORKSPACE_DIR = join(agentDir, "workspaces");
-    await writeFile(join(agentDir, "settings.json"), JSON.stringify({ extensions: [join(repoRoot, "src/subagent/subagent.ts")] }));
+    await writeFile(join(agentDir, "settings.json"), JSON.stringify({ extensions: [join(repoRoot, "src/subagent/subagent.ts"), join(repoRoot, "src/git-integration-queue/git-queue.ts")] }));
     const host = await import(pathToFileURL(piPackage).href);
     const resourceLoader = new host.DefaultResourceLoader({
       cwd: repository,
@@ -55,13 +55,16 @@ test("minimal extension registers prefixed subagent RPC tools plus supervisor re
     const toolNames = session.getAllTools().map((tool) => tool.name)
       .filter((name) => /^(?:subagent|managed_workspace|supervisor_request)/.test(name)).sort();
     assert.deepEqual(errors, []);
-    assert.equal(extensions.length, 1);
+    assert.equal(extensions.length, 2);
     assert.deepEqual(toolNames, ["subagent_resume", "subagent_spawn", "subagent_status", "subagent_steer", "subagent_stop", "subagent_supervisor"]);
     for (const name of toolNames) assert.equal(session.getToolDefinition(name)?.exposure, "deferred", `${name} must be deferred`);
     const spawnParams = session.getToolDefinition("subagent_spawn").parameters;
     assert.equal(spawnParams.properties.title.type, "string");
     assert.equal(spawnParams.properties.worktree.type, "boolean");
     assert.deepEqual(spawnParams.required, ["task"]);
+    for (const name of ["git_queue_inspect", "git_queue_status", "git_queue_enqueue"]) {
+      assert.equal(session.getToolDefinition(name)?.exposure, "deferred", `${name} must be deferred`);
+    }
     assert.equal(session.getAllTools().some((tool) => tool.name === "subagent_roster"), false);
     assert.equal(session.getActiveToolNames().includes("subagent_roster"), false);
     assert.equal(session.getCallableToolNames().includes("subagent_roster"), false);

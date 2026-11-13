@@ -21,6 +21,7 @@
     "../src/compact-tools/compact-tools.ts",
     "../src/context-usage/context-usage.ts",
     "../src/dcp/dcp.ts",
+    "../src/git-integration-queue/git-queue.ts",
     "../src/tui-lite/tui-lite.ts",
     "../src/interactive-stderr-guard/interactive-stderr-guard.ts",
     "../src/network-recovery/network-recovery.ts",
