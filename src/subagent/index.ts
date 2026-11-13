@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import registerSubagents from "pi-subagents";
 import { createSubagentCompletionRenderer, createSubagentRenderer, rememberSubagentMessage } from "./renderer.ts";
+import { enqueueHandoffPath } from "../git-integration-queue/git-queue.ts";
 
 const RPC_REQUEST = "subagents:rpc:v1:request";
 const RPC_REPLY = "subagents:rpc:v1:reply:";
@@ -168,6 +169,18 @@ export function createMinimalSubagentExtension(pi: ExtensionAPI): void {
   // 覆盖上游 prose completion notice，复用 bash_async 的标准终态回执格式。
   pi.registerMessageRenderer("subagent-notify", createSubagentCompletionRenderer());
   pi.on("message_end", (event) => rememberSubagentMessage(event.message));
+  pi.on("message_end", (event) => {
+    const message = event.message as any;
+    if (message?.customType !== "subagent-notify") return;
+    const runs = message.details?.runs;
+    if (!Array.isArray(runs)) return;
+    for (const run of runs) {
+      if (typeof run?.handoffPath !== "string") continue;
+      void enqueueHandoffPath(run.handoffPath, { producer: "pi-subagent", runId: typeof run.runId === "string" ? run.runId : "" }).catch(() => {
+        // Completion remains authoritative; queue failures are visible through queue status/inspect.
+      });
+    }
+  });
 
   pi.on("before_agent_start", async (event) => {
     const catalog = formatAdvertisedAgents(await loadAdvertisedAgents());
