@@ -1,4 +1,5 @@
 import net from "node:net";
+import { randomUUID } from "node:crypto";
 
 export async function queueRequest<T>(socketPath: string, method: string, params: Record<string, unknown> = {}): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -14,6 +15,6 @@ export async function queueRequest<T>(socketPath: string, method: string, params
       if (response.ok) resolve(response.result as T);
       else reject(new Error(response.error ?? "git queue request failed"));
     });
-    socket.on("connect", () => socket.write(`${JSON.stringify({ id: crypto.randomUUID(), method, params })}\n`));
+    socket.on("connect", () => socket.write(`${JSON.stringify({ id: randomUUID(), method, params })}\n`));
   });
 }

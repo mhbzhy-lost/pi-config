@@ -12,6 +12,7 @@ function fakePi() {
     registerTool(definition) {
       registered.push(definition);
     },
+    registerToolRenderer() {},
       on(name, listener) {
       this.listeners ??= [];
       this.listeners.push({ name, listener });
@@ -55,7 +56,7 @@ test("extension 注册无参数 context_usage 工具并返回完整快照", asyn
   assert.ok(pi.registered[0].promptSnippet.length > 0);
   assert.ok(pi.registered[0].promptGuidelines.length > 0);
   assert.equal(pi.registered[0].outputSchema, ContextUsageOutputSchema);
-  assert.equal(pi.registered[0].exposure, undefined);
+  assert.equal(pi.registered[0].exposure, "deferred");
   assert.deepEqual(pi.registered[0].parameters.properties, {});
   assert.equal(pi.registered[0].parameters.additionalProperties, false);
 

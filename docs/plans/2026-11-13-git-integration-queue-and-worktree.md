@@ -282,4 +282,4 @@ queue FIFO 并发、幂等、重启恢复、target 漂移、四状态判定、di
 - T5：完成初版。subagent completion 的 `handoffPath` 会经过机械 classifier，eligible handoff patch 自动提交 repository daemon；
 - T6：完成初版。integration receipt 通过独立 custom message 返回，原始 subagent completion 不被改写；
 - T7：完成初版。daemon 重启时无法证明的 integrating item fail-closed 为 preserved；
-- T8：未完成，当前不得宣称整体计划完成。
+- T8：自动验收完成；`npm run typecheck`、`npm test`（407 passed, 1 skipped）、queue/runtime/renderer 回归和 settings JSON/diff 检查均通过。多 Pi session 共享同一 repository queue 的真实手工 smoke 仍需操作者执行。

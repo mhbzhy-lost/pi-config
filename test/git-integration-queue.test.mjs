@@ -126,6 +126,7 @@ test("daemon restart preserves an in-flight item instead of replaying Git", asyn
   const queue = new GitIntegrationQueue(fixture.state, fixture.root);
   await queue.init();
   const queued = await queue.enqueue({ targetRef: "refs/heads/main", requestId: "in-flight", source: { kind: "commit", commit: fixture.base } });
+  await queue.process();
   const ledgerFile = join(fixture.state, repositoryIdentity(fixture.root).repositoryId, "in-flight.json");
   const record = JSON.parse(await readFile(ledgerFile, "utf8"));
   record.state = "integrating";

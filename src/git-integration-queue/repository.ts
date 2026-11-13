@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { realpathSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 import type { WorktreeFacts } from "./records.ts";
 
 function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
