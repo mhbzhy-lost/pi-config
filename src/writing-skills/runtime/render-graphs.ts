@@ -1,20 +1,12 @@
-#!/usr/bin/env node
-
 /**
- * Render Graphviz diagrams from a tool guide Markdown file to SVG files.
- *
- * Usage:
- *   node render-graphs.ts <markdown-file>           # Render each diagram separately
- *   node render-graphs.ts <markdown-file> --combine # Combine all into one diagram
- *
- * Graphviz's optional `dot` executable is required only when rendering.
+ * Render Graphviz diagrams from a Markdown file.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
-function extractDotBlocks(markdown) {
+function extractDotBlocks(markdown: string) {
   const blocks = [];
   const regex = /```dot\n([\s\S]*?)```/g;
   let match;
@@ -28,13 +20,13 @@ function extractDotBlocks(markdown) {
   return blocks;
 }
 
-function extractGraphBody(dotContent) {
+function extractGraphBody(dotContent: string) {
   const match = dotContent.match(/digraph\s+\w+\s*\{([\s\S]*)\}/);
   if (!match) return "";
   return match[1].replace(/^\s*rankdir\s*=\s*\w+\s*;?\s*$/gm, "").trim();
 }
 
-function combineGraphs(blocks, guideName) {
+function combineGraphs(blocks: Array<{ name: string; content: string }>, guideName: string) {
   const bodies = blocks.map((block, index) => {
     const body = extractGraphBody(block.content);
     return `  subgraph cluster_${index} {
@@ -52,93 +44,50 @@ ${bodies.join("\n\n")}
 }`;
 }
 
-function renderToSvg(dotContent) {
+function renderToSvg(dotContent: string): string {
   const result = spawnSync("dot", ["-Tsvg"], {
     input: dotContent,
     encoding: "utf8",
     maxBuffer: 10 * 1024 * 1024,
   });
   if (result.error) {
-    console.error("Error: Graphviz 'dot' is not available. Install it with:");
-    console.error("  brew install graphviz    # macOS");
-    console.error("  apt install graphviz     # Debian/Ubuntu");
-    return null;
+    throw new Error("Graphviz 'dot' is not available");
   }
   if (result.status !== 0) {
-    console.error("Error running Graphviz 'dot':", result.stderr || "unknown error");
-    return null;
+    throw new Error(`Graphviz 'dot' failed: ${result.stderr || "unknown error"}`);
   }
   return result.stdout;
 }
 
-function printUsage() {
-  console.error("Usage: node render-graphs.ts <markdown-file> [--combine]");
-  console.error("\nOptions:");
-  console.error("  --combine    Combine all diagrams into one SVG");
-  console.error("\nExample:");
-  console.error("  node render-graphs.ts ../docs/guide.md");
-  console.error("  node render-graphs.ts ../docs/guide.md --combine");
-}
-
-function main() {
-  const args = process.argv.slice(2);
-  const combine = args.includes("--combine");
-  const guideArg = args.find((arg) => !arg.startsWith("-"));
-
-  if (!guideArg) {
-    printUsage();
-    process.exitCode = 1;
-    return;
-  }
-
-  const guideFile = resolve(guideArg);
-  const guideName = basename(guideFile).replace(/\.[^.]+$/, "").replace(/-/g, "_");
+export function renderGraphs(markdownFile: string, combine = false): { files: string[]; outputDir: string } {
+  const guideFile = resolve(markdownFile);
   if (!existsSync(guideFile)) {
-    console.error(`Error: ${guideFile} not found`);
-    process.exitCode = 1;
-    return;
+    throw new Error(`Markdown file not found: ${guideFile}`);
   }
 
   const blocks = extractDotBlocks(readFileSync(guideFile, "utf8"));
-  if (blocks.length === 0) {
-    console.log("No ```dot blocks found in", guideFile);
-    return;
-  }
+  if (blocks.length === 0) return { files: [], outputDir: join(resolve(guideFile, ".."), "diagrams") };
 
-  console.log(`Found ${blocks.length} diagram(s) in ${basename(guideFile)}`);
   const outputDir = join(resolve(guideFile, ".."), "diagrams");
   if (!existsSync(outputDir)) mkdirSync(outputDir);
+  const guideName = basename(guideFile).replace(/\.[^.]+$/, "").replace(/-/g, "_");
+  const files: string[] = [];
 
   if (combine) {
     const combined = combineGraphs(blocks, guideName);
     const svg = renderToSvg(combined);
-    if (!svg) {
-      process.exitCode = 1;
-      return;
-    }
-    writeFileSync(join(outputDir, `${guideName}_combined.svg`), svg);
-    writeFileSync(join(outputDir, `${guideName}_combined.dot`), combined);
-    console.log(`  Rendered: ${guideName}_combined.svg`);
-    console.log(`  Source: ${guideName}_combined.dot`);
+    const svgPath = join(outputDir, `${guideName}_combined.svg`);
+    const dotPath = join(outputDir, `${guideName}_combined.dot`);
+    writeFileSync(svgPath, svg);
+    writeFileSync(dotPath, combined);
+    files.push(svgPath, dotPath);
   } else {
-    let failures = 0;
     for (const block of blocks) {
       const svg = renderToSvg(block.content);
-      if (!svg) {
-        failures += 1;
-        console.error(`  Failed: ${block.name}`);
-        continue;
-      }
-      writeFileSync(join(outputDir, `${block.name}.svg`), svg);
-      console.log(`  Rendered: ${block.name}.svg`);
-    }
-    if (failures) {
-      process.exitCode = 1;
-      return;
+      const svgPath = join(outputDir, `${block.name}.svg`);
+      writeFileSync(svgPath, svg);
+      files.push(svgPath);
     }
   }
-
-  console.log(`\nOutput: ${outputDir}/`);
+  return { files, outputDir };
 }
-
-main();

@@ -30,9 +30,9 @@ export const writingSkillsTool = defineTool({
   description: `提供编写、维护和审阅高质量操作说明的内化指导。不修改任意文件；需要详细参考资料时使用 action=read 读取固定主题。可用主题：guide（总指南）、bestPractices（Anthropic 最佳实践）、persuasion（说服原则）、testing（使用子代理测试 Skill）、graphviz（Graphviz 约定）、example（CLAUDE.md 测试示例）。\n\n${guidance}`,
   promptSnippet: "按主题读取写作指导：guide、bestPractices、persuasion、testing、graphviz、example",
   promptGuidelines: [
-    "先明确目标、触发条件、输入输出、权限边界、停止条件和验证方法，再组织正文。",
-    "不要因为写作指导自动新增测试、调用真实 provider 或派发子代理；这些行为仍需具体授权。",
-    "引用资料必须使用真实路径和当前实现，不把推测或第三方说明升级成项目事实。",
+    "使用 writing_skills 前先明确目标、触发条件、输入输出、权限边界、停止条件和验证方法，再组织正文。",
+    "writing_skills 只提供指导，不会自动新增测试、调用真实 provider 或派发子代理；这些行为仍需具体授权。",
+    "使用 writing_skills 时引用资料必须使用真实路径和当前实现，不把推测或第三方说明升级成项目事实。",
   ],
   parameters,
   exposure: "deferred",

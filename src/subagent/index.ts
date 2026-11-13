@@ -134,6 +134,7 @@ function rpcTool(pi: ExtensionAPI, name: string, method: string, description: st
     ...(prompt?.guidelines !== undefined ? { promptGuidelines: prompt.guidelines } : {}),
     parameters,
     exposure: "deferred" as const,
+    defaultActive: false,
     async execute(_toolCallId: string, input: unknown, _signal: AbortSignal | undefined, _onUpdate: unknown, ctx: RpcToolContext) {
       const modelRef = ctx.model
         ? `${ctx.model.provider}/${ctx.model.id}${ctx.thinkingLevel ? `:${ctx.thinkingLevel}` : ""}`

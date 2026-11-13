@@ -40,6 +40,18 @@ npm 只能使用官方源 `https://registry.npmjs.org/`；禁止使用淘宝、�
 
 所有面向用户的精简、折叠、摘要、截断和换行只能发生在 TUI renderer 层。不得为改善 TUI 展示而改写 agent 实际收到的消息、tool result、event payload、session 内容或其结构化 details；TUI renderer 必须消费原始数据并生成独立的显示文本。
 
+## Deferred Tool 维护规范
+
+本仓 deferred tool 遵循 Pi 官方 `Dynamic Tool Loading` / `Tool Exposure` 约定（当前基线为 `@earendil-works/pi-coding-agent@1.5.2`）：
+
+- **选择 exposure**：高频、每轮都需要的能力使用 `direct`；领域专用、低频或声明较大的能力使用 `exposure: "deferred"`，让 `tool_search` 按需发现并在下一次模型请求中激活。deferred tool 仍应通过 `pi.registerTool()` 注册，不能在调用时临时绕过注册表。
+- **保持初始上下文轻量**：deferred tool 默认不进入模型初始工具声明；显式设置 `defaultActive: false`，loader（通常是 `tool_search`）保持 active。不要为 deferred tool 另写自定义发现/加载机制。
+- **分层写文案**：`description` 必须完整说明能力、适用场景、主要副作用和关键限制；`parameters` 的字段名、description、枚举值必须足够让 tool search 发现和区分能力。Pi 的 tool search 索引 description 与参数 schema，不索引 `promptSnippet` / `promptGuidelines`。
+- **加载后文案**：`promptSnippet` 只写一行简短的使用提示，进入 active tool 的 system prompt `<tools>` 区域；`promptGuidelines` 只写模型执行时的规则，进入 active tool 的 `<rules>` 区域。guideline 会扁平追加，必须显式写工具名，不能使用没有指代对象的“使用本工具”。
+- **标准协议入口**：工具的全部模型可用能力必须通过 Pi custom tool 的 `parameters`、`execute()` 和标准 tool result 暴露。不得把 production tool 能力只放在独立 CLI、shell 命令或隐式脚本入口；CLI 只能是经用户明确需要的诊断/维护入口，并复用 tool-owned 实现。
+- **加载后契约**：tool_search 返回匹配工具后，工具完整声明在下一次模型请求生效；工具执行结果必须返回 `content`，结构化数据使用 `details` / `structuredContent`，不要通过改写 prompt 或拼接不可验证文本传递结果。
+- **审计要求**：新增或修改 deferred tool 时，必须检查初始不可见性、tool_search 可检索性、加载后完整声明、参数 schema、prompt 文案和实际执行入口；至少运行 typecheck 与对应 tool contract 测试。工具名、description、参数 schema 发生变化时，补充真实 loader/激活路径验证。
+
 ## 缺陷数据来源分类门禁
 
 测试、恢复或实际运行发现异常时，在增加任何 production 兼容、防御或 fallback 逻辑前，必须先记录数据来源、首个偏离点和完整生成调用链，并完成以下分类：
