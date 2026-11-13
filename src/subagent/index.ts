@@ -5,6 +5,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import registerSubagents from "pi-subagents";
 import { createSubagentCompletionRenderer, createSubagentRenderer, rememberSubagentMessage } from "./renderer.ts";
 import { enqueueHandoffPath } from "../git-integration-queue/git-queue.ts";
+import { createGitIntegrationReceiptRenderer, GIT_INTEGRATION_MESSAGE } from "../git-integration-queue/receipt-renderer.ts";
 
 const RPC_REQUEST = "subagents:rpc:v1:request";
 const RPC_REPLY = "subagents:rpc:v1:reply:";
@@ -168,6 +169,7 @@ export function createMinimalSubagentExtension(pi: ExtensionAPI): void {
   registerSubagents(upstream);
   // 覆盖上游 prose completion notice，复用 bash_async 的标准终态回执格式。
   pi.registerMessageRenderer("subagent-notify", createSubagentCompletionRenderer());
+  pi.registerMessageRenderer(GIT_INTEGRATION_MESSAGE, createGitIntegrationReceiptRenderer());
   pi.on("message_end", (event) => rememberSubagentMessage(event.message));
   pi.on("message_end", (event) => {
     const message = event.message as any;
@@ -176,8 +178,11 @@ export function createMinimalSubagentExtension(pi: ExtensionAPI): void {
     if (!Array.isArray(runs)) return;
     for (const run of runs) {
       if (typeof run?.handoffPath !== "string") continue;
-      void enqueueHandoffPath(run.handoffPath, { producer: "pi-subagent", runId: typeof run.runId === "string" ? run.runId : "" }).catch(() => {
-        // Completion remains authoritative; queue failures are visible through queue status/inspect.
+      void enqueueHandoffPath(run.handoffPath, { producer: "pi-subagent", runId: typeof run.runId === "string" ? run.runId : "" }).then((receipts) => {
+        if (!receipts.length) return;
+        pi.sendMessage({ customType: GIT_INTEGRATION_MESSAGE, content: receipts.map((receipt: any) => `${receipt.outcome}: ${receipt.reasonCode ?? receipt.queueRequestId ?? ""}`).join("\n"), display: true, details: { receipts } }, { triggerTurn: false });
+      }).catch((error) => {
+        pi.sendMessage({ customType: GIT_INTEGRATION_MESSAGE, content: `failed-closed: ${error instanceof Error ? error.message : String(error)}`, display: true, details: { receipts: [{ outcome: "failed-closed", reasonCode: "ADAPTER_ERROR", reason: error instanceof Error ? error.message : String(error), requiresOperator: true }] } }, { triggerTurn: false });
       });
     }
   });

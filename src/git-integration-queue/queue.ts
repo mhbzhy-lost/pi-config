@@ -24,6 +24,10 @@ export class GitIntegrationQueue {
     await this.ledger.init();
     const index = await this.ledger.read<string[]>("index.json", []);
     if (!index.length) await this.ledger.write("index.json", []);
+    for (const item of await this.items()) {
+      if (item.state !== "integrating") continue;
+      await this.update(item, { state: "preserved", reasonCode: "DAEMON_RESTART_DURING_INTEGRATION", reason: "queue daemon 在集成临界区重启，无法证明 target 是否已更新" });
+    }
   }
 
   private async items(): Promise<QueueItem[]> {

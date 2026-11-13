@@ -120,3 +120,19 @@ test("repository daemon serves status over Unix socket", async (t) => {
   assert.equal(status.repositoryId, repositoryIdentity(fixture.root).repositoryId);
   assert.deepEqual(status.items, []);
 });
+
+test("daemon restart preserves an in-flight item instead of replaying Git", async (t) => {
+  const fixture = await repoFixture(t);
+  const queue = new GitIntegrationQueue(fixture.state, fixture.root);
+  await queue.init();
+  const queued = await queue.enqueue({ targetRef: "refs/heads/main", requestId: "in-flight", source: { kind: "commit", commit: fixture.base } });
+  const ledgerFile = join(fixture.state, repositoryIdentity(fixture.root).repositoryId, "in-flight.json");
+  const record = JSON.parse(await readFile(ledgerFile, "utf8"));
+  record.state = "integrating";
+  await writeFile(ledgerFile, `${JSON.stringify(record)}\n`);
+  const restarted = new GitIntegrationQueue(fixture.state, fixture.root);
+  await restarted.init();
+  const item = (await restarted.status()).items.find((entry) => entry.requestId === queued.requestId);
+  assert.equal(item.state, "preserved");
+  assert.equal(item.reasonCode, "DAEMON_RESTART_DURING_INTEGRATION");
+});
