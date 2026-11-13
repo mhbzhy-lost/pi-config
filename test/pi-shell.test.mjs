@@ -196,7 +196,7 @@ test("pi-lite launches the lean read-only exploration mode", async () => {
          "-e",
          "builtin:tool-search",
          "--tools",
-        "read,bash,tool_search",
+         "read,bash,tool_search,search,browser",
         "--version",
         "",
       ].join("\n"),

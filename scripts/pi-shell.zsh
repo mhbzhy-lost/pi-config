@@ -29,6 +29,6 @@ pi-lite() {
     -e "$_PI_CONFIG_ROOT/src/search/search.ts" \
     -e "$_PI_CONFIG_ROOT/src/browser/browser.ts" \
     -e builtin:tool-search \
-    --tools read,bash,tool_search \
+    --tools read,bash,tool_search,search,browser \
     "$@"
 }
