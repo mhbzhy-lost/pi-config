@@ -1,0 +1,264 @@
+# 独立 Git Durable FIFO Queue 与 Pi Worktree 接入计划
+
+## 目标
+
+使用上游 `pi-subagents` 的 `worktree: true` 能力，增加一个独立的、repository-scoped 的 Git Durable FIFO Queue。Queue 只处理显式提交的 Git 集成请求，不管理 subagent、Pi session 或 worktree 生命周期。
+
+完成后：
+
+- `subagent_spawn` 支持可选 `worktree: boolean` 并原样透传给上游；
+- 主 agent 可以用 `bash` 检查、修改、测试和 commit 保留的 worktree；
+- 主 agent 通过专用 queue tool 提交已验证的 clean commit；
+- queue 对同一 Git repository 的受管集成提供 durable FIFO、幂等、单写临界区和 fail-closed 保护；
+- subagent 结束时由机械 adapter 判定 `NO_CHANGE`、`ENQUEUE`、`PRESERVE` 或 `FAIL_CLOSED`；
+- `PRESERVE` / `FAIL_CLOSED` 回执包含 worktree、Git 状态、原因码和建议动作；
+- 不恢复旧 `pi-subagents-enhanced` 的 workspace/coordinator/subagent 生命周期绑定系统。
+
+## 当前前置问题
+
+执行 queue 计划前先修复两个已观察到的 TUI 问题：
+
+1. `subagent-notify` 的 completion receipt 从 `details.runs` 恢复任务标题；当前只读取 `taskInfo/title/task` 的逻辑在真实回执中可能取不到标题，导致显示“未命名任务”。需要核对上游 completion details 的实际字段，恢复原始 spawn title，并在找不到时保留可诊断的 fallback。
+2. footer 当前只在交互切换时刷新。subagent completion、状态变化和 queue 相关状态更新时必须主动调用 `tui.requestRender()`，使 footer 不依赖 `Alt+O` 等偶然交互刷新。
+3. 所有 subagent 控制工具的 verbose tool result 必须统一收敛。`subagent_resume` 当前会把 `Revived async subagent`、Session、Async dir、Intercom target 和 polling guidance 等上游正文刷到 compact tool 行下方；`subagent_spawn/status/steer/stop/resume` 折叠态只保留标准 compact 行，详细结果保留给模型和结构化 payload，不在 TUI 中重复渲染。
+
+## 边界
+
+### 保留
+
+- repository-scoped durable FIFO queue；
+- requestId 幂等；
+- queue revision/lease；
+- 单 repository 单 active integration；
+- target HEAD、branch、index、worktree 和 sequencer 校验；
+- target 漂移、身份不匹配、状态不确定时 fail closed；
+- queue 重启恢复；
+- conflict evidence 和确定性审计排序。
+
+### 不做
+
+- subagent 自己调用 queue；
+- queue 创建、删除或拥有 worktree；
+- queue 管理 child resume/steer/stop/terminal proof；
+- 自动 stash、reset、覆盖或删除 dirty worktree；
+- 自动解决语义冲突；
+- 阻止 queue 外的任意 Git 操作；
+- 恢复旧 workspace/coordinator 全量实现。
+
+## 任务 DAG
+
+### T0：修复现有 subagent receipt 与 footer 刷新
+
+**依赖：** 无。
+
+**文件：**
+
+- `src/subagent/renderer.ts`
+- `src/tui-lite/index.ts`
+- `src/subagent/index.ts`
+- 相关既有 runtime/renderer 测试
+
+**内容：**
+
+- 根据真实 `subagent-notify.details.runs` 字段恢复 spawn title；
+- 保持多 run completion 的 title 与 runId 对应；
+- completion、状态变化和 queue 相关事件触发 footer 重绘；
+- 不通过用户交互或轮询刷新状态；
+- 不改变模型收到的 message、tool result 或结构化 details。
+
+**验收：**
+
+- 真实 completion receipt 不再显示“未命名任务”；
+- run 完成后 footer 自动从 active 列表移除；
+- 不需要 `Alt+O` 切换或其他交互触发刷新。
+
+### T1：确认上游 worktree handoff 契约
+
+**依赖：** T0。
+
+核对 `pi-subagents` 在 child 结束和 worktree cleanup 前提供的事实：
+
+- worktree path；
+- base commit；
+- head commit；
+- branch/ref；
+- clean/dirty 状态；
+- 是否存在 completion/handoff hook；
+- dirty worktree 是否能在 cleanup 前保留。
+
+**停止条件：** 如果上游只在 cleanup 后提供结果，且无法保留 dirty worktree 或提供可靠 patch/handoff，则停止自动集成实现，先报告生命周期阻塞。
+
+### T2：抽取 Git repository identity 与状态探针
+
+**依赖：** T1。
+
+**建议路径：**
+
+```text
+packages/git-integration-queue/src/repository.ts
+packages/git-integration-queue/src/git-facts.ts
+```
+
+**内容：**
+
+- 通过 canonical Git common-dir 计算 repository identity；
+- 识别 repository root、target ref、当前 HEAD；
+- 检查 tracked/staged/untracked/deleted/renamed 状态；
+- 检查 sequencer/rebase 状态；
+- 检查 base 与 HEAD 的祖先关系；
+- 不接受调用方伪造 identity/base/head 事实。
+
+### T3：实现独立 Durable FIFO Queue
+
+**依赖：** T2。
+
+**建议路径：**
+
+```text
+packages/git-integration-queue/src/queue.ts
+packages/git-integration-queue/src/ledger.ts
+packages/git-integration-queue/src/records.ts
+packages/git-integration-queue/src/daemon.ts
+packages/git-integration-queue/src/protocol.ts
+```
+
+queue 接收 Git 事实，不接收 subagent/session 绑定：
+
+```ts
+enqueue({
+  repositoryRoot,
+  targetRef,
+  sourceCommit,
+  requestId,
+  metadata,
+})
+```
+
+状态：
+
+```text
+queued → admitted → integrating → completed
+                              ↘ preserved/conflict
+```
+
+第一阶段只支持已验证 source commit 的 fast-forward。source 不是当前 target 的安全后代时，进入 preserved/conflict，不自动启动 agent 或解决冲突。
+
+### T4：提供三个最小 Pi 专用 tool
+
+**依赖：** T3。
+
+只提供：
+
+```text
+git_queue_inspect
+git_queue_status
+git_queue_enqueue
+```
+
+`inspect` 只读 worktree/repository/queue eligibility；`status` 读取 repository queue；`enqueue` 从 worktree 读取 Git 事实，只允许 clean 且可验证的 commit 进入 queue。
+
+不提供 `git_worktree_commit`、`git_worktree_add`、`git_worktree_remove` 或 force merge tool。主 agent 在 worktree 内的修复、测试和 commit 使用 `bash`，但目标分支集成必须经过 queue tool。
+
+### T5：实现 completion 机械判定 adapter
+
+**依赖：** T1、T2、T4。
+
+判定矩阵：
+
+```text
+clean + HEAD == base                  → NO_CHANGE
+clean + HEAD 是 base 的后代           → ENQUEUE
+dirty + HEAD == base                  → PRESERVE
+dirty + HEAD 是 base 的后代            → PRESERVE
+无法确认 Git/worktree 事实             → FAIL_CLOSED
+```
+
+`NO_CHANGE` 和 `ENQUEUE` 自动处理；`PRESERVE` 与 `FAIL_CLOSED` 保留 worktree 并要求主 agent 介入。禁止自动 commit、stash、reset 和删除。
+
+### T6：统一结构化 integration receipt
+
+**依赖：** T5。
+
+```ts
+type WorktreeIntegrationReceipt = {
+  kind: "git-worktree-integration";
+  outcome: "no-change" | "enqueued" | "preserved" | "failed-closed";
+  repositoryRoot: string;
+  worktreePath: string;
+  targetRef?: string;
+  baseCommit?: string;
+  headCommit?: string;
+  clean?: boolean;
+  changedFiles?: string[];
+  queueRequestId?: string;
+  reasonCode?: string;
+  reason?: string;
+  requiresOperator: boolean;
+  suggestedAction?: string;
+};
+```
+
+`content` 提供简洁 TUI/模型摘要，`details` 保留完整机器事实。`PRESERVE` / `FAIL_CLOSED` 至少包含 worktree path、reasonCode、reason 和 suggestedAction。
+
+### T7：恢复与冲突边界
+
+**依赖：** T3、T5。
+
+- daemon 重启恢复 queued/admitted/integrating；
+- lease 失效时安全恢复或 preserve；
+- target 漂移进入 preserved/conflict；
+- dirty worktree 保留现场；
+- 不实现无限自动重试；
+- 主 agent 可用 bash 解决冲突，再通过 inspect/enqueue 继续。
+
+### T8：验证与迁移
+
+**依赖：** T0–T7。
+
+验证只使用临时 Git repository、临时 worktree、临时 state root 和临时 socket，不触碰用户现有 worktree。
+
+既有回归命令：
+
+```bash
+npm run typecheck && \
+node --test test/pi-runtime.integration.mjs test/bash-async.test.mjs \
+  test/compact-tools-renderer.test.mjs test/compact-tools-extension.test.mjs && \
+git1 diff --check
+```
+
+queue FIFO 并发、幂等、重启恢复、target 漂移、四状态判定、dirty 保留等新增测试和全新 fixture 需要单独授权后创建；未授权前只使用现有测试和临时验证脚本。
+
+## 完成契约
+
+- **F1 AUTO：** `subagent_spawn` 暴露并透传可选 `worktree`；由 `node --test test/pi-runtime.integration.mjs` 验证。
+- **F2 AUTO：** receipt 正确恢复 title，footer 在 completion/status 事件后自动刷新；由既有 runtime/TUI 验证和人工启动 smoke 验证。
+- **F3 AUTO：** queue 按 canonical common-dir 分区，具备 durable FIFO、幂等和单 active integration；由授权后的 queue contract 命令验证。
+- **F4 AUTO：** Git identity、clean、祖先关系和 target HEAD 漂移门禁 fail closed；由授权后的 Git facts/queue acceptance 命令验证。
+- **F5 AUTO：** `NO_CHANGE/ENQUEUE/PRESERVE/FAIL_CLOSED` 判定符合矩阵；由授权后的 classifier contract 命令验证。
+- **F6 MANUAL：** 主 agent 能在 `PRESERVE/FAIL_CLOSED` 后使用 bash 修复并通过 `git_queue_enqueue` 继续；操作者按回执步骤验证。
+- **F7 MANUAL：** 多个 Pi session 和多个 upstream worktree 能共享同一 repository queue；操作者执行多客户端 smoke 验证。
+- **F8 AUTO：** 既有回归命令全部通过；统一命令见 T8。
+
+停滞判据：同一 F 项连续两轮验证输出无实质变化时停止修改，记录证据、阻塞原因和下一步恢复动作。
+
+## 执行模式
+
+执行前由用户选择：
+
+1. **subagent 并发驱动**：更快，但需要处理 worktree、合并和冲突；
+2. **主会话串行执行**：上下文连续、合并风险低，但执行时间更长。
+
+计划审阅完成后再选择执行模式；在选择前不开始实现。
+
+## 计划审阅记录
+
+自动审阅未完成：审阅子会话因无可用模型账号退出，未产生技术意见。主会话 inline 复核确认：
+
+- queue 与 subagent/worktree 生命周期边界已分离；
+- `PRESERVE` / `FAIL_CLOSED` 的主 agent 介入路径已明确；
+- queue 只对显式 enqueue 的 Git 集成负责，不宣称拦截 queue 外的任意 Git 操作；
+- 上游 worktree handoff/cleanup 时机仍是 T1 的真实前置阻塞，未验证前禁止进入 T5；
+- 新增 queue contract/fixture 测试仍需单独授权，未授权前不创建；
+- 当前 bugfix 已独立提交，queue 新能力尚未开始实现。
+
+在用户选择执行模式前，计划保持未执行状态。
