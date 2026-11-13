@@ -19,11 +19,13 @@ const { codingAgent: sdk, piTui: tui } = await loadPiTestRuntime(import.meta.url
 sdk.initTheme("dark", false);
 
 class FakeText {
-  constructor(text = "") {
+  constructor(text = "", paddingX = 1) {
     this.text = text;
+    this.paddingX = paddingX;
   }
   render() {
-    return this.text.split("\n");
+    const prefix = " ".repeat(this.paddingX);
+    return this.text.split("\n").map((line) => `${prefix}${line}`);
   }
   invalidate() {}
 }
@@ -151,9 +153,8 @@ test("collapsed SKILL.md reads render as skill loads and expand back to read out
   const expandedResult = renderers.read.renderResult(result, { expanded: true }, plainTheme, { args });
   assert.match(expandedCall.render(120)[0], /^[✓⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] read .*\/SKILL\.md$/);
   assert.deepEqual(expandedResult.render(120), [
-    "│ first line",
-    "│ second line",
-    "└─",
+    "  first line",
+    "  second line",
   ]);
 });
 
@@ -259,9 +260,8 @@ test("expanded output is bounded and never falls through to an undefined compone
 
   assert.ok(component);
   assert.deepEqual(component.render(120), [
-    "<dim>│</dim> <toolOutput>first line</toolOutput>",
-    "<dim>│</dim> <toolOutput>second line</toolOutput>",
-    "<dim>└─</dim>",
+    "  <toolOutput>first line",
+    "  second line</toolOutput>",
   ]);
 });
 
@@ -274,11 +274,10 @@ test("expanded output preserves trailing empty lines and internal empty lines", 
   const lines = renderers.bash.renderResult(trailingNewlineResult, { expanded: true }, theme).render(120);
 
   assert.deepEqual(lines, [
-    "<dim>│</dim> <toolOutput>first line</toolOutput>",
-    "<dim>│</dim> <toolOutput></toolOutput>",
-    "<dim>│</dim> <toolOutput>third line</toolOutput>",
-    "<dim>│</dim> <toolOutput></toolOutput>",
-    "<dim>└─</dim>",
+    "  <toolOutput>first line",
+    "  ",
+    "  third line",
+    "  </toolOutput>",
   ]);
 });
 

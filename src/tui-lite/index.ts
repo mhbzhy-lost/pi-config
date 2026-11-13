@@ -247,7 +247,7 @@ export function createTuiRuntime(pi: ExtensionAPI): void {
           const right = `${model} ${ctx.thinkingLevel ?? "off"} ${context}`;
           const first = footerLine(displayCwd(ctx.cwd), right, width);
           const active = footerRows.filter(row => row.state === "queued" || row.state === "running" || row.state === "paused");
-          const subagents = active.map(row => `subagent ${agentIdentity(row)} · ${stateLabel(row.state)}`);
+          const subagents = active.map(row => agentIdentity(row));
           const bash = bashAsyncTasks.map(task => `bash_async "${task.command.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim()}" · ${stateLabel(task.state)}`);
           return [theme.fg("dim", first), "", ...[...subagents, ...bash].map(task => truncateToWidth(task, Math.max(0, width), "…"))];
         },

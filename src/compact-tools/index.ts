@@ -3,6 +3,7 @@ import { createCompactToolRenderers } from "./renderer.ts";
 
 export { createCompactToolRenderers, installCompactSkillRenderer } from "./renderer.ts";
 export { COMPACT_STATUS_KEY, statusGlyph, syncStatusAnimation, type CompactRenderStatus } from "./status.ts";
+export { createExpandedToolText } from "./expanded-content.ts";
 
 type Dependencies = Parameters<typeof createCompactToolRenderers>[0];
 

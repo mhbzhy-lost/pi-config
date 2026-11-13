@@ -20,6 +20,7 @@
     "../src/basic-memory/basic-memory.ts",
     "../src/compact-tools/compact-tools.ts",
     "../src/context-usage/context-usage.ts",
+    "../src/dcp/dcp.ts",
     "../src/tui-lite/tui-lite.ts",
     "../src/interactive-stderr-guard/interactive-stderr-guard.ts",
     "../src/mcp-policy/mcp-policy.ts",
@@ -36,7 +37,6 @@
     "../src/tool-timing/tool-timing.ts",
     "+builtin:tool-search",
     "-builtin:llama.cpp",
-    "-builtin:codemode",
     "-builtin:mcp"
   ]
 }

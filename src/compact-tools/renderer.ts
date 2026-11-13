@@ -1,6 +1,7 @@
 import { basename, dirname } from "node:path";
 import { homedir } from "node:os";
 import { COMPACT_STATUS_KEY, statusGlyph, syncStatusAnimation, type CompactRenderStatus } from "./status.ts";
+import { createExpandedToolText } from "./expanded-content.ts";
 
 const TOOL_NAMES = ["read", "bash", "bash_async", "edit", "write", "find", "grep", "ls", "tool_search"];
 const COMPACT_SKILL_PATCH = Symbol.for("pi-config.compact-skill-renderer");
@@ -44,13 +45,7 @@ function title(name, detail, theme) {
 }
 
 function expandedBlock(text, theme, Text, Container) {
-  const lines = text.split("\n");
-  const container = new Container();
-  for (const line of lines) {
-    container.addChild(new Text(`${theme.fg("dim", "│")} ${theme.fg("toolOutput", line)}`, 1, 0));
-  }
-  container.addChild(new Text(theme.fg("dim", "└─"), 1, 0));
-  return container;
+  return createExpandedToolText(Text, theme.fg("toolOutput", text));
 }
 
 function serializedBlock(block) {
@@ -352,8 +347,10 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
     },
     grep: {
       renderCall(args, theme, context) {
-        const pattern = truncate(args?.pattern || "", 40);
+        const rawPattern = String(args?.pattern || "");
+        const pattern = context?.expanded ? rawPattern : truncate(rawPattern, 40);
         const detail = `${theme.fg("accent", `"${pattern}"`)} ${theme.fg("dim", `in ${shortPath(args?.path || args?.dir)}`)}`;
+        if (context?.expanded) return expandedLine(title("grep", detail, theme), theme, context);
         return singleLine(title("grep", detail, theme), theme, context);
       },
        renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} matches`, getStructuredContent }),
