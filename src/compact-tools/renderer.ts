@@ -2,7 +2,7 @@ import { basename, dirname } from "node:path";
 import { homedir } from "node:os";
 import { COMPACT_STATUS_KEY, statusGlyph, syncStatusAnimation, type CompactRenderStatus } from "./status.ts";
 
-const TOOL_NAMES = ["read", "bash", "bash_async", "edit", "write", "find", "grep", "ls"];
+const TOOL_NAMES = ["read", "bash", "bash_async", "edit", "write", "find", "grep", "ls", "tool_search"];
 const COMPACT_SKILL_PATCH = Symbol.for("pi-config.compact-skill-renderer");
 const COMPACT_SUMMARY_KEY = "compactToolsSummary";
 
@@ -363,6 +363,13 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
         return pathCall("ls", shortPath(args?.path), "", theme, context);
       },
        renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} entries`, getStructuredContent }),
+    },
+    tool_search: {
+      renderCall(args, theme, context) {
+        const query = truncate(String(args?.query || ""), 100);
+        return singleLine(title("tool_search", theme.fg("accent", query), theme), theme, context);
+      },
+      renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: () => "done", getStructuredContent }),
     },
   };
 

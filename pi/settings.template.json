@@ -14,6 +14,7 @@
   "extensions": [
     "../src/agents-global/agents-global.ts",
     "../src/agents-shared/agents-shared.ts",
+    "../src/ask-user-question/ask-user-question.ts",
     "../src/available-models/available-models.ts",
     "../src/bash-cwd/bash-cwd.ts",
     "../src/basic-memory/basic-memory.ts",

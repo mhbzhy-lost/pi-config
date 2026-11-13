@@ -31,7 +31,8 @@ test("registers exactly five memory tools", () => {
     assert.ok(tool.promptSnippet.length > 0);
     assert.ok(tool.promptGuidelines.length > 0);
     assert.equal(tool.outputSchema, undefined);
-    assert.equal(tool.exposure, undefined);
+    assert.equal(tool.exposure, "deferred");
+    assert.equal(tool.defaultActive, false);
   }
   const required = { memory_search: ["query"], memory_read: ["identifier"], memory_context: ["query"], memory_recent: [], memory_write: ["title", "folder", "content"] };
   for (const tool of pi.tools) {

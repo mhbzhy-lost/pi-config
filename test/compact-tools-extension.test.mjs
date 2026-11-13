@@ -103,6 +103,14 @@ test("compact resolver绑定bash_async显示，launch摘要已接受待完成且
   assert.doesNotMatch(lines.join(""), /succeeded|已完成|1 lines/);
 });
 
+test("compact resolver绑定tool_search显示查询词", () => {
+  const { resolvers } = registerCompactTools(compactTools);
+  const tool = resolvers[0]("tool_search", () => undefined);
+  const theme = { bold: (text) => text, fg: (_color, text) => text };
+  const output = tool.renderCall({ query: "web search" }, theme, { state: {} }).render(100).join("\n");
+  assert.match(output, /tool_search web search/);
+});
+
 test("Host折叠入口在展开错误后恢复成功摘要且不重复添加状态", () => {
   const tool = registerCompactTools(compactTools).resolvers[0]("edit", () => undefined);
   const theme = { bold: (text) => text, fg: (_color, text) => text };

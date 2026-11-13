@@ -48,6 +48,8 @@ export function createBasicMemoryExtension(pi: ExtensionAPI) {
   ) {
     pi.registerTool(defineTool({
       ...def,
+      exposure: "deferred" as const,
+      defaultActive: false,
       async execute(_toolCallId, params, signal) {
         validate?.(params);
         const args = commandBuilder(params);

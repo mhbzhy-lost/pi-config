@@ -3,6 +3,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import registerSubagents from "pi-subagents";
+import { createSubagentRenderer } from "./renderer.ts";
 
 const RPC_REQUEST = "subagents:rpc:v1:request";
 const RPC_REPLY = "subagents:rpc:v1:reply:";
@@ -150,6 +151,7 @@ function rpcTool(pi: ExtensionAPI, name: string, method: string, description: st
 }
 
 export function createMinimalSubagentExtension(pi: ExtensionAPI): void {
+  pi.registerToolRenderer(createSubagentRenderer());
   // Upstream owns its lifecycle and RPC bridge; this integration exposes only our tool.
   const upstream = Object.create(pi) as ExtensionAPI;
   // 仅放行父侧 supervisor 回复工具：child 的 contact_supervisor 由 child runtime 钩子注入，
