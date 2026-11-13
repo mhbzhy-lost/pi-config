@@ -6,6 +6,7 @@
 import type { MessageRenderOptions, MessageRenderer, Theme } from '@earendil-works/pi-coding-agent';
 import type { Component } from '@earendil-works/pi-tui';
 import type { BashAsyncOutcome, BashAsyncTerminalReceipt } from './contracts.ts';
+import { formatStandardReceipt } from '../async-receipt/format.ts';
 
 /** Host 入口注入的 TUI 能力；本 feature src 不直接依赖 pi-tui 运行时。 */
 export type BashAsyncRendererDeps = {
@@ -17,18 +18,9 @@ type CompletionMessage = Parameters<MessageRenderer>[0];
 
 // outcome 枚举以 contracts.ts 的 typed contract 为准；集合/映射的键覆盖由类型参数在编译期校验。
 const FAILURE_OUTCOMES: ReadonlySet<BashAsyncOutcome> = new Set<BashAsyncOutcome>(['failed', 'timed-out', 'aborted', 'spawn-error', 'execution-error']);
-const OUTCOME_MARKS: Record<BashAsyncOutcome, string> = {
-  succeeded: '✓',
-  failed: '✗',
-  'timed-out': '✗',
-  aborted: '✗',
-  'spawn-error': '✗',
-  'execution-error': '✗',
-};
 const TOOL_TITLE = 'bash_async';
 const COMMAND_PREVIEW_WIDTH = 48;
 const REASON_PREVIEW_WIDTH = 64;
-const SHORT_JOB_LENGTH = 8;
 // 与原生 status 行（ThemedText(…,1,0)）及 subagent 可见回执左缘对齐。
 const FOLDED_PADDING_X = 1;
 
@@ -38,22 +30,10 @@ function isTerminalReceipt(value: unknown): value is BashAsyncTerminalReceipt {
   return record.kind === 'bash-async-complete' && typeof record.outcome === 'string' && record.outcome.length > 0;
 }
 
-function shortJob(jobId: unknown): string {
-  return typeof jobId === 'string' && jobId ? jobId.slice(0, SHORT_JOB_LENGTH) : '';
-}
-
 function previewCommand(command: unknown, truncate: BashAsyncRendererDeps['truncateToWidth']): string {
   if (typeof command !== 'string') return '';
   const flat = command.replace(/\s+/g, ' ').trim();
   return flat ? truncate(flat, COMMAND_PREVIEW_WIDTH, '…') : '';
-}
-
-function formatElapsed(ms: unknown): string {
-  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '';
-  if (ms < 1_000) return `${Math.round(ms)}ms`;
-  if (ms < 60_000) return `${Number((ms / 1_000).toFixed(1))}s`;
-  const totalSeconds = Math.round(ms / 1_000);
-  return `${Math.floor(totalSeconds / 60)}m${String(totalSeconds % 60).padStart(2, '0')}s`;
 }
 
 function failureReason(receipt: BashAsyncTerminalReceipt, truncate: BashAsyncRendererDeps['truncateToWidth']): string {
@@ -70,23 +50,18 @@ function foldedProjection(receipt: BashAsyncTerminalReceipt | undefined, truncat
     // 详情结构未识别：中性保留可见信息，不猜测成功；原文完整保存在 content，可展开查看。
     return { text: `✗ ${TOOL_TITLE} 完成回执 · 详情未识别（展开查看原文）`, failed: true };
   }
-  const outcome = receipt.outcome;
-  const known = outcome === 'succeeded' || FAILURE_OUTCOMES.has(outcome);
-  const mark = outcome === 'succeeded' ? OUTCOME_MARKS.succeeded : '✗';
-  const segments = [
-    [TOOL_TITLE, shortJob(receipt.jobId)].filter(Boolean).join(' '),
-    previewCommand(receipt.command, truncate),
-    known ? outcome : `${outcome}（未识别的终态）`,
-  ].filter(segment => segment.length > 0);
-  if (typeof receipt.exitCode === 'number') segments.push(`exit ${receipt.exitCode}`);
-  const elapsed = formatElapsed(receipt.elapsedMs);
-  if (elapsed) segments.push(elapsed);
-  const failed = outcome !== 'succeeded';
-  const lines = [`${mark} ${segments.join(' · ')}`];
-  // 失败原因必须可见：error 形态输出的首行原因截断后跟随回执，原生输出全文仍在展开/raw。
-  const reason = failed ? failureReason(receipt, truncate) : '';
-  if (reason) lines.push(`error: ${reason}`);
-  return { text: lines.join('\n'), failed };
+  const outcome = FAILURE_OUTCOMES.has(receipt.outcome) || receipt.outcome === 'succeeded'
+    ? receipt.outcome
+    : `${receipt.outcome}（未识别的终态）`;
+  return formatStandardReceipt({
+    toolTitle: TOOL_TITLE,
+    id: receipt.jobId,
+    preview: previewCommand(receipt.command, truncate),
+    outcome,
+    exitCode: receipt.exitCode,
+    elapsedMs: receipt.elapsedMs,
+    failureReason: failureReason(receipt, truncate),
+  }, truncate);
 }
 
 function rawTextBlocks(content: CompletionMessage['content']): string[] {

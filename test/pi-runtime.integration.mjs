@@ -60,6 +60,7 @@ test("minimal extension registers prefixed subagent RPC tools plus supervisor re
     for (const name of toolNames) assert.equal(session.getToolDefinition(name)?.exposure, "deferred", `${name} must be deferred`);
     const spawnParams = session.getToolDefinition("subagent_spawn").parameters;
     assert.equal(spawnParams.properties.title.type, "string");
+    assert.equal(spawnParams.properties.worktree.type, "boolean");
     assert.deepEqual(spawnParams.required, ["task"]);
     assert.equal(session.getAllTools().some((tool) => tool.name === "subagent_roster"), false);
     assert.equal(session.getActiveToolNames().includes("subagent_roster"), false);

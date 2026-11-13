@@ -23,7 +23,6 @@
     "../src/dcp/dcp.ts",
     "../src/tui-lite/tui-lite.ts",
     "../src/interactive-stderr-guard/interactive-stderr-guard.ts",
-    "../src/mcp-policy/mcp-policy.ts",
     "../src/network-recovery/network-recovery.ts",
     "../src/openai-proxy/openai-proxy.ts",
     "../src/provider-fallback/provider-fallback.ts",

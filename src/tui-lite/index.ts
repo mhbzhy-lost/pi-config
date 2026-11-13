@@ -210,8 +210,20 @@ export function createTuiRuntime(pi: ExtensionAPI): void {
   let bashAsyncTasks: BashAsyncFooterSnapshot['tasks'] = [];
   let footerRequestRender: (() => void) | undefined;
   let getRuns: (() => Promise<AsyncNode[]>) | undefined;
+  let footerRefreshInFlight: Promise<void> | undefined;
   const close = () => { closeOverlay?.(); closeOverlay = undefined; };
   const stopFooter = () => { footerRows = []; bashAsyncTasks = []; };
+  const refreshFooterRows = () => {
+    const loader = getRuns;
+    if (!current || !loader || footerRefreshInFlight) return;
+    footerRefreshInFlight = loader().then((rows) => {
+      if (!current || getRuns !== loader) return;
+      footerRows = rows;
+      footerRequestRender?.();
+    }).catch(() => {
+      // Footer is observational; a transient status RPC failure must not affect the session.
+    }).finally(() => { footerRefreshInFlight = undefined; });
+  };
 
   pi.on("session_start", (_event, ctx) => {
     close();
@@ -237,6 +249,7 @@ export function createTuiRuntime(pi: ExtensionAPI): void {
       const liveIds = new Set(live.map(row => row.id));
       return [...live.map(row => ({ ...row, title: history.get(row.id)?.title })), ...[...history.values()].filter(row => !liveIds.has(row.id))];
     };
+    refreshFooterRows();
     ctx.ui.setFooter((tui, theme) => {
       footerRequestRender = () => tui.requestRender();
       return {
@@ -256,6 +269,15 @@ export function createTuiRuntime(pi: ExtensionAPI): void {
       };
     });
   });
+
+  pi.on("message_end", (event: any) => {
+    if (event?.message?.customType === "subagent-notify") refreshFooterRows();
+  });
+  pi.on("tool_execution_end", (event: any) => {
+    if (typeof event?.toolName === "string" && event.toolName.startsWith("subagent_")) refreshFooterRows();
+  });
+  pi.on("agent_end", () => refreshFooterRows());
+  pi.on("agent_settled", () => refreshFooterRows());
 
   pi.registerShortcut(Key.alt("o"), {
     description: "Open subagent output",

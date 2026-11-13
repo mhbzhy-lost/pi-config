@@ -23,7 +23,7 @@
     "@earendil-works/pi-ai": "1.5.2",
     "@earendil-works/pi-coding-agent": "1.5.2",
     "@earendil-works/pi-tui": "1.5.2",
-    "@snowy117/pi-dcp": "git+https://github.com/mhbzhy-lost/pi-dcp-migrate.git#v0.1.3",
+    "@snowy117/pi-dcp": "git+https://github.com/mhbzhy-lost/pi-dcp-migrate.git#v0.1.4",
     "pi-subagents": "0.84.0",
     "playwright": "1.64.0",
     "typebox": "1.3.27",

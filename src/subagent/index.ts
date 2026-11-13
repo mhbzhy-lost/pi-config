@@ -3,7 +3,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import registerSubagents from "pi-subagents";
-import { createSubagentRenderer } from "./renderer.ts";
+import { createSubagentCompletionRenderer, createSubagentRenderer, rememberSubagentMessage } from "./renderer.ts";
 
 const RPC_REQUEST = "subagents:rpc:v1:request";
 const RPC_REPLY = "subagents:rpc:v1:reply:";
@@ -165,6 +165,9 @@ export function createMinimalSubagentExtension(pi: ExtensionAPI): void {
   upstream.registerCommand = () => {};
   upstream.registerShortcut = () => {};
   registerSubagents(upstream);
+  // 覆盖上游 prose completion notice，复用 bash_async 的标准终态回执格式。
+  pi.registerMessageRenderer("subagent-notify", createSubagentCompletionRenderer());
+  pi.on("message_end", (event) => rememberSubagentMessage(event.message));
 
   pi.on("before_agent_start", async (event) => {
     const catalog = formatAdvertisedAgents(await loadAdvertisedAgents());
@@ -180,9 +183,13 @@ export function createMinimalSubagentExtension(pi: ExtensionAPI): void {
     toolParameters(["task"], {
       title: { type: "string", minLength: 1, maxLength: 80, description: "用于面板显示的简短任务标题，概括具体目标，不要重复 executor 或角色说明" },
       task: { type: "string", minLength: 1, maxLength: MAX_TASK_BYTES, description: "委派给子代理的完整任务描述，需自包含（child 无本会话上下文）" },
+      worktree: { type: "boolean", description: "是否让 pi-subagents 为该 child 使用独立 Git worktree；仅在 Git repository 中有效" },
     }),
     (input, ctx) => {
       if (input && typeof input === "object" && "title" in input) stringInput(input, "title", MAX_TITLE_BYTES);
+      const worktree = input && typeof input === "object" && !Array.isArray(input)
+        ? (input as Record<string, unknown>).worktree
+        : undefined;
       // title 保留在父会话的原始工具参数中供 TUI 读取，不改写任务或上游执行回执。
       return {
         agent: AGENT_NAME,
@@ -191,6 +198,7 @@ export function createMinimalSubagentExtension(pi: ExtensionAPI): void {
         context: "fresh",
         async: true,
         mission: false,
+        ...(typeof worktree === "boolean" ? { worktree } : {}),
         ...(ctx.modelRef ? { model: ctx.modelRef } : {}),
       };
     },
