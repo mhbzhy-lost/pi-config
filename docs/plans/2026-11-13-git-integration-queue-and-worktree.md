@@ -288,4 +288,8 @@ queue FIFO 并发、幂等、重启恢复、target 漂移、四状态判定、di
 
 - F6：通过（证据目录：`/private/var/folders/27/6bnn8n7d4px6s33fvdpns89c0000gn/pi-gq6-JIFKiK/evidence`）。保留态 receipt 为 `preserved/WORKTREE_PRESERVED`；主 agent 用 bash 在 source worktree commit，source/target 均恢复 clean；通过注册的 `git_queue_enqueue` tool 入队后 queue item 为 `completed`，target fast-forward，未重复集成。
 - F7 基础设施并发 smoke：通过（证据目录：`/private/var/folders/27/6bnn8n7d4px6s33fvdpns89c0000gn/pi-gq7-7oKjNy/evidence`）。两个独立 Pi RPC session 各自加载 queue extension 并产生不同 session ID；两个独立进程同时调用 enqueue，共享同一个 repository queue daemon，最终 sequence 1/2 均 `completed`，target clean，cleanup 后无残留 worktree。
-- F7 端到端 subagent child：未宣称通过。本轮没有让模型实际执行 `subagent_spawn(worktree:true)` 生成 child handoff；已验证的是真实 Pi RPC session + 专用 queue tool + handoff manifest/patch + 共享 daemon 链路。完整 child 生命周期仍需在具备可控模型调用的交互环境中执行。
+- F7 端到端 subagent child：通过（真实 GLM-5.3）。证据目录：`/private/var/folders/27/6bnn8n7d4px6s33fvdpns89c0000gn/T/opencode/glm-queue-1UvKUJ`。两个独立 Pi RPC session 各调用一次 `subagent_spawn(worktree:true)`；child 分别在 upstream 独立 worktree 创建并提交 `session-a.txt`、`session-b.txt`，产生真实 `parallel-handoff`；两个 handoff 自动生成 `enqueued` receipt 并共享同一 `repositoryId`/daemon。queue sequence 1、2 均 `completed`，最终 `main` 包含两个文件、target clean，worktree 已由 upstream 回收。
+
+## 计划终态
+
+F1–F8 的 AUTO/MANUAL 必要条件均已满足；F6/F7 的人工证据已落盘，当前实现、自动回归和真实 GLM 端到端 smoke 对应同一交付版本。
