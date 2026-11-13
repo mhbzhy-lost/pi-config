@@ -11,6 +11,7 @@ export class GitIntegrationQueue {
   private readonly ledger: QueueLedger;
   private processing = false;
   private processingPromise: Promise<void> | undefined;
+  private mutation: Promise<void> = Promise.resolve();
   readonly stateRoot: string;
   readonly repositoryRoot: string;
 
@@ -42,18 +43,21 @@ export class GitIntegrationQueue {
   }
 
   async enqueue(input: { targetRef: string; source: QueueSource; requestId?: string; metadata?: Record<string, string> }): Promise<QueueItem> {
-    const identity = repositoryIdentity(this.repositoryRoot);
-    const requestId = input.requestId ?? randomUUID();
-    const items = await this.items();
-    const existing = items.find((item) => item.requestId === requestId);
-    if (existing) return existing;
-    const meta = await this.ledger.read<{ nextSequence: number }>("meta.json", { nextSequence: 1 });
-    const now = new Date().toISOString();
-    const item: QueueItem = { version: 1, requestId, sequence: meta.nextSequence, repositoryRoot: identity.repositoryRoot, repositoryId: identity.repositoryId, targetRef: input.targetRef, source: input.source, ...(input.metadata ? { metadata: input.metadata } : {}), state: "queued", revision: 0, createdAt: now, updatedAt: now };
-    const name = `${requestId}.json`;
-    await this.ledger.write(name, item);
-    await this.ledger.write("meta.json", { nextSequence: meta.nextSequence + 1 });
-    await this.ledger.write("index.json", [...items.map((entry) => `${entry.requestId}.json`), name]);
+    const item = await this.withMutation(async () => {
+      const identity = repositoryIdentity(this.repositoryRoot);
+      const requestId = input.requestId ?? randomUUID();
+      const items = await this.items();
+      const existing = items.find((entry) => entry.requestId === requestId);
+      if (existing) return existing;
+      const meta = await this.ledger.read<{ nextSequence: number }>("meta.json", { nextSequence: 1 });
+      const now = new Date().toISOString();
+      const next: QueueItem = { version: 1, requestId, sequence: meta.nextSequence, repositoryRoot: identity.repositoryRoot, repositoryId: identity.repositoryId, targetRef: input.targetRef, source: input.source, ...(input.metadata ? { metadata: input.metadata } : {}), state: "queued", revision: 0, createdAt: now, updatedAt: now };
+      const name = `${requestId}.json`;
+      await this.ledger.write(name, next);
+      await this.ledger.write("meta.json", { nextSequence: meta.nextSequence + 1 });
+      await this.ledger.write("index.json", [...items.map((entry) => `${entry.requestId}.json`), name]);
+      return next;
+    });
     void this.process();
     return item;
   }
@@ -65,10 +69,18 @@ export class GitIntegrationQueue {
       for (;;) {
         const item = (await this.items()).find((entry) => entry.state === "queued");
         if (!item) return;
-        await this.integrate(item);
+        await this.withMutation(() => this.integrate(item));
       }
     })().finally(() => { this.processing = false; this.processingPromise = undefined; });
     return this.processingPromise;
+  }
+
+  private async withMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.mutation;
+    let release!: () => void;
+    this.mutation = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try { return await operation(); } finally { release(); }
   }
 
   private async integrate(item: QueueItem): Promise<void> {

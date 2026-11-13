@@ -119,6 +119,14 @@ test("repository daemon serves status over Unix socket", async (t) => {
   }
   assert.equal(status.repositoryId, repositoryIdentity(fixture.root).repositoryId);
   assert.deepEqual(status.items, []);
+  const first = await Promise.all([
+    queueRequest(socket, "enqueue", { targetRef: "refs/heads/main", requestId: "daemon-a", source: { kind: "commit", commit: fixture.base } }),
+    queueRequest(socket, "enqueue", { targetRef: "refs/heads/main", requestId: "daemon-b", source: { kind: "commit", commit: fixture.base } }),
+  ]);
+  assert.deepEqual(first.map((item) => item.sequence).sort((a, b) => a - b), [1, 2]);
+  await queueRequest(socket, "process");
+  const afterConcurrentEnqueue = await queueRequest(socket, "status");
+  assert.deepEqual(afterConcurrentEnqueue.items.map((item) => item.state), ["completed", "completed"]);
 });
 
 test("daemon restart preserves an in-flight item instead of replaying Git", async (t) => {

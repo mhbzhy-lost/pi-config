@@ -282,4 +282,10 @@ queue FIFO 并发、幂等、重启恢复、target 漂移、四状态判定、di
 - T5：完成初版。subagent completion 的 `handoffPath` 会经过机械 classifier，eligible handoff patch 自动提交 repository daemon；
 - T6：完成初版。integration receipt 通过独立 custom message 返回，原始 subagent completion 不被改写；
 - T7：完成初版。daemon 重启时无法证明的 integrating item fail-closed 为 preserved；
-- T8：自动验收完成；`npm run typecheck`、`npm test`（407 passed, 1 skipped）、queue/runtime/renderer 回归和 settings JSON/diff 检查均通过。多 Pi session 共享同一 repository queue 的真实手工 smoke 仍需操作者执行。
+- T8：自动验收完成；`npm run typecheck`、`npm test`（407 passed, 1 skipped）、queue/runtime/renderer 回归和 settings JSON/diff 检查均通过。之后补充的 daemon 并发 enqueue contract 也已验证 ledger mutation 串行化。
+
+## F6/F7 手工 smoke 记录
+
+- F6：通过（证据目录：`/private/var/folders/27/6bnn8n7d4px6s33fvdpns89c0000gn/pi-gq6-JIFKiK/evidence`）。保留态 receipt 为 `preserved/WORKTREE_PRESERVED`；主 agent 用 bash 在 source worktree commit，source/target 均恢复 clean；通过注册的 `git_queue_enqueue` tool 入队后 queue item 为 `completed`，target fast-forward，未重复集成。
+- F7 基础设施并发 smoke：通过（证据目录：`/private/var/folders/27/6bnn8n7d4px6s33fvdpns89c0000gn/pi-gq7-7oKjNy/evidence`）。两个独立 Pi RPC session 各自加载 queue extension 并产生不同 session ID；两个独立进程同时调用 enqueue，共享同一个 repository queue daemon，最终 sequence 1/2 均 `completed`，target clean，cleanup 后无残留 worktree。
+- F7 端到端 subagent child：未宣称通过。本轮没有让模型实际执行 `subagent_spawn(worktree:true)` 生成 child handoff；已验证的是真实 Pi RPC session + 专用 queue tool + handoff manifest/patch + 共享 daemon 链路。完整 child 生命周期仍需在具备可控模型调用的交互环境中执行。
