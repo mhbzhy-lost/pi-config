@@ -47,13 +47,17 @@ function agentIdentity(row: AsyncNode): string {
   return `${name} · ${title || "未命名任务"}`;
 }
 
-function footerLine(left: string, right: string, width: number): string {
+export function footerLine(left: string, right: string, width: number): string {
   const rightText = truncateToWidth(right, Math.max(0, width), "…");
   const leftBudget = Math.max(0, width - visibleWidth(rightText) - (rightText ? 1 : 0));
   const leftText = truncateToWidth(left, leftBudget, "…");
-  return rightText && leftText
+  const line = rightText && leftText
     ? `${leftText}${" ".repeat(Math.max(1, width - visibleWidth(leftText) - visibleWidth(rightText)))}${rightText}`
     : truncateToWidth(leftText || rightText, Math.max(0, width), "…");
+  // 左右片段分别截断后仍必须对最终组合结果做一次硬限制。
+  // 这条路径会被 TUI footer 异步刷新触发；窄终端下不能把超宽行交给
+  // pi-tui，否则它会在 redraw 阶段主动抛出并留下鼠标模式未恢复的终端。
+  return truncateToWidth(line, Math.max(0, width), "…");
 }
 
 function activityRows(runs: readonly AsyncNode[]): AsyncNode[] {
