@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { mkdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,12 +19,18 @@ export async function ensureGitQueueDaemon(repositoryRoot: string): Promise<{ re
   const socket = socketPath(identity.repositoryId);
   try { await queueRequest(socket, "status"); return { repositoryId: identity.repositoryId, socket }; }
   catch {
-    const child = spawn(process.execPath, [daemonPath, "--socket", socket, "--state-root", stateRoot, "--repo", identity.repositoryRoot], { detached: true, stdio: "ignore" });
-    child.unref();
+    const startLock = `${socket}.start.lock`;
+    let ownsStartLock = false;
+    try { await mkdir(startLock, { recursive: false, mode: 0o700 }); ownsStartLock = true; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+    if (ownsStartLock) {
+      const child = spawn(process.execPath, [daemonPath, "--socket", socket, "--state-root", stateRoot, "--repo", identity.repositoryRoot], { detached: true, stdio: "ignore" });
+      child.unref();
+    }
     for (let attempt = 0; attempt < 50; attempt += 1) {
-      try { await queueRequest(socket, "status"); return { repositoryId: identity.repositoryId, socket }; }
+      try { await queueRequest(socket, "status"); if (ownsStartLock) await rm(startLock, { recursive: true, force: true }); return { repositoryId: identity.repositoryId, socket }; }
       catch { await new Promise((resolve) => setTimeout(resolve, 20)); }
     }
+    if (ownsStartLock) await rm(startLock, { recursive: true, force: true });
     throw new Error("git queue daemon did not become ready");
   }
 }
