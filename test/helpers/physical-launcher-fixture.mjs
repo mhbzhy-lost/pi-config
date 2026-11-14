@@ -11,5 +11,5 @@ export function physicalLauncherFixture(fakeExecutable) {
  const contents=readFileSync(fakeExecutable,'utf8');
  if(contents.startsWith('#!/usr/bin/env node')) writeFileSync(join(root,'dist/cli.js'),contents.replace(/^#![^\n]*\n/,''));
  else writeFileSync(join(root,'dist/cli.js'),`import {spawnSync} from 'node:child_process';const r=spawnSync(${JSON.stringify(fakeExecutable)},process.argv.slice(2),{env:process.env,stdio:'inherit'});process.exit(r.status??1);\n`);
- return {PI_HOST_ROOT:root,PI_PACKAGE_DIR:root,PI_REAL_BIN:join(root,'dist/cli.js'),PI_HOST_NODE:process.execPath};
+ return {PI_HOST_ROOT:root,PI_PACKAGE_DIR:root,PI_REAL_BIN:join(root,'dist/cli.js'),PI_HOST_NODE:process.execPath,PI_LOCAL_SETTINGS_PATH:join(dirname(fakeExecutable),'missing-settings.local.json')};
 }

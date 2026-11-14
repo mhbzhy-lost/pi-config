@@ -43,6 +43,26 @@ private_text() {
   [[ "$REPLY" != *$'\n'* && "$REPLY" != *$'\r'* ]]
 }
 
+local_settings_path="${PI_LOCAL_SETTINGS_PATH:-$root/pi/settings.local.json}"
+local_settings_output=$("$node_bin" "$root/scripts/pi-local-settings.ts" "$local_settings_path" "$@") || {
+  print -u2 -- "Pi 本机配置无效"
+  exit 1
+}
+local_settings_args=()
+[[ -n "$local_settings_output" ]] && local_settings_args=("${(@f)local_settings_output}")
+launch_args=()
+local_settings_inserted=0
+for arg in "$@"; do
+  if [[ "$arg" == "--" && "$local_settings_inserted" == 0 ]]; then
+    launch_args+=("${local_settings_args[@]}")
+    local_settings_inserted=1
+  fi
+  launch_args+=("$arg")
+done
+if [[ "$local_settings_inserted" == 0 ]]; then
+  launch_args+=("${local_settings_args[@]}")
+fi
+
 stdin_tty=0; stdout_tty=0
 [[ -t 0 ]] && stdin_tty=1
 [[ -t 1 ]] && stdout_tty=1
@@ -56,7 +76,7 @@ case "$action" in
   bypass)
     unset PI_SESSION_OWNER_ID PI_SESSION_OWNER_REGISTRY
     cleanup; trap - EXIT HUP INT TERM
-    exec "$node_bin" "$real_bin" "$@"
+    exec "$node_bin" "$real_bin" "${launch_args[@]}"
     ;;
   pass|pin-session) ;;
   *) print -u2 -- "Pi launch decision is invalid"; exit 1 ;;
@@ -65,7 +85,7 @@ private_text owner-id || { print -u2 -- "Pi launch decision is invalid"; exit 1;
 owner_id=$REPLY
 [[ "$owner_id" =~ '^[A-Za-z0-9][A-Za-z0-9._-]{7,159}$' ]] || { print -u2 -- "Pi launch decision is invalid"; exit 1; }
 
-args=("$@")
+args=("${launch_args[@]}")
 if [[ "$action" == pin-session ]]; then
   private_text continue-arg-index || { print -u2 -- "Pi launch decision is invalid"; exit 1; }
   continue_index=$REPLY

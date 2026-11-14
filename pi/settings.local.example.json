@@ -1,0 +1,9 @@
+{
+  "enabledModels": [
+    "provider/model"
+  ],
+  "defaultProvider": "provider",
+  "defaultModel": "model",
+  "defaultThinkingLevel": "low",
+  "theme": "system"
+}

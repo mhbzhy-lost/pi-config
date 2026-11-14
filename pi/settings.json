@@ -1,8 +1,6 @@
 {
   "hideThinkingBlock": true,
   "cacheWarming": "streaming",
-  "theme": "dark",
-  "lastChangelogVersion": "1.5.2",
   "packages": [
     "../../.r2c/integrations/pi-adapter",
     "../node_modules/@arhen/pi-core-ask",
@@ -16,9 +14,6 @@
       }
     }
   },
-  "defaultProvider": "qoder-pool",
-  "defaultModel": "Qwen4-Max-Preview",
-  "defaultThinkingLevel": "low",
   "defaultTools": [
     "+codemode",
     "+tool_search",
@@ -49,16 +44,9 @@
     "../src/security-gates/security-gates.ts",
     "../src/session-owner/session-owner.ts",
     "../src/subagent/subagent.ts",
-    "../src/test-payload/test-payload.ts",
     "../src/tool-timing/tool-timing.ts",
     "+builtin:tool-search",
     "-builtin:llama.cpp",
     "-builtin:mcp"
-  ],
-  "deviceId": "347ec9c8-9146-4e45-98a3-0dfeb8a211f1",
-  "goalEngine": {
-    "enabled": true,
-    "maxConcurrentTasks": 10,
-    "maxNoProgressTurns": 5
-  }
+  ]
 }

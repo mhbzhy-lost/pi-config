@@ -26,11 +26,14 @@ npm 只能使用官方源 `https://registry.npmjs.org/`；禁止使用淘宝、�
 
 执行 Git 操作时，优先使用 `git1` 命令；只有在确认当前环境不存在 `git1` 命令后，才使用 `git`。
 
-## `pi/settings.json` 提交规则
+## Pi settings 配置边界
 
-`enabledModels` 字段为 per-machine 配置（各机器可用模型不同），禁止提交其变更。
-`/scoped-models` 命令产生的 diff 应丢弃（interactive discard hunk 或 `git checkout -- pi/settings.json`）。
-其他字段（如 `defaultThinkingLevel`、`goalEngine`、`compaction` 等）有变更时正常提交。
+- `pi/settings.json` 是仓库共享配置，必须保持可提交、可同步；只放实际由 Pi 或已启用扩展消费的共享设置、package 和 extension 声明。
+- `pi/settings.local.json` 是被 `.gitignore` 忽略的本机覆盖文件，不得提交。可从 `pi/settings.local.example.json` 复制，维护 `enabledModels`、`defaultProvider`、`defaultModel`、`defaultThinkingLevel` 和 `theme`。
+- `scripts/pi-launcher.zsh` 启动时通过 `scripts/pi-local-settings.ts` 将 local 配置转换为本次 CLI 参数；显式命令行参数优先，不要把本机值回填到 tracked `pi/settings.json`。
+- `theme` 未设置时应交给 Pi 的 `system` 默认值，自动根据终端明暗外观选择；不要在共享 settings 中写死 `dark` 或 `light`。
+- `deviceId`、`lastChangelogVersion` 是 Pi 运行时/机器状态，不应放入共享 settings；`goalEngine` 和空的 `src/test-payload/test-payload.ts` 曾是未被当前运行链路消费的残留，已从共享 settings 移除。`subagents` 配置由 `pi-subagents` 消费，不能据此删除。
+- `/scoped-models` 命令产生的 diff 不应写入共享 settings；若它修改了 `pi/settings.json`，应恢复该机器专用字段到 `pi/settings.local.json`。
 
 ## `pi/models.json` 本机配置
 
