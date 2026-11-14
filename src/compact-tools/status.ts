@@ -6,6 +6,25 @@ const loadingTimers = new WeakMap<object, ReturnType<typeof setInterval>>();
 
 type ThemeLike = { fg(color: string, text: string): string };
 type RenderContextLike = { state?: object; invalidate?: () => void } | undefined;
+type ResultLike = { isError?: boolean } | undefined;
+type ResultOptionsLike = { isPartial?: boolean } | undefined;
+
+export function resultStatus(result: ResultLike, options: ResultOptionsLike, context: { isError?: boolean } | undefined): CompactRenderStatus {
+  return context?.isError === true || result?.isError === true
+    ? "failure"
+    : options?.isPartial === true
+      ? "loading"
+      : "success";
+}
+
+export function setRenderStatus(
+  context: RenderContextLike,
+  status: CompactRenderStatus,
+  key = "status",
+): void {
+  if (context?.state) (context.state as Record<string, unknown>)[key] = status;
+  syncStatusAnimation(context, status);
+}
 
 /**
  * loading 状态需要主动触发 TUI 重绘；终态到达后立即清理，不把 timer 写入 renderer state。

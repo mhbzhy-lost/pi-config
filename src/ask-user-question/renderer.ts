@@ -1,5 +1,6 @@
 import { Text } from "@earendil-works/pi-tui";
 import type { ToolRendererResolver } from "@earendil-works/pi-coding-agent";
+import { resultStatus, setRenderStatus } from "../compact-tools/index.ts";
 
 type Question = { question?: unknown };
 type Answer = { question?: unknown; answer?: unknown; selected?: unknown };
@@ -45,11 +46,9 @@ export function createAskUserQuestionRenderer(): ToolRendererResolver {
         };
       },
       renderResult(result: any, options: any, theme: any, context: any) {
-        const failed = context.isError || result?.isError === true;
         const answers = result?.details?.answers ?? result?.structuredContent?.answers;
         if (Array.isArray(answers)) context.state.answers = answers;
-        context.state.status = failed ? "failure" : options.isPartial ? "loading" : "success";
-        context.invalidate();
+        setRenderStatus(context, resultStatus(result, options, context));
         return new Text("", 0, 0);
       },
     };

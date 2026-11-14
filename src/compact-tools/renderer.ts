@@ -63,7 +63,7 @@ function serializedValue(value) {
   return serialized === undefined ? String(value) : serialized;
 }
 
-function fullResultText(result, context, getStructuredContent) {
+function fullResultText(result) {
   const content = typeof result?.content === "string"
     ? [result.content]
     : Array.isArray(result?.content) ? result.content.map(serializedBlock) : [];
@@ -99,7 +99,7 @@ function failedResult({ Text, truncateToWidth, text, theme }) {
   };
 }
 
-function resultRenderer({ Text, Container, truncateToWidth, summary, getStructuredContent }) {
+function resultRenderer({ Text, Container, truncateToWidth, summary }) {
   return (result, options, theme, context) => {
     const text = textOutput(result);
     const failed = context?.isError === true || result?.isError === true;
@@ -110,7 +110,7 @@ function resultRenderer({ Text, Container, truncateToWidth, summary, getStructur
       if (failed || partial || options.expanded) delete context.state[COMPACT_SUMMARY_KEY];
     }
     if (options.expanded) {
-      const expanded = fullResultText(result, context, getStructuredContent);
+      const expanded = fullResultText(result);
       if (expanded) return expandedBlock(expanded, theme, Text, Container);
       return new Text(theme.fg("dim", `  └ ${resultSummary}`), 1, 0);
     }
@@ -153,7 +153,7 @@ export function installCompactSkillRenderer({ SkillInvocationMessageComponent, T
   };
 }
 
-export function createCompactToolRenderers({ Text, Container, visibleWidth, sliceByColumn, truncateToWidth, nativeEditRenderers = undefined as { current?: import("@earendil-works/pi-coding-agent").ToolRenderers } | undefined, getStructuredContent = undefined as ((toolCallId: string) => unknown) | undefined }) {
+export function createCompactToolRenderers({ Text, Container, visibleWidth, sliceByColumn, truncateToWidth, nativeEditRenderers = undefined as { current?: import("@earendil-works/pi-coding-agent").ToolRenderers } | undefined }) {
   const summarySuffix = (theme, context) => {
     const summary = !context?.expanded ? context?.state?.[COMPACT_SUMMARY_KEY] : undefined;
     return summary ? theme.fg("dim", ` · ${summary}`) : "";
@@ -207,7 +207,7 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
   });
 
   // edit 的既有 compact result 渲染：折叠单行摘要、失败组件与展开文本块全部保留。
-  const editCompactResultRenderer = resultRenderer({ Text, Container, truncateToWidth, summary: () => "done", getStructuredContent });
+  const editCompactResultRenderer = resultRenderer({ Text, Container, truncateToWidth, summary: () => "done" });
   // 展开成功非 partial 且 resolver 注入了原生 edit renderResult 时委托原生（原生消费 details.diff 渲染 +/- diff，
   // 不自造 diff/parser/ANSI）；失败、partial、折叠或 native 缺失时保持 compact 语义，错误原因仍由失败组件可见。
   // 委托时浅拷贝 context 并置空 lastComponent：compact 上一帧组件可能是无 clear() 的 Text/普通对象，
@@ -224,7 +224,7 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
       && typeof native?.renderResult === "function"
     ) {
       const nativeComponent = native.renderResult(result, options, theme, { ...context, lastComponent: undefined });
-      const raw = fullResultText(result, context, getStructuredContent);
+       const raw = fullResultText(result);
       if (!raw) return nativeComponent;
       const container = new Container();
       if (nativeComponent) container.addChild(nativeComponent);
@@ -253,7 +253,7 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
           }
           return new Text("", 0, 0);
         }
-         return resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} lines`, getStructuredContent })(
+           return resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} lines` })(
           result,
           options,
           theme,
@@ -270,7 +270,7 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
         const command = truncate(rawCommand.replace(/\s+/g, " ").trim(), 70);
         return singleLine(title("bash", theme.fg("accent", `"${command}"`), theme), theme, context);
       },
-       renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} lines`, getStructuredContent }),
+       renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} lines` }),
     },
     // bash_async 专用精简显示：不 alias 同步 bash（其 "1 lines" 摘要既无接受语义又用错标题）。
     bash_async: {
@@ -296,7 +296,7 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
         const launchSummary = launch ? `已接受，待完成${shortJob}` : undefined;
         if (options.expanded) {
           setStatus(context, failed || (!launch && !partial) ? "failure" : "loading");
-          const expanded = fullResultText(result, context, getStructuredContent);
+          const expanded = fullResultText(result);
           if (expanded) return expandedBlock(expanded, theme, Text, Container);
           return new Text(theme.fg("dim", `  └ ${failed ? "失败" : launchSummary || "（未识别的回执格式）"}`), 1, 0);
         }
@@ -333,7 +333,7 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
       renderCall(args, theme, context) {
         return pathCall("write", shortPath(args?.path || args?.file_path), "", theme, context);
       },
-       renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: () => "done", getStructuredContent }),
+       renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: () => "done" }),
     },
     find: {
       renderCall(args, theme, context) {
@@ -341,7 +341,7 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
         const detail = `${theme.fg("accent", `"${pattern}"`)} ${theme.fg("dim", `in ${shortPath(args?.path || args?.dir)}`)}`;
         return singleLine(title("find", detail, theme), theme, context);
       },
-       renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} matches`, getStructuredContent }),
+       renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} matches` }),
     },
     grep: {
       renderCall(args, theme, context) {
@@ -351,20 +351,20 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
         if (context?.expanded) return expandedLine(title("grep", detail, theme), theme, context);
         return singleLine(title("grep", detail, theme), theme, context);
       },
-       renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} matches`, getStructuredContent }),
+       renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} matches` }),
     },
     ls: {
       renderCall(args, theme, context) {
         return pathCall("ls", shortPath(args?.path), "", theme, context);
       },
-       renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} entries`, getStructuredContent }),
+       renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} entries` }),
     },
     tool_search: {
       renderCall(args, theme, context) {
         const query = truncate(String(args?.query || ""), 100);
         return singleLine(title("tool_search", theme.fg("accent", query), theme), theme, context);
       },
-      renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: () => "done", getStructuredContent }),
+       renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: () => "done" }),
     },
   };
 

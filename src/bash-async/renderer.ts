@@ -94,9 +94,7 @@ export function createBashAsyncCompleteRenderer({ Text, truncateToWidth }: BashA
     if (options.expanded) {
       const blocks = rawTextBlocks(message.content);
       const details = message.details === undefined ? [] : [`details:\n${JSON.stringify(message.details, null, 2)}`];
-      const structuredContent = (message as CompletionMessage & { structuredContent?: unknown }).structuredContent;
-      const structured = structuredContent === undefined ? [] : [`structuredContent:\n${JSON.stringify(structuredContent, null, 2)}`];
-      const expanded = [text, ...blocks, ...details, ...structured].join('\n\n');
+      const expanded = [text, ...blocks, ...details].join('\n\n');
       // 展开态遵循 SDK outputPad（防非整数触发 Text repeat 异常）；原文仅做视觉换行不改写。
       return new Text(theme.fg(failed ? 'error' : 'dim', expanded), Math.max(0, Math.floor(options.outputPad ?? 1)), 0);
     }

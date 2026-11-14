@@ -1,5 +1,6 @@
 import { Text } from "@earendil-works/pi-tui";
 import type { ToolRendererResolver } from "@earendil-works/pi-coding-agent";
+import { resultStatus, setRenderStatus } from "../compact-tools/index.ts";
 
 export function createContextUsageRenderer(): ToolRendererResolver {
   return (name, next) => {
@@ -12,9 +13,7 @@ export function createContextUsageRenderer(): ToolRendererResolver {
         return { render: () => [`${contextGlyph(context?.state?.status, theme)} ${theme.bold(name)}`], invalidate() {} };
       },
       renderResult(result, options, theme, context) {
-        const failed = context.isError || result?.isError === true;
-        context.state.status = failed ? "failure" : options.isPartial ? "loading" : "success";
-        context.invalidate();
+        setRenderStatus(context, resultStatus(result, options, context));
         return new Text("", 0, 0);
       },
     };

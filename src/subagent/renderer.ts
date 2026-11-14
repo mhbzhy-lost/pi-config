@@ -3,7 +3,7 @@ import type { MessageRenderOptions, MessageRenderer, Theme, ToolRendererResolver
 import type { Component } from "@earendil-works/pi-tui";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { formatStandardReceipt } from "../async-receipt/format.ts";
-import { statusGlyph, syncStatusAnimation, type CompactRenderStatus } from "../compact-tools/index.ts";
+import { resultStatus, setRenderStatus, statusGlyph, syncStatusAnimation, type CompactRenderStatus } from "../compact-tools/index.ts";
 
 const AGENT_NAME = "executor";
 const titlesByRunId = new Map<string, string>();
@@ -100,10 +100,7 @@ function renderTool(name: string, getExtra: (args: any, context: any) => string,
       },
       renderResult(result: any, options: any, theme: any, context: any) {
         if (remember) remember(context?.args, result, context);
-        const failed = context.isError || result?.isError === true;
-        context.state.status = failed ? "failure" : options.isPartial ? "loading" : "success";
-        syncStatusAnimation(context, context.state.status);
-        context.invalidate();
+        setRenderStatus(context, resultStatus(result, options, context));
         return new Text("", 0, 0);
       },
     };

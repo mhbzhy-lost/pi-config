@@ -1,7 +1,7 @@
 import { Text } from "@earendil-works/pi-tui";
 import type { ToolRendererResolver } from "@earendil-works/pi-coding-agent";
 import { createExpandedToolText } from "../compact-tools/index.ts";
-import { statusGlyph, syncStatusAnimation } from "../compact-tools/index.ts";
+import { resultStatus, setRenderStatus, statusGlyph, syncStatusAnimation } from "../compact-tools/index.ts";
 
 export function createDcpRenderer(): ToolRendererResolver {
   return (name, next) => {
@@ -15,13 +15,12 @@ export function createDcpRenderer(): ToolRendererResolver {
         return { render: () => [`${statusGlyph(theme, context?.state?.status)} ${theme.bold(name)}`], invalidate() {} };
       },
       renderResult(result, options, theme, context) {
-        const failed = context.isError || result?.isError === true;
-        context.state.status = failed ? "failure" : options.isPartial ? "loading" : "success";
-        syncStatusAnimation(context, context.state.status);
-        context.invalidate();
+        const status = resultStatus(result, options, context);
+        setRenderStatus(context, status);
         const text = resultText(result);
         if (options.expanded) return createExpandedToolText(Text, text);
-        return new Text(theme.fg("dim", text), 0, 0);
+        const preview = text.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? (status === "failure" ? "压缩失败" : "压缩完成");
+        return new Text(theme.fg(status === "failure" ? "error" : "dim", preview.length > 120 ? `${preview.slice(0, 117)}...` : preview), 0, 0);
       },
     };
   };
