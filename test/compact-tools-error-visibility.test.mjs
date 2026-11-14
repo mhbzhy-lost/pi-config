@@ -128,8 +128,8 @@ for (const { label, name, args } of cases) {
         assert.doesNotMatch(plain(lines), /done/);
         if (expanded) {
           assert.match(plain(lines), /最后错误/);
-          assert.match(plain(lines), /structuredContent/);
-          assert.match(plain(lines), /"ok": false/);
+           assert.doesNotMatch(plain(lines), /structuredContent/);
+           assert.doesNotMatch(plain(lines), /"ok": false/);
         }
         else assert.match(plain(lines), /✗/);
       }

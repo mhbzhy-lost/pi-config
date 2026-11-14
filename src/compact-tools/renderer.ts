@@ -69,11 +69,9 @@ function fullResultText(result, context, getStructuredContent) {
     : Array.isArray(result?.content) ? result.content.map(serializedBlock) : [];
   const sections = [...content];
   if (result?.details !== undefined) sections.push(`details:\n${serializedValue(result.details)}`);
-  if (result?.structuredContent !== undefined) sections.push(`structuredContent:\n${serializedValue(result.structuredContent)}`);
-  const captured = context?.toolCallId && getStructuredContent?.(context.toolCallId);
-  if (result?.structuredContent === undefined && captured !== undefined) {
-    sections.push(`structuredContent:\n${serializedValue(captured)}`);
-  }
+  // structuredContent is a machine-readable mirror of the human output. The
+  // expanded view must show the complete content, not duplicate it as JSON.
+  // Keep the raw result untouched for consumers and persistence.
   return sections.join("\n");
 }
 
