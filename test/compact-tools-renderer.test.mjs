@@ -300,7 +300,7 @@ test("bash_async 合法launch回执折叠只显示已接受待完成摘要，展
   const output = renderers.bash_async.renderResult(result, { expanded: false, isPartial: false }, plainTheme, ctx);
   const lines = [...call.render(120), ...output.render(120)].filter((line) => line.trim());
   assert.equal(lines.length, 1);
-  assert.match(lines[0], /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] bash_async "sleep 5" · 已接受，待完成 \(550e8400\)$/);
+  assert.match(lines[0], /^✓ bash_async "sleep 5" · 已接受，待完成 \(550e8400\)$/);
   assert.doesNotMatch(lines.join("\n"), /succeeded|已完成|命令成功|exitCode|sessionId|generation|branchEpoch|acceptedAt/);
   // 展开显示完整身份（receipt JSON 原文），折叠摘要仍是接受语义。
   const expanded = renderers.bash_async.renderResult(result, { expanded: true, isPartial: false }, plainTheme, { ...ctx, expanded: true });

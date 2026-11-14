@@ -295,14 +295,17 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
           : "";
         const launchSummary = launch ? `已接受，待完成${shortJob}` : undefined;
         if (options.expanded) {
-          setStatus(context, failed || (!launch && !partial) ? "failure" : "loading");
+          // launch 回执即终态 success：loading 只覆盖「动作发出→任务开始执行」的实际执行窗口，
+          // 接受后不再动画，避免永久 spinner 定时器泄漏。
+          setStatus(context, failed || (!launch && !partial) ? "failure" : launch ? "success" : "loading");
           const expanded = fullResultText(result);
           if (expanded) return expandedBlock(expanded, theme, Text, Container);
           return new Text(theme.fg("dim", `  └ ${failed ? "失败" : launchSummary || "（未识别的回执格式）"}`), 1, 0);
         }
         if (launch) {
           if (context?.state) {
-            setStatus(context, "loading");
+            // 发出即成功：launch 回执是终态，「已接受，待完成」仅作信息摘要，不起永久 loading 动画。
+            setStatus(context, "success");
             context.state[COMPACT_SUMMARY_KEY] = launchSummary;
           }
           return new Text("", 0, 0);
