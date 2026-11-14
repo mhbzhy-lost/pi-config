@@ -272,7 +272,7 @@ test('Host入口绑定：bash-cwd扩展注册bash-async-complete的MessageRender
   });
   assert.deepEqual([...renderers.keys()], ['bash-async-complete']);
   assert.equal(typeof renderers.get('bash-async-complete'), 'function');
-  assert.deepEqual(tools.map(t => t.name), ['bash', 'bash_async']);
+  assert.deepEqual(tools.map(t => t.name), ['bash', 'bash_async', 'bash_async_status']);
   assert.ok(events.has('session_start') && events.has('session_shutdown'));
   assert.deepEqual(commands, ['bash-async-cancel']);
   const { message } = completionMessage();

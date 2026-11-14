@@ -172,7 +172,8 @@ export function createBashToolDefinition(cwd, options = {}) {
     });
 
     assert.equal(mock.settingsCalls.length, 0);
-    assert.equal(registered.length, 2);
+    assert.equal(registered.length, 3);
+    assert.equal(registered[2].name, "bash_async_status");
     assert.equal(registered[1].name, "bash_async");
     assert.equal(registered[1].outputSchema, undefined);
     assert.equal(registered[0].name, "bash");

@@ -1,4 +1,6 @@
-import { createLocalBashOperations, type ExtensionAPI, type ExtensionToolContext } from '@earendil-works/pi-coding-agent';
+import { createLocalBashOperations, defineTool, type ExtensionAPI, type ExtensionToolContext } from '@earendil-works/pi-coding-agent';
+import { Type } from 'typebox';
+import { createBashAsyncStatusResult } from './status.ts';
 import { createBashCwdToolDefinition, prepareBashCwdExecution } from '../bash-cwd/index.ts';
 import { createBashAsyncController } from './controller.ts';
 import type { BashAsyncLaunchReceipt, BashAsyncTerminalReceipt } from './contracts.ts';
@@ -6,6 +8,7 @@ import { BASH_ASYNC_FOOTER_EVENT, type BashAsyncRequest, type ExecutionEvidence 
 export * from './contracts.ts';
 export { createBashAsyncController } from './controller.ts';
 export { createBashAsyncCompleteRenderer, type BashAsyncRendererDeps } from './renderer.ts';
+export { createBashAsyncStatusResult, type BashAsyncStatusReport } from './status.ts';
 
 export function createBashAsyncExtension(pi: ExtensionAPI, options: Parameters<typeof createBashCwdToolDefinition>[0]) {
   const base = createBashCwdToolDefinition(options);
@@ -56,6 +59,22 @@ export function createBashAsyncExtension(pi: ExtensionAPI, options: Parameters<t
       };
     },
   });
+  pi.registerTool(defineTool({
+    name: 'bash_async_status', label: 'bash_async_status',
+    description: '只读查询本会话 bash_async 后台任务的权威状态：活跃任务总数（activeCount）、每个活跃任务的 jobId/command/cwd/接受时间，以及最近 64 条已收束任务归档的 outcome/exitCode/耗时/回执投递状态。可传 jobId 只查单个任务（计数仍为全局）。适用于 compaction 后核对哪些任务仍在运行、决定是否需要取消、确认完成回执是否投递成功。不返回命令输出全文（完整输出在 bash-async-complete 完成回执消息中），不取消、不等待、不修改任务；仅反映当前会话内存快照，不跨会话、不持久化、崩溃后不可恢复。',
+    promptSnippet: '只读查询本会话 bash_async 活跃任务总数与单任务状态',
+    promptGuidelines: [
+      'bash_async_status 仅用于一次性核对（如 compaction 后确认存活任务、决定是否取消）；不得用它轮询等待任务完成，完成结果仍以 bash-async-complete 回执为准。',
+    ],
+    parameters: Type.Object({
+      jobId: Type.Optional(Type.String({ minLength: 1, description: '只查询该 jobId 的任务；省略时返回全部活跃任务与归档摘要。activeCount/completedCount 始终为全局计数。' })),
+    }, { additionalProperties: false }),
+    exposure: 'deferred',
+    defaultActive: false,
+    async execute(_toolCallId, input) {
+      return createBashAsyncStatusResult(controller.snapshot(), input.jobId);
+    },
+  }));
   pi.on('session_start', async (_event, ctx) => { await controller.start(ctx.sessionManager.getSessionId()); });
   pi.on('session_shutdown', async event => { await controller.shutdown(event.reason); });
   pi.on('session_before_tree', async () => { await controller.invalidateBranch(); });
