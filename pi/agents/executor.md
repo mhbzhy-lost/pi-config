@@ -7,6 +7,9 @@ models:
 thinking: high
 systemPromptMode: append
 extensions: []
+# background child 是独立进程，不继承父扩展注册的 provider；
+# 仅加载 openai-proxy 以提供 openai-codex/openai 的代理 fetch，保留 extensions:[] 精简。
+subagentOnlyExtensions: ../../src/openai-proxy/openai-proxy.ts
 allowNestedSubagents: false
 tools: read,write,edit,bash,grep,find,ls
 ---

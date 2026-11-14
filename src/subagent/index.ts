@@ -197,17 +197,23 @@ export function createMinimalSubagentExtension(pi: ExtensionAPI): void {
     pi,
     "subagent_spawn",
     "spawn",
-    "异步派发一个 fresh context 的编码执行代理完成独立任务。用 title 概括任务目标，便于在面板中区分多个 executor。child 不继承本会话历史或项目上下文，可使用 read/write/edit/bash/grep/find/ls；只修改任务合同允许的范围。立即返回 runId，不阻塞等待结果；run 结束后会自动唤醒本会话送达结果，不要轮询 status 等待。task 必须自包含：child 看不到本会话历史与项目规范。后续用返回的 runId 调 status/steer/stop 管理。",
+    "异步派发一个 fresh context 的编码执行代理完成独立任务。用 title 概括任务目标，便于在面板中区分多个 executor。child 不继承本会话历史或项目上下文，可使用 read/write/edit/bash/grep/find/ls；只修改任务合同允许的范围。立即返回 runId，不阻塞等待结果；run 结束后会自动唤醒本会话送达结果，不要轮询 status 等待。task 必须自包含：child 看不到本会话历史与项目规范。后续用返回的 runId 调 status/steer/stop 管理。可选 model 指定 child 模型（provider/model[:thinking]），省略则继承父会话当前模型。",
     toolParameters(["task"], {
       title: { type: "string", minLength: 1, maxLength: 80, description: "用于面板显示的简短任务标题，概括具体目标，不要重复 executor 或角色说明" },
       task: { type: "string", minLength: 1, maxLength: MAX_TASK_BYTES, description: "委派给子代理的完整任务描述，需自包含（child 无本会话上下文）" },
       worktree: { type: "boolean", description: "是否让 pi-subagents 为该 child 使用独立 Git worktree；仅在 Git repository 中有效" },
+      model: { type: "string", minLength: 1, maxLength: 200, description: "可选：指定 child 使用的模型（provider/model 或 provider/model:thinking），省略时继承父会话当前模型" },
     }),
     (input, ctx) => {
       if (input && typeof input === "object" && "title" in input) stringInput(input, "title", MAX_TITLE_BYTES);
       const worktree = input && typeof input === "object" && !Array.isArray(input)
         ? (input as Record<string, unknown>).worktree
         : undefined;
+      // 可选 model 覆盖：提供时用它，否则回退父会话当前模型（ctx.modelRef）。
+      const modelOverride = input && typeof input === "object" && !Array.isArray(input) && typeof (input as Record<string, unknown>).model === "string"
+        ? stringInput(input, "model", 200)
+        : undefined;
+      const model = modelOverride ?? ctx.modelRef;
       // title 保留在父会话的原始工具参数中供 TUI 读取，不改写任务或上游执行回执。
       return {
         agent: AGENT_NAME,
@@ -217,7 +223,7 @@ export function createMinimalSubagentExtension(pi: ExtensionAPI): void {
         async: true,
         mission: false,
         ...(typeof worktree === "boolean" ? { worktree } : {}),
-        ...(ctx.modelRef ? { model: ctx.modelRef } : {}),
+        ...(model ? { model } : {}),
       };
     },
     {
