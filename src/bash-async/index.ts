@@ -3,6 +3,7 @@ import { Type } from 'typebox';
 import { createBashAsyncStatusResult } from './status.ts';
 import { createBashCwdToolDefinition, prepareBashCwdExecution } from '../bash-cwd/index.ts';
 import { createBashAsyncController } from './controller.ts';
+import { createBashAsyncWake } from './wake.ts';
 import type { BashAsyncLaunchReceipt, BashAsyncTerminalReceipt } from './contracts.ts';
 import { BASH_ASYNC_FOOTER_EVENT, type BashAsyncRequest, type ExecutionEvidence } from './contracts.ts';
 export * from './contracts.ts';
@@ -12,8 +13,9 @@ export { createBashAsyncStatusResult, type BashAsyncStatusReport } from './statu
 
 export function createBashAsyncExtension(pi: ExtensionAPI, options: Parameters<typeof createBashCwdToolDefinition>[0]) {
   const base = createBashCwdToolDefinition(options);
+  const wake = createBashAsyncWake(pi);
   const controller = createBashAsyncController({
-    send: (message, delivery) => pi.sendMessage(message, delivery),
+    send: (message, delivery) => wake.sendMessage(message, delivery),
     async prepare(request: BashAsyncRequest, ctx: ExtensionToolContext) {
       const id = ctx.sessionManager.getSessionId(), file = ctx.sessionManager.getSessionFile();
       // 只快照原生Bash确实消费的事实；不保留动态sessionManager/model getter。
@@ -39,11 +41,11 @@ export function createBashAsyncExtension(pi: ExtensionAPI, options: Parameters<t
   pi.registerTool({
     ...metadata,
     name: 'bash_async', label: 'bash_async', exposure: 'model-only',
-    description: '后台复用原生 Bash 执行命令，立即返回 jobId 接受回执，不等待命令结束。完成后自动向本会话 followUp 队列投递原生结果。仅用于测试套件、类型检查、产物构建或网络请求等真实长耗时工作；不要用它轮询、常驻或替代普通等待。收到接受回执后立即继续其他无冲突工作；没有独立工作时结束当前回合，命令完成会自动投 followUp 唤醒本会话。短查询或立即依赖输出的操作使用 bash。仅 TUI/RPC；不提供隔离、跨会话持久化或崩溃后重放。',
+    description: '后台复用原生 Bash 执行命令，立即返回 jobId 接受回执，不等待命令结束。完成后自动向本会话投递原生结果（busy 经 steer 进入会话，Esc 后经 pending custom 扛住清队列）。仅用于测试套件、类型检查、产物构建或网络请求等真实长耗时工作；不要用它轮询、常驻或替代普通等待。收到接受回执后立即继续其他无冲突工作；没有独立工作时结束当前回合，命令完成会自动投递回执唤醒本会话。短查询或立即依赖输出的操作使用 bash。仅 TUI/RPC；不提供隔离、跨会话持久化或崩溃后重放。',
     promptSnippet: '异步执行长耗时命令并在完成后自动接收回执',
     promptGuidelines: [
       'bash_async 启动成功只代表接受任务；以 bash-async-complete 的 outcome/exitCode 判断执行结果。',
-      'bash_async 接受回执后立即继续其他无冲突工作；没有独立工作时结束当前回合，完成时自动投 followUp 唤醒。正例：启动 e2e 测试后转去处理无关文件或直接结束回合；反例：启动构建后反复轮询任务状态，或另起阻塞命令纯粹干等结果。',
+      'bash_async 接受回执后立即继续其他无冲突工作；没有独立工作时结束当前回合，完成时自动投递回执唤醒。正例：启动 e2e 测试后转去处理无关文件或直接结束回合；反例：启动构建后反复轮询任务状态，或另起阻塞命令纯粹干等结果。',
       '不得用 bash_async 绕过命令门禁、凭据、网络或提交授权；不要用于自建 daemon、轮询或常驻定时器。',
       'bash_async 不支持 print/json；tree/独立 compaction/reload/switch/退出可能取消任务。clear_queue 是 Host/RPC 侧操作、不是 bash_async 参数，可清除已提交的回执且不自动重发。',
     ],
@@ -53,7 +55,7 @@ export function createBashAsyncExtension(pi: ExtensionAPI, options: Parameters<t
       return {
         content: [
           { type: 'text', text: JSON.stringify(receipt) },
-          { type: 'text', text: '以上为启动回执：accepted 仅代表任务已接受，不代表命令成功。现在请立即继续其他无冲突工作；没有独立工作就结束当前回合，命令完成后会自动投 followUp 唤醒本会话。不要轮询本任务状态，也不要另起阻塞命令纯粹干等结果。' },
+          { type: 'text', text: '以上为启动回执：accepted 仅代表任务已接受，不代表命令成功。现在请立即继续其他无冲突工作；没有独立工作就结束当前回合，命令完成后会自动投递回执唤醒本会话。不要轮询本任务状态，也不要另起阻塞命令纯粹干等结果。' },
         ],
         details: receipt,
       };
@@ -75,8 +77,15 @@ export function createBashAsyncExtension(pi: ExtensionAPI, options: Parameters<t
       return createBashAsyncStatusResult(controller.snapshot(), input.jobId);
     },
   }));
-  pi.on('session_start', async (_event, ctx) => { await controller.start(ctx.sessionManager.getSessionId()); });
-  pi.on('session_shutdown', async event => { await controller.shutdown(event.reason); });
+  pi.on('session_start', async (_event, ctx) => { wake.bindSession(ctx); await controller.start(ctx.sessionManager.getSessionId()); });
+  pi.on('session_shutdown', async event => { wake.sessionShutdown(event.reason); await controller.shutdown(event.reason); });
+  // Esc 生存性：agent_end 时若用户 abort（signal.aborted 区分用户 Esc 与正常结束）同步设 held，
+  // 使后续回执经 pending custom 投递、避开 clearQueue。必须在任何 await 前设置，避免与 abort 收束期间完成的 job 竞态。
+  // 保留 hasUI 守卫：删除会让 session dispose 等非用户 abort 误设 held；headless/RPC 无 UI abort 不触发 held（已知限制）。
+  pi.on('agent_end', (_event, ctx) => { if (ctx.hasUI && ctx.signal?.aborted) wake.userAborted(); });
+  pi.on('agent_start', () => { wake.agentStarted(); });
+  // 手动 compaction 会先 abort 当前 run 设 held；成功后释放，避免后续回执永久走 triggerTurn:false。
+  pi.on('session_compact', event => { if (event.reason === 'manual') wake.releaseHold(); });
   pi.on('session_before_tree', async () => { await controller.invalidateBranch(); });
   pi.on('session_before_compact', async (_event, ctx) => {
     // 普通活跃run里的自动compaction仍由Host路由；独立compaction则保守取消。

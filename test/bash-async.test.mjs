@@ -28,7 +28,7 @@ test('barrier证明launch先返回，native仍pending，completion只有一次�
   const started = await began.promise; assert.equal(started.id, 'original-tool-id');
   let independentEvent = false; await Promise.resolve().then(() => { independentEvent = true; }); assert.ok(independentEvent);
   const result = native(); work.resolve(result); await settled(c);
-  assert.equal(calls.length, 1); assert.deepEqual(calls[0][1], { deliverAs: 'followUp', triggerTurn: true });
+  assert.equal(calls.length, 1); assert.deepEqual(calls[0][1], { triggerTurn: true });
   const message = calls[0][0]; assert.equal(message.customType, 'bash-async-complete');
   assert.equal(message.content[1], result.content[0]); assert.equal(message.details.output, result);
   assert.equal(message.details.toolCallId, 'original-tool-id');
@@ -314,7 +314,7 @@ test('引导合同：launch 首 text 块与 details 保持 raw 回执不变，�
     assert.equal(result.details.kind, 'bash-async-launch');
     assert.equal(result.details.command, 'sleep 60 && echo fixture');
     assert.ok(result.details.cwd.startsWith(root));
-    // 执行链与生命周期不变：指引不是拦截，命令原样进 fake 执行器，完成回执仍只自动投一次 followUp
+    // 执行链与生命周期不变：指引不是拦截，命令原样进 fake 执行器，完成回执仍只自动投一次（steer）
     const terminal = await settled(c);
     assert.equal(executed.length, 1, '指引不是拦截：含 sleep 的命令仍应进入 fake 执行器');
     assert.ok(executed[0].includes('sleep 60 && echo fixture'), `命令未被改写：${executed[0]}`);
@@ -322,6 +322,6 @@ test('引导合同：launch 首 text 块与 details 保持 raw 回执不变，�
     assert.equal(terminal[0].outcome, 'succeeded');
     assert.equal(terminal[0].completionDelivery, 'accepted'); // 未新增第二条通知通道
     assert.equal(sent.length, 1);
-    assert.deepEqual(sent[0][1], { deliverAs: 'followUp', triggerTurn: true }); // 完成仍自动投 followUp，本任务不改
+    assert.deepEqual(sent[0][1], { triggerTurn: true }); // 完成仍自动投一次（steer，省略 deliverAs）
   } finally { await rm(root, { recursive: true, force: true }); }
 });

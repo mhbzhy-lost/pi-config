@@ -93,7 +93,7 @@ test('真实Host：native尚未结束，launch已入会话，主会话可继续�
   } finally { work.resolve(); await h.close(); }
 });
 
-test('真实Host busy：followUp在本轮toolResult之后消费，快命令不补造第二toolResult', { timeout: 10000 }, async () => {
+test('真实Host busy：steer在本轮toolResult之后消费，快命令不补造第二toolResult', { timeout: 10000 }, async () => {
   const work = barrier();
   const h = await host({ holdReply: true, operations: { async exec(_c, _d, { onData }) { await work.promise; onData(Buffer.from('busy-output')); return { exitCode: 0 }; } } });
   try {
@@ -101,7 +101,7 @@ test('真实Host busy：followUp在本轮toolResult之后消费，快命令不�
     work.resolve();
     // 发送callback是确定性barrier，不靠耗时比较。
     await h.waitSendCount(1);
-    assert.equal(h.sends.length, 1); assert.equal(h.completions.length, 0); h.replyRelease.resolve();
+    assert.equal(h.sends.length, 1); assert.equal(h.completions.length, 0); assert.deepEqual(h.sends[0].options, { triggerTurn: true }); h.replyRelease.resolve();
     await prompt; await deadline(h.completed.promise); await deadline(h.session.waitForIdle());
     const messages = h.session.messages; const i = messages.findIndex(m => m.role === 'toolResult'); const j = messages.findIndex(m => m.role === 'custom');
     assert.ok(i >= 0 && j > i); assert.equal(messages.filter(m => m.role === 'toolResult').length, 1); assert.equal(h.errors.length, 0);
@@ -175,7 +175,7 @@ test('原生输出大小/structuredOutput沿用SDK而非异步层截断', { time
   } finally { await h.close(); }
 });
 
-test('真实Host clearQueue：已提交followUp可被清掉，无第二出口或自动重试', { timeout: 10000 }, async () => {
+test('真实Host clearQueue：drain前已提交steer可被清掉，无第二出口或自动重试', { timeout: 10000 }, async () => {
   const work = barrier(); const h = await host({ holdReply: true, operations: { async exec() { await work.promise; return { exitCode: 0 }; } } });
   try {
     const invoke = h.invoke({ command: 'fixture' }); await deadline(h.replyStarted.promise); work.resolve();
