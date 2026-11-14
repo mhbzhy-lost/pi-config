@@ -13,7 +13,7 @@ source ~/.zshrc
 
 初始化使用 npm 官方源，在仓库内安装 Pi 1.5.2 和 Basic Memory，合并本机设置，并运行 doctor 与类型检查。模型和认证保存在 Git 忽略的 `pi/models.json`、`pi/auth.json`；本机模型选择和启动偏好保存在 Git 忽略的 `pi/settings.local.json`。
 
-`pi/settings.local.json` 可从 `pi/settings.local.example.json` 复制，支持 `enabledModels`、`defaultProvider`、`defaultModel`、`defaultThinkingLevel` 和 `theme`。默认 launcher 会把这些字段转换为本次启动参数；显式命令行参数优先。未设置 `theme` 时 Pi 使用 `system`，会根据终端的明暗外观自动选择主题。
+`pi/settings.local.json` 可从 `pi/settings.local.example.json` 复制，支持 `packages`、`enabledModels`、`defaultProvider`、`defaultModel`、`defaultThinkingLevel` 和 `theme`。本机 package 路径（例如 `../../.r2c/integrations/pi-adapter`）只能写在这里；默认 launcher 会把它们转换为本次启动的 `--extension` 参数。显式命令行参数优先。未设置 `theme` 时 Pi 使用 `system`，会根据终端的明暗外观自动选择主题。
 
 根 `package.json` 和 `package-lock.json` 统一管理 Pi Host、本仓依赖与第三方扩展，由根 `npm ci --ignore-scripts` 安装到 `node_modules/`。Pi 只加载扩展，不再由初始化脚本调用 `pi install npm:…` 创建 `pi/npm/`。
 

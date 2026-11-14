@@ -2,7 +2,6 @@
   "hideThinkingBlock": true,
   "cacheWarming": "streaming",
   "packages": [
-    "../../.r2c/integrations/pi-adapter",
     "../node_modules/@arhen/pi-core-ask",
     "../node_modules/@snowy117/pi-dcp"
   ],

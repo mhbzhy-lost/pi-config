@@ -207,9 +207,6 @@ export async function ensureSettings(options: EnsureOptions = {}): Promise<void>
   let template = await readJson(templatePath);
   validateSharedScalars({}, template);
   const declaredPackages = Array.isArray(template.packages) ? [...template.packages] : [];
-  if (r2c.exists && !declaredPackages.some((entry) => sourceOf(entry) === R2C_ADAPTER_SOURCE)) {
-    declaredPackages.push(R2C_ADAPTER_SOURCE);
-  }
   template = { ...template, packages: declaredPackages };
   let existing: JsonObject = {};
   try {

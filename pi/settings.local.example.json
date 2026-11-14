@@ -1,4 +1,7 @@
 {
+  "packages": [
+    "../../.r2c/integrations/pi-adapter"
+  ],
   "enabledModels": [
     "provider/model"
   ],

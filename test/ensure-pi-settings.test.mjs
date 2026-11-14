@@ -127,12 +127,12 @@ test('已有双方精确token和template自身相反token在写入前拒绝', as
   }
 });
 
-test("r2c adapter 已安装时按模板挂载 package 且 check 通过、幂等", async () => {
+test("r2c adapter 已安装时不污染共享 settings，local launcher 负责按需加载", async () => {
   const paths = await fixtureWithAdapter();
   try {
     await ensureSettings({ target: paths.target, template: paths.templatePath, r2cAdapterDir: paths.adapterDir });
     const mounted = JSON.parse(await readFile(paths.target, "utf8"));
-    assert.equal(mounted.packages.at(-1), R2C_ADAPTER_SOURCE);
+    assert.deepEqual(mounted.packages, template.packages);
     await ensureSettings({ target: paths.target, template: paths.templatePath, r2cAdapterDir: paths.adapterDir, check: true });
     const first = await readFile(paths.target, "utf8");
     await ensureSettings({ target: paths.target, template: paths.templatePath, r2cAdapterDir: paths.adapterDir });
