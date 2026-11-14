@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { realpathSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import type { WorktreeFacts } from "./records.ts";
 
 function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
@@ -10,9 +10,11 @@ function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
 }
 
 export function repositoryIdentity(cwd: string): { repositoryRoot: string; repositoryId: string } {
-  const root = realpathSync(git(resolve(cwd), ["rev-parse", "--show-toplevel"]));
-  const commonDir = realpathSync(resolve(root, git(root, ["rev-parse", "--git-common-dir"])));
-  return { repositoryRoot: root, repositoryId: createHash("sha256").update(commonDir).digest("hex") };
+  const worktreeRoot = realpathSync(git(resolve(cwd), ["rev-parse", "--show-toplevel"]));
+  const commonDir = realpathSync(resolve(worktreeRoot, git(worktreeRoot, ["rev-parse", "--git-common-dir"])));
+  const porcelain = git(worktreeRoot, ["worktree", "list", "--porcelain"]);
+  const canonicalRoot = realpathSync(/^worktree (.+)$/m.exec(porcelain)?.[1] ?? worktreeRoot);
+  return { repositoryRoot: canonicalRoot, repositoryId: createHash("sha256").update(commonDir).digest("hex") };
 }
 
 export function targetHead(repositoryRoot: string, targetRef: string): string {
@@ -39,22 +41,24 @@ export function changedFiles(repositoryRoot: string): string[] {
 
 export function hasSequencer(repositoryRoot: string): boolean {
   const gitDir = git(repositoryRoot, ["rev-parse", "--git-dir"]);
-  return existsSync(resolve(repositoryRoot, gitDir, "rebase-merge")) || existsSync(resolve(repositoryRoot, gitDir, "rebase-apply"));
+  const gitPath = resolve(repositoryRoot, gitDir);
+  return ["rebase-merge", "rebase-apply", "sequencer", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG"].some((marker) => existsSync(resolve(gitPath, marker)));
 }
 
 export function inspectWorktree(input: { worktreePath: string; baseCommit?: string; targetRef?: string; handoffPath?: string }): WorktreeFacts {
   const identity = repositoryIdentity(input.worktreePath);
-  const head = git(identity.repositoryRoot, ["rev-parse", "HEAD"]);
-  const clean = worktreeClean(identity.repositoryRoot);
+  const worktreePath = realpathSync(input.worktreePath);
+  const head = git(worktreePath, ["rev-parse", "HEAD"]);
+  const clean = worktreeClean(worktreePath);
   const facts: WorktreeFacts = {
     ...identity,
-    worktreePath: realpathSync(input.worktreePath),
+    worktreePath,
     targetRef: input.targetRef,
     baseCommit: input.baseCommit,
     headCommit: head,
     clean,
-    changedFiles: changedFiles(identity.repositoryRoot),
-    sequencer: hasSequencer(identity.repositoryRoot),
+    changedFiles: changedFiles(worktreePath),
+    sequencer: hasSequencer(worktreePath),
   };
   if (input.targetRef) facts.targetRef = input.targetRef;
   return facts;
@@ -70,7 +74,11 @@ export function readHandoff(handoffPath: string): WorktreeFacts[] {
       const cleanup = group.cleanup?.tasks?.find((task) => task.index === index);
       if (!patch?.path) continue;
       const identity = repositoryIdentity(group.repoRoot);
-      const patchDigest = createHash("sha256").update(readFileSync(patch.path)).digest("hex");
+      const resolvedHandoff = realpathSync(handoffPath);
+      const resolvedPatch = realpathSync(resolve(patch.path));
+      const patchRelative = relative(dirname(resolvedHandoff), resolvedPatch);
+      if (patchRelative.startsWith("..") || patchRelative.startsWith("/")) throw new Error("handoff patch is outside its artifact directory");
+      const patchDigest = createHash("sha256").update(readFileSync(resolvedPatch)).digest("hex");
       result.push({
         ...identity,
         worktreePath: cleanup?.path,
@@ -79,8 +87,8 @@ export function readHandoff(handoffPath: string): WorktreeFacts[] {
         changedFiles: [],
         sequencer: false,
         worktreeRemoved: cleanup?.worktreeRemoved,
-        patchChanged: patch.changed === true,
-        patchPath: patch.path,
+        ...(typeof patch.changed === "boolean" ? { patchChanged: patch.changed } : {}),
+        patchPath: resolvedPatch,
         handoffPath,
         patchDigest,
       });

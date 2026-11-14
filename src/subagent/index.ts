@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import registerSubagents from "pi-subagents";
 import { createSubagentCompletionRenderer, createSubagentRenderer, rememberSubagentMessage } from "./renderer.ts";
-import { enqueueHandoffPath } from "../git-integration-queue/git-queue.ts";
+import { enqueueHandoffPath } from "../git-integration-queue/connection.ts";
 import { createGitIntegrationReceiptRenderer, GIT_INTEGRATION_MESSAGE } from "../git-integration-queue/receipt-renderer.ts";
 
 const RPC_REQUEST = "subagents:rpc:v1:request";

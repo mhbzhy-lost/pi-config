@@ -1,58 +1,9 @@
-import { spawn } from "node:child_process";
-import { mkdir, rm } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { classifyHandoff } from "./adapter.ts";
 import { queueRequest } from "./client.ts";
-import { currentBranch, repositoryIdentity, inspectWorktree } from "./repository.ts";
-
-const stateRoot = process.env.PI_GIT_QUEUE_STATE_DIR ?? join(homedir(), ".pi", "agent", "git-queues");
-const daemonPath = fileURLToPath(new URL("./daemon.ts", import.meta.url));
-
-function socketPath(repositoryId: string): string { return join(stateRoot, `${repositoryId}.sock`); }
-
-export async function ensureGitQueueDaemon(repositoryRoot: string): Promise<{ repositoryId: string; socket: string }> {
-  const identity = repositoryIdentity(repositoryRoot);
-  const socket = socketPath(identity.repositoryId);
-  try { await queueRequest(socket, "status"); return { repositoryId: identity.repositoryId, socket }; }
-  catch {
-    const startLock = `${socket}.start.lock`;
-    let ownsStartLock = false;
-    try { await mkdir(startLock, { recursive: false, mode: 0o700 }); ownsStartLock = true; } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
-    if (ownsStartLock) {
-      const child = spawn(process.execPath, [daemonPath, "--socket", socket, "--state-root", stateRoot, "--repo", identity.repositoryRoot], { detached: true, stdio: "ignore" });
-      child.unref();
-    }
-    for (let attempt = 0; attempt < 50; attempt += 1) {
-      try { await queueRequest(socket, "status"); if (ownsStartLock) await rm(startLock, { recursive: true, force: true }); return { repositoryId: identity.repositoryId, socket }; }
-      catch { await new Promise((resolve) => setTimeout(resolve, 20)); }
-    }
-    if (ownsStartLock) await rm(startLock, { recursive: true, force: true });
-    throw new Error("git queue daemon did not become ready");
-  }
-}
-
-export async function enqueueHandoffPath(handoffPath: string, metadata: Record<string, string> = {}): Promise<unknown[]> {
-  const candidates = classifyHandoff(handoffPath);
-  const results: unknown[] = [];
-  for (const candidate of candidates) {
-    if (candidate.receipt.outcome !== "enqueued" || !candidate.source) { results.push(candidate.receipt); continue; }
-    if (candidate.source.kind !== "handoff-patch") { results.push(candidate.receipt); continue; }
-    const repositoryRoot = candidate.receipt.repositoryRoot;
-    const connection = await ensureGitQueueDaemon(repositoryRoot);
-    const result = await queueRequest<{ requestId: string }>(connection.socket, "enqueue", {
-      targetRef: currentBranch(repositoryRoot),
-      requestId: `handoff:${candidate.receipt.repositoryId}:${candidate.source.patchDigest}`,
-      source: candidate.source,
-      metadata,
-    });
-    results.push({ ...candidate.receipt, outcome: "enqueued", queueRequestId: result.requestId });
-  }
-  return results;
-}
+import { ensureGitQueueDaemon } from "./connection.ts";
+import { inspectWorktree } from "./repository.ts";
 
 const inspectParameters = Type.Object({ worktreePath: Type.Optional(Type.String({ minLength: 1 })), handoffPath: Type.Optional(Type.String({ minLength: 1 })), baseCommit: Type.Optional(Type.String()), targetRef: Type.Optional(Type.String()) }, { additionalProperties: false });
 const statusParameters = Type.Object({}, { additionalProperties: false });
@@ -82,7 +33,7 @@ export default function gitQueue(pi: ExtensionAPI): void {
       if (facts.repositoryId !== connection.repositoryId) throw new Error("source worktree belongs to another repository");
       if (!facts.clean) throw new Error("source worktree must be clean before enqueue");
       if (facts.headCommit !== input.sourceCommit) throw new Error("sourceCommit must equal the source worktree HEAD");
-      source = { kind: "commit", commit: input.sourceCommit };
+      source = { kind: "commit", commit: input.sourceCommit, worktreePath: input.worktreePath };
     }
     else throw new Error("sourceCommit or handoffPath is required");
     const result = await queueRequest(connection.socket, "enqueue", { targetRef: input.targetRef, requestId: input.requestId, source, metadata: input.metadata });

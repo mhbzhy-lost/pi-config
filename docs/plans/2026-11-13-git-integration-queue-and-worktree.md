@@ -95,8 +95,8 @@
 **建议路径：**
 
 ```text
-packages/git-integration-queue/src/repository.ts
-packages/git-integration-queue/src/git-facts.ts
+src/git-integration-queue/repository.ts
+src/git-integration-queue/records.ts
 ```
 
 **内容：**
@@ -115,11 +115,11 @@ packages/git-integration-queue/src/git-facts.ts
 **建议路径：**
 
 ```text
-packages/git-integration-queue/src/queue.ts
-packages/git-integration-queue/src/ledger.ts
-packages/git-integration-queue/src/records.ts
-packages/git-integration-queue/src/daemon.ts
-packages/git-integration-queue/src/protocol.ts
+src/git-integration-queue/queue.ts
+src/git-integration-queue/ledger.ts
+src/git-integration-queue/records.ts
+src/git-integration-queue/daemon.ts
+src/git-integration-queue/client.ts
 ```
 
 queue 接收 Git 事实或经校验的 handoff artifact，不接收 subagent/session 绑定：
@@ -282,14 +282,15 @@ queue FIFO 并发、幂等、重启恢复、target 漂移、四状态判定、di
 - T5：完成初版。subagent completion 的 `handoffPath` 会经过机械 classifier，eligible handoff patch 自动提交 repository daemon；
 - T6：完成初版。integration receipt 通过独立 custom message 返回，原始 subagent completion 不被改写；
 - T7：完成初版。daemon 重启时无法证明的 integrating item fail-closed 为 preserved；
-- T8：自动验收完成；`npm run typecheck`、`npm test`（407 passed, 1 skipped，408 tests total）、queue/runtime/renderer 回归和 settings JSON/diff 检查均通过。之后补充的 daemon 并发 enqueue contract 也已验证 ledger mutation 串行化。
+- T8：自动验收完成；当前修复版 `npm run typecheck`、`npm test`（419 tests，418 passed，1 todo，0 failed）、`npm run test:all-integration`（61 tests，59 passed，2 skipped，0 failed）和 `git1 diff --check` 均通过。queue contract、daemon lease/protocol、source/handoff 和 TUI 回归均包含在统一验收中。
 
 ## F6/F7 手工 smoke 记录
 
 - F6：通过（证据目录：`/private/var/folders/27/6bnn8n7d4px6s33fvdpns89c0000gn/pi-gq6-JIFKiK/evidence`）。保留态 receipt 为 `preserved/WORKTREE_PRESERVED`；主 agent 用 bash 在 source worktree commit，source/target 均恢复 clean；通过注册的 `git_queue_enqueue` tool 入队后 queue item 为 `completed`，target fast-forward，未重复集成。
+- F6 修复版重跑：通过（证据目录：`/private/var/folders/27/6bnn8n7d4px6s33fvdpns89c0000gn/T/opencode/f6-fixed-Sq7Hwn/evidence`）。未设置 `PI_GIT_QUEUE_STATE_DIR` 或 `PI_GIT_QUEUE_SOCKET_DIR`，使用默认 state root 和生产 socket 派生；receipt 为 `preserved/WORKTREE_PRESERVED`，主 agent bash commit 后通过专用 enqueue tool 恢复，queue 为 `completed`，target/worktree clean，并记录 pi-config HEAD、target HEAD、真实 socket 和 lease 清理。
 - F7 基础设施并发 smoke：通过（证据目录：`/private/var/folders/27/6bnn8n7d4px6s33fvdpns89c0000gn/pi-gq7-7oKjNy/evidence`）。两个独立 Pi RPC session 各自加载 queue extension 并产生不同 session ID；两个独立进程同时调用 enqueue，共享同一个 repository queue daemon，最终 sequence 1/2 均 `completed`，target clean，cleanup 后无残留 worktree。
 - F7 端到端 subagent child：通过（真实 GLM-5.3）。证据目录：`/private/var/folders/27/6bnn8n7d4px6s33fvdpns89c0000gn/T/opencode/glm-queue-1UvKUJ`。两个独立 Pi RPC session 各调用一次 `subagent_spawn(worktree:true)`；child 分别在 upstream 独立 worktree 创建并提交 `session-a.txt`、`session-b.txt`，产生真实 `parallel-handoff`；两个 handoff 自动生成 `enqueued` receipt 并共享同一 `repositoryId`/daemon。queue sequence 1、2 均 `completed`，最终 `main` 包含两个文件、target clean，worktree 已由 upstream 回收。
 
 ## 计划终态
 
-F1–F8 的 AUTO/MANUAL 必要条件均已满足；F6/F7 的人工证据已落盘，当前实现、自动回归和真实 GLM 端到端 smoke 对应同一交付版本。
+修复版 F1–F8 的 AUTO/MANUAL 必要条件均已满足；F6 默认路径重跑和 F7 真实 GLM evidence 均已落盘，当前实现、自动回归和真实 smoke 对应同一修复工作树版本。此文档的实现建议路径保留为历史计划描述；实际 feature-owned 实现位于 `src/git-integration-queue/`，符合当前 AGENTS 规则。

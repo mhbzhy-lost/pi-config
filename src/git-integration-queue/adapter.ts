@@ -5,9 +5,9 @@ export function classifyHandoff(handoffPath: string): Array<{ receipt: WorktreeI
   let facts;
   try { facts = readHandoff(handoffPath); }
   catch (error) {
-    return [{ receipt: { kind: "git-worktree-integration", outcome: "failed-closed", repositoryRoot: "", repositoryId: "", worktreePath: "", clean: null, changedFiles: [], sequencer: false, handoffPath, requiresOperator: true, reasonCode: "HANDOFF_UNREADABLE", reason: error instanceof Error ? error.message : String(error), suggestedAction: "保留现场并检查 upstream handoff 文件" } }];
+    return [{ receipt: { kind: "git-worktree-integration", outcome: "failed-closed", repositoryRoot: "unknown", repositoryId: "unknown", worktreePath: handoffPath, clean: null, changedFiles: [], sequencer: false, handoffPath, requiresOperator: true, reasonCode: "HANDOFF_UNREADABLE", reason: error instanceof Error ? error.message : String(error), suggestedAction: "保留 handoff 文件并检查 upstream handoff 文件" } }];
   }
-  if (facts.length === 0) return [{ receipt: { kind: "git-worktree-integration", outcome: "failed-closed", repositoryRoot: "", repositoryId: "", worktreePath: "", clean: null, changedFiles: [], sequencer: false, handoffPath, requiresOperator: true, reasonCode: "HANDOFF_EMPTY", reason: "handoff manifest 没有可处理的 child patch", suggestedAction: "检查 handoff manifest 与 cleanup evidence" } }];
+  if (facts.length === 0) return [{ receipt: { kind: "git-worktree-integration", outcome: "failed-closed", repositoryRoot: "unknown", repositoryId: "unknown", worktreePath: handoffPath, clean: null, changedFiles: [], sequencer: false, handoffPath, requiresOperator: true, reasonCode: "HANDOFF_EMPTY", reason: "handoff manifest 没有可处理的 child patch", suggestedAction: "保留 handoff 文件并检查 manifest 与 cleanup evidence" } }];
   return facts.map((fact) => {
     if (fact.patchChanged === false && fact.worktreeRemoved === true) return { receipt: { ...fact, kind: "git-worktree-integration", outcome: "no-change", requiresOperator: false } };
     if (fact.patchChanged === true && fact.worktreeRemoved === true && fact.patchPath && fact.patchDigest && fact.baseCommit && fact.handoffPath) {

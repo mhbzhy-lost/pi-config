@@ -275,7 +275,7 @@ export function createTuiRuntime(pi: ExtensionAPI): void {
   });
 
   pi.on("message_end", (event: any) => {
-    if (event?.message?.customType === "subagent-notify") refreshFooterRows();
+    if (event?.message?.customType === "subagent-notify" || event?.message?.customType === "git-worktree-integration") refreshFooterRows();
   });
   pi.on("tool_execution_end", (event: any) => {
     if (typeof event?.toolName === "string" && event.toolName.startsWith("subagent_")) refreshFooterRows();
