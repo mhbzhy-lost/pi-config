@@ -90,5 +90,15 @@ if [[ "$action" == pin-session ]]; then
 fi
 export PI_SESSION_OWNER_ID="$owner_id"
 export PI_SESSION_OWNER_REGISTRY="${PI_SESSION_OWNER_REGISTRY:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/pi-session-owner-${EUID}}"
+heap_diagnostic_dir="${PI_HEAP_DIAGNOSTIC_DIR:-$HOME/.pi/agent/diagnostics/heap}"
+if mkdir -p -- "$heap_diagnostic_dir" && chmod 700 -- "$heap_diagnostic_dir"; then
+  # Keep the normal launcher self-diagnosing: a long-lived Pi process gets a
+  # larger safety margin and writes heap snapshots before a fatal OOM. Preserve
+  # caller-provided NODE_OPTIONS and allow an explicit size override.
+  node_heap_mb="${PI_NODE_MAX_OLD_SPACE_SIZE:-8192}"
+  export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=${node_heap_mb} --heapsnapshot-near-heap-limit=2 --diagnostic-dir=${heap_diagnostic_dir}"
+else
+  print -u2 -- "Pi heap diagnostics directory unavailable: $heap_diagnostic_dir"
+fi
 cleanup; trap - EXIT HUP INT TERM
 exec "$node_bin" "$real_bin" -e "$root/src/session-owner/session-owner.ts" "${args[@]}"
