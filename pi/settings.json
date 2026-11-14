@@ -1,0 +1,64 @@
+{
+  "hideThinkingBlock": true,
+  "cacheWarming": "streaming",
+  "theme": "dark",
+  "lastChangelogVersion": "1.5.2",
+  "packages": [
+    "../../.r2c/integrations/pi-adapter",
+    "../node_modules/@arhen/pi-core-ask",
+    "../node_modules/@snowy117/pi-dcp"
+  ],
+  "subagents": {
+    "disableBuiltins": true,
+    "agentOverrides": {
+      "delegate": {
+        "disabled": false
+      }
+    }
+  },
+  "defaultProvider": "qoder-pool",
+  "defaultModel": "Qwen4-Max-Preview",
+  "defaultThinkingLevel": "low",
+  "defaultTools": [
+    "+codemode",
+    "+tool_search",
+    "+grep",
+    "+find",
+    "+ls"
+  ],
+  "extensions": [
+    "../src/agents-global/agents-global.ts",
+    "../src/agents-shared/agents-shared.ts",
+    "../src/ask-user-question/ask-user-question.ts",
+    "../src/available-models/available-models.ts",
+    "../src/bash-cwd/bash-cwd.ts",
+    "../src/basic-memory/basic-memory.ts",
+    "../src/compact-tools/compact-tools.ts",
+    "../src/context-usage/context-usage.ts",
+    "../src/dcp/dcp.ts",
+    "../src/git-integration-queue/git-queue.ts",
+    "../src/tui-lite/tui-lite.ts",
+    "../src/interactive-stderr-guard/interactive-stderr-guard.ts",
+    "../src/network-recovery/network-recovery.ts",
+    "../src/openai-proxy/openai-proxy.ts",
+    "../src/provider-fallback/provider-fallback.ts",
+    "../src/browser/browser.ts",
+    "../src/resign-ios-ipa/resign-ios-ipa.ts",
+    "../src/search/search.ts",
+    "../src/writing-skills/writing-skills.ts",
+    "../src/security-gates/security-gates.ts",
+    "../src/session-owner/session-owner.ts",
+    "../src/subagent/subagent.ts",
+    "../src/test-payload/test-payload.ts",
+    "../src/tool-timing/tool-timing.ts",
+    "+builtin:tool-search",
+    "-builtin:llama.cpp",
+    "-builtin:mcp"
+  ],
+  "deviceId": "347ec9c8-9146-4e45-98a3-0dfeb8a211f1",
+  "goalEngine": {
+    "enabled": true,
+    "maxConcurrentTasks": 10,
+    "maxNoProgressTurns": 5
+  }
+}

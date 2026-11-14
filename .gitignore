@@ -54,9 +54,9 @@ __pycache__/
 /pi/models-store.json
 
 # Secrets
-/skills/external-llm-review/.env
-/src/progressive-tools/search/.env
-/src/search/.env
+*.env
+.env
+.env.*
+!.env.example
 /pi/models.json
-/pi/settings.json
 .opencode/
