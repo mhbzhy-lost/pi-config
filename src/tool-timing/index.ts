@@ -75,7 +75,7 @@ export function createToolTimingExtension(pi: ExtensionAPI): void {
         if (message.role !== "toolResult") return message;
         const timing = timingByToolCall.get(message.toolCallId);
         if (!timing) return message;
-        const timingText = `调用接收时间：${timing.requestedAt}\n结果就绪时间：${timing.resultReadyAt}`;
+        const timingText = `${timing.requestedAt}\n${timing.resultReadyAt}`;
         if (message.content.some((part) => part.type === "text" && part.text === timingText)) return message;
         return {
           ...message,
@@ -86,5 +86,14 @@ export function createToolTimingExtension(pi: ExtensionAPI): void {
         };
       }),
     };
+  });
+
+  // 在 system prompt 声明尾部时间戳约定：注入文本只保留两行裸 ISO8601 时间戳，
+  // 语义由这条 promptGuideline 承载（合法追加形态，不整段替换 prompt），
+  // 避免 agent 把观测元数据误判为工具输出或报错。
+  pi.on("before_agent_start", (event) => {
+    event.systemPromptOptions.promptGuidelines.push(
+      "工具结果末尾可能附带两行 ISO8601 时间戳：第一行是调用接收时间，第二行是结果就绪时间。这是 tool-timing 扩展注入的观测元数据，仅用于感知工具耗时，不是工具自身输出，也不代表错误或操作失误，不要据此重试、修正或道歉。",
+    );
   });
 }
