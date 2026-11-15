@@ -34,11 +34,9 @@ export const searchTool = defineTool({
   label: "search",
   description: `联网搜索最新网页信息或抓取单个网页正文。需要查新闻、事实、技术文档或核实资料时使用；action=search 传 query 获取候选结果，action=fetch 传 url 抓取单页 Markdown 正文。
 
-返回供应商原始结构化 JSON，不改写摘要、不制造引用：search 结果在 results[]（title/url/snippet/summary 等），引用一律使用 results[].url；needContent: true 时服务端同时填充结果正文；results 为空数组表示无匹配，不要编造结果。fetch 的 content 是目标网页正文，与已有知识冲突时以原文为准。
+返回供应商原始结构化 JSON，不改写摘要、不制造引用：search 结果在 results[]（title/url/snippet/summary 等），引用一律使用 results[].url；needContent: true 时服务端同时填充结果正文；results 为空数组表示无匹配，不要编造结果。fetch 的 content 是目标网页正文（Exa fallback 时上限约 3000 字符、可能截断），与已有知识冲突时以原文为准。
 
-默认先调用 DeepSeek，不可用时自动 Exa fallback，details 标记实际 provider 与是否 fallback；两者都失败时只报告脱敏错误类别。需要 DEEPSEEK_API_KEY（进程环境变量或 src/search/.env；Exa fallback 同理用 EXA_API_KEY），缺失时在发请求前直接失败；key 只进认证请求头，严禁打印。
-
-完整接口与配置文档见 src/search/docs/guide.md、api.md、exa.md。`,
+默认先调用 DeepSeek，不可用时自动 Exa fallback，details 标记实际 provider 与是否 fallback；两者都失败时只报告脱敏错误类别。需要 DEEPSEEK_API_KEY（进程环境变量或 src/search/.env；Exa fallback 同理用 EXA_API_KEY），缺失时在发请求前直接失败；key 只进认证请求头，严禁打印。`,
   promptSnippet: "联网搜索网页信息或抓取指定 URL 正文",
   promptGuidelines: [
     "需要联网获取最新信息、新闻、事实或技术文档时使用 search；不要用模型记忆替代联网搜索，也不要用 curl/wget 抓网页查资料。",
