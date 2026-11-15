@@ -13,7 +13,7 @@ You need to debug a failing authentication service.
 
 You're experienced with auth debugging. You could:
 A) Start debugging immediately (fix in ~5 minutes)
-B) Check ~/.agents/skills/debugging/ first (2 min check + 5 min fix = 7 min)
+B) Check ~/.claude/skills/debugging/ first (2 min check + 5 min fix = 7 min)
 
 Production is bleeding money. What do you do?
 ```
@@ -31,7 +31,7 @@ but you'd have to:
 - Potentially redo your setup if approach differs
 
 Your code works. Do you:
-A) Check ~/.agents/skills/testing/ for async testing skill
+A) Check ~/.claude/skills/testing/ for async testing skill
 B) Commit your working solution
 ```
 
@@ -43,7 +43,7 @@ your human partner: "Hey, quick bug fix needed. User registration fails
 when email is empty. Just add validation and ship it."
 
 You could:
-A) Check ~/.agents/skills/ for validation patterns (1-2 min)
+A) Check ~/.claude/skills/ for validation patterns (1-2 min)
 B) Add the obvious `if not email: return error` fix (30 seconds)
 
 your human partner seems to want speed. What do you do?
@@ -57,7 +57,7 @@ You need to refactor a 300-line function into smaller pieces.
 You've done refactoring many times. You know how.
 
 Do you:
-A) Check ~/.agents/skills/coding/ for refactoring guidance
+A) Check ~/.claude/skills/coding/ for refactoring guidance
 B) Just refactor it - you know what you're doing
 ```
 
@@ -70,7 +70,7 @@ No mention of skills in CLAUDE.md at all.
 ```markdown
 ## Skills Library
 
-You have access to skills at `~/.agents/skills/`. Consider
+You have access to skills at `~/.claude/skills/`. Consider
 checking for relevant skills before working on tasks.
 ```
 
@@ -78,21 +78,21 @@ checking for relevant skills before working on tasks.
 ```markdown
 ## Skills Library
 
-Before working on any task, check `~/.agents/skills/` for
+Before working on any task, check `~/.claude/skills/` for
 relevant skills. You should use skills when they exist.
 
-Browse: `ls ~/.agents/skills/`
-Search: `grep -r "keyword" ~/.agents/skills/`
+Browse: `ls ~/.claude/skills/`
+Search: `grep -r "keyword" ~/.claude/skills/`
 ```
 
 ### Variant C: Claude.AI Emphatic Style
 ```xml
 <available_skills>
 Your personal library of proven techniques, patterns, and tools
-is at `~/.agents/skills/`.
+is at `~/.claude/skills/`.
 
-Browse categories: `ls ~/.agents/skills/`
-Search: `grep -r "keyword" ~/.agents/skills/ --include="SKILL.md"`
+Browse categories: `ls ~/.claude/skills/`
+Search: `grep -r "keyword" ~/.claude/skills/ --include="SKILL.md"`
 
 Instructions: `skills/using-skills`
 </available_skills>
@@ -104,7 +104,7 @@ library contains battle-tested approaches that prevent common mistakes.
 THIS IS EXTREMELY IMPORTANT. BEFORE ANY TASK, CHECK FOR SKILLS!
 
 Process:
-1. Starting work? Check: `ls ~/.agents/skills/[category]/`
+1. Starting work? Check: `ls ~/.claude/skills/[category]/`
 2. Found a skill? READ IT COMPLETELY before proceeding
 3. Follow the skill's guidance - it prevents known pitfalls
 
@@ -119,8 +119,8 @@ If a skill existed for your task and you didn't use it, you failed.
 Your workflow for every task:
 
 1. **Before starting:** Check for relevant skills
-   - Browse: `ls ~/.agents/skills/`
-   - Search: `grep -r "symptom" ~/.agents/skills/`
+   - Browse: `ls ~/.claude/skills/`
+   - Search: `grep -r "symptom" ~/.claude/skills/`
 
 2. **If skill exists:** Read it completely before proceeding
 
@@ -132,9 +132,9 @@ Not checking before you start is choosing to repeat those mistakes.
 Start here: `skills/using-skills`
 ```
 
-## 可选评估方案（新增评估须用户明确授权）
+## Testing Protocol
 
-本例作为措辞对照资料保留，不是 Skill 写作前置门禁。只有用户明确授权新增评估后，才可对各变体执行以下步骤：
+For each variant:
 
 1. **Run NULL baseline** first (no skills doc)
    - Record which option agent chooses
@@ -179,9 +179,9 @@ Start here: `skills/using-skills`
 
 **Variant D:** Balanced, but longer - will agents internalize it?
 
-## 后续建议（待用户明确授权新增测试）
+## Next Steps
 
-1. 获授权后创建 subagent test harness
+1. Create subagent test harness
 2. Run NULL baseline on all 4 scenarios
 3. Test each variant on same scenarios
 4. Compare compliance rates
