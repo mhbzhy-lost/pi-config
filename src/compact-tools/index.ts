@@ -1,7 +1,7 @@
 import type { ToolRendererResolver, ToolRenderers } from "@earendil-works/pi-coding-agent";
 import { createCompactFallbackRenderers, createCompactToolRenderers } from "./renderer.ts";
 
-export { createCompactFallbackRenderers, createCompactToolRenderers, failedResultLine, fillToolLine, installCompactSkillRenderer } from "./renderer.ts";
+export { createCompactFallbackRenderers, createCompactToolRenderers, failedResultLine, installCompactSkillRenderer } from "./renderer.ts";
 export { COMPACT_STATUS_KEY, resultStatus, setRenderStatus, statusGlyph, syncStatusAnimation, type CompactRenderStatus } from "./status.ts";
 export { createExpandedToolText } from "./expanded-content.ts";
 

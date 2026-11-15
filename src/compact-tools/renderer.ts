@@ -157,17 +157,6 @@ function summarySuffix(theme, context) {
   return summary ? theme.fg("dim", ` · ${summary}`) : "";
 }
 
-// self shell 绕过上游 Box 后，renderer 必须自行把行扩展到 viewport 宽度。
-// 真实主题使用 tool 状态对应的背景色；无 bg 的测试 stub 保持原始文本，避免伪造主题行为。
-export function fillToolLine(line, width, theme, context) {
-  if (typeof theme?.bg !== "function") return line;
-  const clipped = truncateToWidth(line, Math.max(0, width), "");
-  const padding = " ".repeat(Math.max(0, width - visibleWidth(clipped)));
-  const status = context?.state?.[COMPACT_STATUS_KEY] as CompactRenderStatus | undefined;
-  const background = status === "failure" ? "toolErrorBg" : status === "success" ? "toolSuccessBg" : "toolPendingBg";
-  return theme.bg(background, clipped + padding);
-}
-
 // 单行 call 头核心：状态 glyph + 正文 + 状态/摘要后缀，按宽度截断。
 // 摘要后缀与 resultRenderer 的写入/删除构成完整生命周期；
 // glyph 动画经 syncStatusAnimation 驱动并在终态清理 spinner 定时器。提取到模块级供自有工具与兜底工厂共用。
@@ -179,7 +168,7 @@ function createSingleLine({ visibleWidth, truncateToWidth }) {
       const glyph = statusGlyph(theme, status);
       const summary = summarySuffix(theme, context);
       const textBudget = Math.max(0, width - visibleWidth(glyph) - 1 - visibleWidth(summary));
-      return [fillToolLine(`${glyph} ${truncateToWidth(text, textBudget, "…")}${summary}`, width, theme, context)];
+      return [`${glyph} ${truncateToWidth(text, textBudget, "…")}${summary}`];
     },
     invalidate() {},
   });
@@ -208,9 +197,8 @@ export function createCompactFallbackRenderers({ Text, Container, visibleWidth, 
   });
   return (name) => ({
     renderCall(args, theme, context) {
-      // 参数摘要固定截断 60：与 bash/grep 等自有工具的 call 摘要同量级，
-      // 防止单个超长字符串参数吞没头行；列宽截断仍由 singleLine 兜底。
-      const arg = truncate(firstStringArg(args), 60);
+      // 保留完整参数摘要，最终由 singleLine 按当前终端宽度统一截断。
+      const arg = firstStringArg(args);
       return singleLine(title(name, arg ? theme.fg("accent", `"${arg}"`) : "", theme), theme, context);
     },
     renderResult,
@@ -316,7 +304,7 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
         if (context?.expanded) {
           return expandedLine(title("bash", theme.fg("accent", `"${rawCommand}"`), theme), theme, context);
         }
-        const command = truncate(rawCommand.replace(/\s+/g, " ").trim(), 70);
+        const command = rawCommand.replace(/\s+/g, " ").trim();
         return singleLine(title("bash", theme.fg("accent", `"${command}"`), theme), theme, context);
       },
        renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: (text) => `${nonEmptyLineCount(text)} lines` }),
@@ -328,7 +316,7 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
         if (context?.expanded) {
           return expandedLine(title("bash_async", theme.fg("accent", `"${rawCommand}"`), theme), theme, context);
         }
-        const command = truncate(rawCommand.replace(/\s+/g, " ").trim(), 70);
+        const command = rawCommand.replace(/\s+/g, " ").trim();
         return singleLine(title("bash_async", theme.fg("accent", `"${command}"`), theme), theme, context);
       },
       renderResult(result, options, theme, context) {
@@ -402,7 +390,7 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
     grep: {
       renderCall(args, theme, context) {
         const rawPattern = String(args?.pattern || "");
-        const pattern = context?.expanded ? rawPattern : truncate(rawPattern, 40);
+        const pattern = rawPattern;
         const detail = `${theme.fg("accent", `"${pattern}"`)} ${theme.fg("dim", `in ${shortPath(args?.path || args?.dir)}`)}`;
         if (context?.expanded) return expandedLine(title("grep", detail, theme), theme, context);
         return singleLine(title("grep", detail, theme), theme, context);
@@ -417,7 +405,7 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
     },
     tool_search: {
       renderCall(args, theme, context) {
-        const query = truncate(String(args?.query || ""), 100);
+        const query = String(args?.query || "");
         return singleLine(title("tool_search", theme.fg("accent", query), theme), theme, context);
       },
        renderResult: resultRenderer({ Text, Container, truncateToWidth, summary: () => "done" }),

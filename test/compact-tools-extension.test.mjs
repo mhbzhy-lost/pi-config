@@ -106,7 +106,8 @@ test("compact resolver绑定bash_async显示，launch摘要已接受待完成且
   const theme = { bold: (text) => text, fg: (_color, text) => text };
   const longCommand = "printf 'this is a deliberately long bash command whose complete tail must remain visible'";
   const args = { command: longCommand, cwd: "/tmp", timeout: 15 };
-  assert.match(mine.renderCall(args, theme, { expanded: false, state: {} }).render(100).join(""), /bash_async .*\.\.\./);
+  // 预览不再使用固定 70 字符预算，按当前 render(width) 截断并使用 TUI 省略号。
+  assert.match(mine.renderCall(args, theme, { expanded: false, state: {} }).render(100).join(""), /bash_async .*…/);
   assert.match(mine.renderCall(args, theme, { expanded: true, state: {} }).render(32).join("\n"), /complete tail must remain\s+visible/);
   // 显示字段覆盖，next 其余 metadata（含 execute）原样保留。
   const nativeExecute = async () => ({ content: [] });

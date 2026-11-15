@@ -1,6 +1,6 @@
 import { MouseRegion, Text, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import type { ToolRendererResolver } from "@earendil-works/pi-coding-agent";
-import { failedResultLine, fillToolLine, resultStatus, setRenderStatus } from "../compact-tools/index.ts";
+import { failedResultLine, resultStatus, setRenderStatus } from "../compact-tools/index.ts";
 
 type Question = { question?: unknown; options?: unknown; multiSelect?: unknown };
 type Option = { label?: unknown };
@@ -123,8 +123,7 @@ export function createAskUserQuestionRenderer(): ToolRendererResolver {
               questionLines(name, question, answers[index], context.state.status, theme, width),
             );
             // 无合法 questions 输入时退化为仅标题行，保证不崩。
-            const rendered = lines.length ? lines : [fitLine(`${glyph(context.state.status, theme)} ${theme.bold(name)}`, width)];
-            return rendered.map((line) => fillToolLine(line, width, theme, context));
+            return lines.length ? lines : [fitLine(`${glyph(context.state.status, theme)} ${theme.bold(name)}`, width)];
           },
           invalidate() {},
         };

@@ -3,7 +3,7 @@ import type { MessageRenderOptions, MessageRenderer, Theme, ToolRendererResolver
 import type { Component } from "@earendil-works/pi-tui";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { formatStandardReceipt } from "../async-receipt/format.ts";
-import { fillToolLine, resultStatus, setRenderStatus, statusGlyph, syncStatusAnimation, type CompactRenderStatus } from "../compact-tools/index.ts";
+import { resultStatus, setRenderStatus, statusGlyph, syncStatusAnimation, type CompactRenderStatus } from "../compact-tools/index.ts";
 
 const AGENT_NAME = "executor";
 const titlesByRunId = new Map<string, string>();
@@ -96,7 +96,7 @@ function renderTool(name: string, getExtra: (args: any, context: any) => string,
           ? compact(args?.title, "")
           : compact(titlesByRunId.get(args?.runId), "");
         const extra = getExtra(args, context);
-        return { render: (width) => [fillToolLine(line(name, title, extra, theme, context?.state?.status), width, theme, context)], invalidate() {} };
+        return { render: () => [line(name, title, extra, theme, context?.state?.status)], invalidate() {} };
       },
       renderResult(result: any, options: any, theme: any, context: any) {
         if (remember) remember(context?.args, result, context);
