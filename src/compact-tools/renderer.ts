@@ -1,5 +1,6 @@
 import { basename, dirname } from "node:path";
 import { homedir } from "node:os";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { COMPACT_STATUS_KEY, statusGlyph, syncStatusAnimation, type CompactRenderStatus } from "./status.ts";
 import { createExpandedToolText } from "./expanded-content.ts";
 
@@ -156,6 +157,17 @@ function summarySuffix(theme, context) {
   return summary ? theme.fg("dim", ` · ${summary}`) : "";
 }
 
+// self shell 绕过上游 Box 后，renderer 必须自行把行扩展到 viewport 宽度。
+// 真实主题使用 tool 状态对应的背景色；无 bg 的测试 stub 保持原始文本，避免伪造主题行为。
+export function fillToolLine(line, width, theme, context) {
+  if (typeof theme?.bg !== "function") return line;
+  const clipped = truncateToWidth(line, Math.max(0, width), "");
+  const padding = " ".repeat(Math.max(0, width - visibleWidth(clipped)));
+  const status = context?.state?.[COMPACT_STATUS_KEY] as CompactRenderStatus | undefined;
+  const background = status === "failure" ? "toolErrorBg" : status === "success" ? "toolSuccessBg" : "toolPendingBg";
+  return theme.bg(background, clipped + padding);
+}
+
 // 单行 call 头核心：状态 glyph + 正文 + 状态/摘要后缀，按宽度截断。
 // 摘要后缀与 resultRenderer 的写入/删除构成完整生命周期；
 // glyph 动画经 syncStatusAnimation 驱动并在终态清理 spinner 定时器。提取到模块级供自有工具与兜底工厂共用。
@@ -167,7 +179,7 @@ function createSingleLine({ visibleWidth, truncateToWidth }) {
       const glyph = statusGlyph(theme, status);
       const summary = summarySuffix(theme, context);
       const textBudget = Math.max(0, width - visibleWidth(glyph) - 1 - visibleWidth(summary));
-      return [`${glyph} ${truncateToWidth(text, textBudget, "…")}${summary}`];
+      return [fillToolLine(`${glyph} ${truncateToWidth(text, textBudget, "…")}${summary}`, width, theme, context)];
     },
     invalidate() {},
   });

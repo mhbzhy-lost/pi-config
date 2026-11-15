@@ -1,6 +1,6 @@
 import { MouseRegion, Text, truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import type { ToolRendererResolver } from "@earendil-works/pi-coding-agent";
-import { failedResultLine, resultStatus, setRenderStatus, statusGlyph, syncStatusAnimation, type CompactRenderStatus } from "../compact-tools/index.ts";
+import { failedResultLine, fillToolLine, resultStatus, setRenderStatus, statusGlyph, syncStatusAnimation, type CompactRenderStatus } from "../compact-tools/index.ts";
 
 export function createDcpRenderer(): ToolRendererResolver {
   return (name, next) => {
@@ -22,7 +22,7 @@ export function createDcpRenderer(): ToolRendererResolver {
             const glyph = statusGlyph(theme, status);
             // 单行收口：glyph 宽度以 visibleWidth 计入预算（模式同 compact-tools 的 createSingleLine），正文交给 truncateToWidth 截断。
             const budget = Math.max(0, width - visibleWidth(glyph) - 1);
-            return [`${glyph} ${truncateToWidth(body, budget, "…")}`];
+            return [fillToolLine(`${glyph} ${truncateToWidth(body, budget, "…")}`, width, theme, context)];
           },
           invalidate() {},
         };

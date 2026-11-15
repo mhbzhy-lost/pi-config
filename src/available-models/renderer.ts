@@ -1,6 +1,6 @@
 import { Text } from "@earendil-works/pi-tui";
 import type { ToolRendererResolver } from "@earendil-works/pi-coding-agent";
-import { resultStatus, setRenderStatus } from "../compact-tools/index.ts";
+import { fillToolLine, resultStatus, setRenderStatus } from "../compact-tools/index.ts";
 
 export function createAvailableModelsRenderer(): ToolRendererResolver {
   return (name, next) => {
@@ -10,7 +10,7 @@ export function createAvailableModelsRenderer(): ToolRendererResolver {
       ...(base ?? {}),
       renderShell: "self",
       renderCall(_args, theme, context) {
-        return { render: () => [`${contextGlyph(context?.state?.status, theme)} ${theme.bold(name)}`], invalidate() {} };
+        return { render: (width) => [fillToolLine(`${contextGlyph(context?.state?.status, theme)} ${theme.bold(name)}`, width, theme, context)], invalidate() {} };
       },
       renderResult(result, options, theme, context) {
         setRenderStatus(context, resultStatus(result, options, context));

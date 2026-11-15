@@ -1,6 +1,6 @@
 import { Text } from "@earendil-works/pi-tui";
 import type { ToolRendererResolver } from "@earendil-works/pi-coding-agent";
-import { resultStatus, setRenderStatus } from "../compact-tools/index.ts";
+import { fillToolLine, resultStatus, setRenderStatus } from "../compact-tools/index.ts";
 
 export function createSearchRenderer(): ToolRendererResolver {
   return (name, next) => {
@@ -12,7 +12,7 @@ export function createSearchRenderer(): ToolRendererResolver {
       renderCall(args, theme, context) {
         const input = args as { query?: unknown };
         const query = typeof input?.query === "string" ? input.query.replace(/\s+/g, " ").trim() : "";
-        return { render: () => [`${contextGlyph(context?.state?.status, theme)} ${theme.bold(name)}${query ? ` ${query}` : ""}`], invalidate() {} };
+        return { render: (width) => [fillToolLine(`${contextGlyph(context?.state?.status, theme)} ${theme.bold(name)}${query ? ` ${query}` : ""}`, width, theme, context)], invalidate() {} };
       },
       renderResult(result, options, theme, context) {
         setRenderStatus(context, resultStatus(result, options, context));
