@@ -26,9 +26,14 @@ export function createDcpRenderer(): ToolRendererResolver {
           },
           invalidate() {},
         };
-        // 成功/加载态点击展开无增量内容，吞掉保持交互自洽；失败态不吞，点击可展开查看完整错误。
-        const status = context?.state?.status as CompactRenderStatus | undefined;
-        return status === "failure" ? call : swallowExpandClick(call);
+        // 吞/放点击采用运行时判定：Host 的 updateDisplay 先跑 renderCall 后跑 renderResult，
+        // 失败状态由 renderResult 经 setRenderStatus 写入，若在构造时判定，result 到达的当帧头行
+        // 仍按旧状态吞点击、滞后一拍才解包。改为 onMouse 回调读最新 state.status：
+        // failure 放行点击（可展开看完整错误），其余状态吞掉（无增量内容，保持交互自洽）。
+        return new MouseRegion(call, (event) => {
+          if (event.type !== "click" || event.button !== "left") return undefined;
+          return (context?.state?.status as CompactRenderStatus | undefined) === "failure" ? undefined : { handled: true };
+        });
       },
       renderResult(result, options, theme, context) {
         const status = resultStatus(result, options, context);

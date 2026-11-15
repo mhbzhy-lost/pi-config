@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { setRenderStatus } from "../src/compact-tools/index.ts";
 import { createDcpRenderer } from "../src/dcp/renderer.ts";
 
 // 直接消费 resolver 产物：compress 渲染只依赖 pi-tui 与 compact-tools 公开入口，
@@ -91,11 +92,21 @@ test("失败：折叠单行含错误首行，展开渲染完整 content 全文",
   assert.ok(full.every((line) => visibleWidth(line) <= 120), JSON.stringify(full));
   assert.deepEqual(failureResult, before);
 
-  // 失败后 Host 重跑 renderCall：glyph 为 ✗，且 call 头不再吞点击。
+  // 失败后 Host 重跑 renderCall：glyph 为 ✗；call 头恒为 MouseRegion，
+  // 但 onMouse 运行时读 state.status，失败态放行点击（可展开看完整错误）。
   const failedCall = compress.renderCall(args, theme, ctx);
   assert.match(plain(failedCall.render(120)), /^✗ compress Auth System Exploration$/);
-  assert.equal(failedCall.handleMouse, undefined, "失败态 call 头不应吞点击");
+  assert.equal(failedCall.handleMouse({ type: "click", button: "left" }), undefined, "失败态 call 头应放行点击");
   assert.equal(ctx.state.status, "failure");
+
+  // 当帧时序：updateDisplay 先跑 renderCall 后跑 renderResult，失败状态由 renderResult 写入。
+  // 同一 call 组件实例在状态翻转前后行为应立即切换（修复构造时判定的滞后一拍）。
+  const liveCtx = context({ topic: "Auth" }, {});
+  const liveCall = compress.renderCall({ topic: "Auth" }, theme, liveCtx);
+  assert.equal(liveCall.handleMouse({ type: "click", button: "left" }).handled, true, "运行中 call 头应吞点击");
+  setRenderStatus(liveCtx, "failure");
+  assert.equal(liveCall.handleMouse({ type: "click", button: "left" }), undefined, "同一实例状态翻转为失败后应立即放行");
+  assert.equal(liveCall.handleMouse({ type: "click", button: "right" }), undefined, "非左键 click 不处理");
 });
 
 test("失败空文本：折叠回退占位、展开 dim 占位不崩", () => {

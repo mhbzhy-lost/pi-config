@@ -75,7 +75,9 @@ function questionLines(
     for (const label of labels) {
       const isSelected = selected.has(label);
       // 选中标记：选中 ●（accent 色）、未选中 ○（dim 色）。
-      lines.push(fitLine(`   ${theme.fg(isSelected ? "accent" : "dim", isSelected ? "●" : "○")} ${label}`, width));
+      // 显示层对 label 做空白归一化（text()），含换行的病态 label 不破坏单行假设；
+      // 选中判定（selected/answer 与 label）仍用原文比对，显示与匹配解耦。
+      lines.push(fitLine(`   ${theme.fg(isSelected ? "accent" : "dim", isSelected ? "●" : "○")} ${text(label)}`, width));
     }
   }
   return lines;

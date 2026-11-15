@@ -309,3 +309,28 @@ test("非 ask_user_question 工具名直接委托 next()", () => {
   const resolved = rendererModule.createAskUserQuestionRenderer()("read", () => sentinel);
   assert.equal(resolved, sentinel);
 });
+
+test("病态 label：显示层空白归一化不破坏单行，选中判定仍按原文比对", () => {
+  const renderer = createRenderer();
+  const args = {
+    questions: [{
+      question: "选哪个？",
+      options: [{ label: "选项\n甲" }, { label: " 选项  乙 " }],
+      multiSelect: true,
+    }],
+  };
+  const ctx = makeContext();
+  renderer.renderCall(args, plainTheme, ctx);
+  // 回答用原文 label（含换行/多余空白）：判定按原文命中 → ●。
+  ctx.state.answers = [{ selected: ["选项\n甲"] }];
+  const lines = renderer.renderCall(args, plainTheme, ctx).render(120);
+  const plainLines = lines.map(stripVTControlCharacters);
+  // 每行恒单行：label 的换行/多余空白被折叠为单空格，不产生额外物理行。
+  assert.equal(lines.length, 3, JSON.stringify(plainLines));
+  assert.match(plainLines[1], /● 选项 甲$/);
+  assert.equal(plainLines[1].includes("\n"), false);
+  assert.match(plainLines[2], /○ 选项 乙$/);
+  // 选中判定不受归一化影响：归一化后的文本不参与匹配，未命中者仍为 ○。
+  assert.equal(plainLines[2].includes("●"), false);
+  assert.ok(lines.every((line) => visibleWidth(line) <= 120), JSON.stringify(plainLines));
+});
