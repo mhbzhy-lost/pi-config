@@ -31,7 +31,7 @@ function registerCompactTools(factory, tools = new Map()) {
   return { resolvers, registered, activated };
 }
 
-test("compact resolver拥有七工具显示并保留next其余字段及未知fallback", () => {
+test("compact resolver拥有七工具显示并保留next其余字段，未知工具兜底单行渲染", () => {
   const { resolvers, registered, activated } = registerCompactTools(compactTools);
 
   assert.equal(resolvers.length, 1);
@@ -58,13 +58,41 @@ test("compact resolver拥有七工具显示并保留next其余字段及未知fal
       assert.equal(nativeRendering[field], native[field], `${name}.${field} identity`);
     }
   }
+  // 无人认领工具的字段级补齐：next() 只包含本 resolver 之后注册的 resolver 与内置渲染器。
   for (const name of ["unknown", "__proto__", "constructor"]) {
     let nextCalls = 0;
-    const fallback = { renderCall() {} };
-    assert.equal(resolve(name, () => { nextCalls++; return fallback; }), fallback);
+    // a：next() 产物同时具备 renderCall 与 renderResult（如 powershell 完整原生渲染）→ 原样放行。
+    const complete = { renderShell: "default", renderCall() {}, renderResult() {}, sentinel: "a" };
+    assert.equal(resolve(name, () => { nextCalls++; return complete; }), complete);
     assert.equal(nextCalls, 1);
-    assert.equal(resolve(name, () => undefined), undefined);
+    // b：有 renderCall 缺 renderResult → 只补 renderResult，原 renderCall/renderShell 与其余字段不动。
+    const callOnly = { renderShell: "default", renderCall() {}, sentinel: "b" };
+    const patchedResult = resolve(name, () => callOnly);
+    assert.equal(patchedResult.renderCall, callOnly.renderCall);
+    assert.equal(patchedResult.renderShell, "default");
+    assert.equal(patchedResult.sentinel, "b");
+    assert.equal(typeof patchedResult.renderResult, "function");
+    assert.equal(callOnly.renderResult, undefined);
+    // c：缺 renderCall → 补 renderCall 并设 renderShell:"self"；已有 renderResult 与其余字段保留。
+    const resultOnly = { renderShell: "default", renderResult() {}, sentinel: "c" };
+    const patchedCall = resolve(name, () => resultOnly);
+    assert.equal(patchedCall.renderShell, "self");
+    assert.equal(typeof patchedCall.renderCall, "function");
+    assert.equal(patchedCall.renderResult, resultOnly.renderResult);
+    assert.equal(patchedCall.sentinel, "c");
+    // d：next() 为 undefined（工具名未注册）→ 全量兜底：self 外壳 + 两个渲染函数。
+    const fallback = resolve(name, () => undefined);
+    assert.equal(fallback.renderShell, "self");
+    assert.equal(typeof fallback.renderCall, "function");
+    assert.equal(typeof fallback.renderResult, "function");
   }
+  // d 兜底内容：单行显示工具名与首个字符串参数（空白折叠为单空格）。
+  const plainTheme = { bold: (text) => text, fg: (_color, text) => text };
+  const fallback = resolve("unknown", () => undefined);
+  const header = fallback.renderCall({ query: "hello   world", count: 3 }, plainTheme, { state: {} }).render(80);
+  assert.equal(header.length, 1);
+  assert.match(header[0], /unknown "hello world"/);
+  assert.doesNotMatch(header[0], /count/);
 });
 
 test("compact resolver绑定bash_async显示，launch摘要已接受待完成且不注册/激活/执行", () => {

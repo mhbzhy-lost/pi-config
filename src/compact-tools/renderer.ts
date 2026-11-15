@@ -81,20 +81,17 @@ function setStatus(context, status) {
   syncStatusAnimation(context, status);
 }
 
-// 失败原因组件：先按终端列宽换行，再限制物理行，原始结果始终不变；invalidate 后以当前主题重建。
-function failedResult({ Text, truncateToWidth, text, theme }) {
-  const errorText = text.trim() || "工具执行失败（未提供错误信息）";
-  let body = new Text(theme.fg("error", errorText), 1, 0);
+// 失败原因组件（单行收口）：只取错误首行以 error 色高亮并按宽度截断；多行全文交由各 renderResult
+// 的 expanded 分支承担。invalidate 后以当前主题重建，保证主题热切换下颜色即时生效。
+export function failedResultLine({ truncateToWidth, text, theme }) {
+  const errorText = text.trim().split(/\r?\n/)[0] || "工具执行失败（未提供错误信息）";
+  let line = theme.fg("error", errorText);
   return {
     render(width) {
-      const lines = body.render(width);
-      return lines.length <= 4 ? lines : [
-        ...lines.slice(0, 3),
-        truncateToWidth(theme.fg("dim", "… 展开查看完整错误"), width, "…"),
-      ];
+      return [truncateToWidth(line, width, "…")];
     },
     invalidate() {
-      body = new Text(theme.fg("error", errorText), 1, 0);
+      line = theme.fg("error", errorText);
     },
   };
 }
@@ -114,7 +111,7 @@ function resultRenderer({ Text, Container, truncateToWidth, summary }) {
       if (expanded) return expandedBlock(expanded, theme, Text, Container);
       return new Text(theme.fg("dim", `  └ ${resultSummary}`), 1, 0);
     }
-    if (failed) return failedResult({ Text, truncateToWidth, text, theme });
+    if (failed) return failedResultLine({ truncateToWidth, text, theme });
     if (partial) return new Text("", 0, 0);
     if (context?.state) context.state[COMPACT_SUMMARY_KEY] = resultSummary;
     return new Text("", 0, 0);
@@ -153,13 +150,17 @@ export function installCompactSkillRenderer({ SkillInvocationMessageComponent, T
   };
 }
 
-export function createCompactToolRenderers({ Text, Container, visibleWidth, sliceByColumn, truncateToWidth, nativeEditRenderers = undefined as { current?: import("@earendil-works/pi-coding-agent").ToolRenderers } | undefined }) {
-  const summarySuffix = (theme, context) => {
-    const summary = !context?.expanded ? context?.state?.[COMPACT_SUMMARY_KEY] : undefined;
-    return summary ? theme.fg("dim", ` · ${summary}`) : "";
-  };
+// 摘要后缀：非展开态读取 state 中的 COMPACT_SUMMARY_KEY，拼到 call 头行尾部（dim 色）。
+function summarySuffix(theme, context) {
+  const summary = !context?.expanded ? context?.state?.[COMPACT_SUMMARY_KEY] : undefined;
+  return summary ? theme.fg("dim", ` · ${summary}`) : "";
+}
 
-  const singleLine = (text, theme, context) => ({
+// 单行 call 头核心：状态 glyph + 正文 + 状态/摘要后缀，按宽度截断。
+// 摘要后缀与 resultRenderer 的写入/删除构成完整生命周期；
+// glyph 动画经 syncStatusAnimation 驱动并在终态清理 spinner 定时器。提取到模块级供自有工具与兜底工厂共用。
+function createSingleLine({ visibleWidth, truncateToWidth }) {
+  return (text, theme, context) => ({
     render(width) {
       const status = context?.state?.[COMPACT_STATUS_KEY] as CompactRenderStatus | undefined;
       syncStatusAnimation(context, status);
@@ -170,6 +171,42 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
     },
     invalidate() {},
   });
+}
+
+// 首个字符串参数：兜底工具的参数形态未知，取 Object.values 中第一个 string 值
+//（空白折叠为单空格）作为调用摘要，不猜测参数语义。
+function firstStringArg(args) {
+  const value = Object.values(args ?? {}).find((entry) => typeof entry === "string");
+  return value ? value.replace(/\s+/g, " ").trim() : "";
+}
+
+/**
+ * 通用兜底渲染器工厂：为渲染链上无人认领显示的工具提供单行渲染字段。
+ * renderCall/renderResult 完全复用 compact 的 singleLine 与 resultRenderer 生命周期
+ * （glyph 动画、setStatus、COMPACT_SUMMARY_KEY 写删、spinner 定时器清理），不自写平行渲染分支。
+ */
+export function createCompactFallbackRenderers({ Text, Container, visibleWidth, truncateToWidth }) {
+  const singleLine = createSingleLine({ visibleWidth, truncateToWidth });
+  const renderResult = resultRenderer({
+    Text,
+    Container,
+    truncateToWidth,
+    // 通用结果摘要只收行数：兜底工具输出形态未知，行数是唯一不猜语义的信息。
+    summary: (text) => `${nonEmptyLineCount(text)} lines`,
+  });
+  return (name) => ({
+    renderCall(args, theme, context) {
+      // 参数摘要固定截断 60：与 bash/grep 等自有工具的 call 摘要同量级，
+      // 防止单个超长字符串参数吞没头行；列宽截断仍由 singleLine 兜底。
+      const arg = truncate(firstStringArg(args), 60);
+      return singleLine(title(name, arg ? theme.fg("accent", `"${arg}"`) : "", theme), theme, context);
+    },
+    renderResult,
+  });
+}
+
+export function createCompactToolRenderers({ Text, Container, visibleWidth, sliceByColumn, truncateToWidth, nativeEditRenderers = undefined as { current?: import("@earendil-works/pi-coding-agent").ToolRenderers } | undefined }) {
+  const singleLine = createSingleLine({ visibleWidth, truncateToWidth });
 
   // 展开态的 tool call 不能复用折叠态的 truncate 逻辑；Text 负责按终端宽度换行，
   // 但保留完整原始文本，确保长 Bash 命令可被查看。
@@ -313,10 +350,14 @@ export function createCompactToolRenderers({ Text, Container, visibleWidth, slic
         // 失败/未知回执不保留旧摘要，避免“已接受”叠加在失败或未识别状态上。
         setStatus(context, failed || !partial ? "failure" : "loading");
         if (context?.state) delete context.state[COMPACT_SUMMARY_KEY];
-        if (failed) return failedResult({ Text, truncateToWidth, text, theme });
-        // 未知格式中性显示原文：不猜接受/成功，也不做 production 执行输出兼容。
+        if (failed) return failedResultLine({ truncateToWidth, text, theme });
         const unknownText = text ? truncate(text.replace(/\s+/g, " ").trim(), 100) : "（未识别的回执格式）";
-        return new Text(theme.fg("dim", unknownText), 1, 0);
+        // partial 流仍在途中：中性显示原文行，不并入摘要（半截回执不进头行，也不提前接受）。
+        if (partial) return new Text(theme.fg("dim", unknownText), 1, 0);
+        // 未知格式回执并入摘要后缀：不猜接受/成功，也不做 production 执行输出兼容；
+        // 压缩后的原文经 COMPACT_SUMMARY_KEY 由 singleLine 后缀机制显示在 call 头行。
+        if (context?.state) context.state[COMPACT_SUMMARY_KEY] = unknownText;
+        return new Text("", 0, 0);
       },
     },
     edit: {

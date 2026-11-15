@@ -62,7 +62,7 @@ for (const [source, renderers] of Object.entries({ shared, host })) {
       assert.equal(ctx.args, args);
     });
 
-    test(`${source} ${label}: 中文ANSI错误按物理行限高且展开/invalidate保留原文`, () => {
+    test(`${source} ${label}: 中文ANSI错误单行显示且展开/invalidate保留原文`, () => {
       const text = `\u001b[31m权限拒绝\u001b[0m\n${"中文宽字符".repeat(35)}\n第三行\n第四行\n第五行\n最后错误`;
       const result = { content: [{ type: "text", text }], details: { source: "fixture", nested: [1, 2] } };
       const before = structuredClone(result);
@@ -70,10 +70,11 @@ for (const [source, renderers] of Object.entries({ shared, host })) {
       const collapsed = renderers[name].renderResult(result, { expanded: false, isPartial: false }, theme, ctx);
       for (const width of [40, 100]) {
         const lines = collapsed.render(width);
-        assert.equal(lines.length, 4, JSON.stringify(lines));
+        // 失败折叠态单行收口：只保留错误首行，不再输出“展开查看完整错误”提示。
+        assert.equal(lines.length, 1, JSON.stringify(lines));
         assert.ok(lines.every((line) => tui.visibleWidth(line) <= width));
         assert.match(plain(lines), /权限拒绝/);
-        assert.match(plain(lines), /展开查看完整错误/);
+        assert.doesNotMatch(plain(lines), /第三行|最后错误|展开查看完整错误/);
         collapsed.invalidate();
         assert.deepEqual(collapsed.render(width), lines);
         const expanded = renderers[name].renderResult(result, { expanded: true, isPartial: false }, theme, { ...ctx, expanded: true });
@@ -81,6 +82,10 @@ for (const [source, renderers] of Object.entries({ shared, host })) {
         assert.match(plain(full), /最后错误/);
         assert.ok(full.every((line) => tui.visibleWidth(line) <= width));
       }
+      // 超宽截断生效：窄宽度下仍是恰好一行且不超宽。
+      const narrow = collapsed.render(2);
+      assert.equal(narrow.length, 1);
+      assert.ok(narrow.every((line) => tui.visibleWidth(line) <= 2));
       assert.deepEqual(result, before);
     });
   }
@@ -147,14 +152,19 @@ for (const { label, name, args } of cases) {
 }
 
 for (const [source, renderers] of Object.entries({ shared, host })) {
-  test(`${source}: 单逻辑行错误先换行再按四物理行截断`, () => {
+  test(`${source}: 单逻辑行错误单行显示并按宽度截断`, () => {
     const text = `原因：${"中文".repeat(20)}结束`;
     const result = { content: [{ type: "text", text }], details: undefined };
     const output = renderers.bash.renderResult(result, { expanded: false, isPartial: false }, theme, context(sampleArgs.bash, true));
     const lines = output.render(40);
-    assert.ok(lines.length > 1 && lines.length <= 4);
+    // 单行收口：保头舍尾，超宽部分以省略号截断。
+    assert.equal(lines.length, 1, JSON.stringify(lines));
     assert.ok(lines.every((line) => tui.visibleWidth(line) <= 40));
-    assert.ok(plain(lines).replace(/\s/g, "").includes(text));
+    assert.match(plain(lines), /原因：/);
+    assert.doesNotMatch(plain(lines), /结束/);
+    const wide = output.render(120);
+    assert.equal(wide.length, 1);
+    assert.ok(plain(wide).replace(/\s/g, "").includes(text));
   });
 
   test(`${source}: 错误组件invalidate后使用当前主题颜色`, () => {

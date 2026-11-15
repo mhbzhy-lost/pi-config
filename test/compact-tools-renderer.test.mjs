@@ -353,18 +353,53 @@ test("bash_async partial与未知格式中性显示，不提前接受、不猜�
   assert.doesNotMatch(partialOutput.render(120).join("\n"), /已接受/);
   assert.equal(state.compactToolsSummary, undefined);
 
-  // 未知格式：中性显示原文，不猜接受/成功，也不伪装bash执行摘要。
+  // 未知格式：回执原文并入摘要后缀，不猜接受/成功，也不伪装bash执行摘要。
   const unknown = { content: [{ type: "text", text: "{\"unexpected\":true}" }], details: { unexpected: true } };
   const unknownOutput = renderers.bash_async.renderResult(unknown, { expanded: false, isPartial: false }, plainTheme, ctx);
-  const unknownVisible = unknownOutput.render(120).join("\n");
-  assert.match(unknownVisible, /unexpected/);
-  assert.doesNotMatch(unknownVisible, /已接受|succeeded|lines|done/);
-  assert.equal(state.compactToolsSummary, undefined);
+  // 结果体收空，信息经 COMPACT_SUMMARY_KEY 摘要后缀显示在 call 头行。
+  assert.equal(unknownOutput.render(120).join("\n"), "");
+  assert.equal(state.compactToolsSummary, "{\"unexpected\":true}");
+  const unknownHeader = renderers.bash_async.renderCall(args, plainTheme, ctx).render(120).join("\n");
+  assert.match(unknownHeader, /unexpected/);
+  assert.doesNotMatch(unknownHeader, /已接受|succeeded|lines|done/);
 
-  // 空文本未知回执显示中性占位。
+  // 空文本未知回执：中性占位同样并入摘要后缀。
   const empty = { content: [], details: undefined };
   const emptyOutput = renderers.bash_async.renderResult(empty, { expanded: false, isPartial: false }, plainTheme, ctx);
-  assert.match(emptyOutput.render(120).join("\n"), /未识别的回执格式/);
+  assert.equal(emptyOutput.render(120).join("\n"), "");
+  assert.equal(state.compactToolsSummary, "（未识别的回执格式）");
+  assert.match(renderers.bash_async.renderCall(args, plainTheme, ctx).render(120).join("\n"), /未识别的回执格式/);
+});
+
+test("failedResultLine 单行错误：首行+宽度截断+invalidate主题重建", () => {
+  assert.equal(typeof rendererModule.failedResultLine, "function");
+  const text = "first error line\nsecond line\nthird line";
+  let color = "\u001b[31m";
+  const changingTheme = { fg: (_token, body) => `${color}${body}\u001b[0m` };
+  const component = rendererModule.failedResultLine({ truncateToWidth: plainTruncateToWidth, text, theme: changingTheme });
+  // 恰好一行：只含错误首行，不再携带后续行与“展开查看完整错误”提示。
+  const lines = component.render(120);
+  assert.equal(lines.length, 1);
+  assert.match(stripVTControlCharacters(lines[0]), /first error line/);
+  assert.doesNotMatch(stripVTControlCharacters(lines[0]), /second line|展开查看完整错误/);
+  // 超宽截断生效：窄宽度下仍是单行且不超宽。
+  const narrow = component.render(8);
+  assert.equal(narrow.length, 1);
+  assert.ok(stripVTControlCharacters(narrow[0]).length <= 8);
+  assert.match(stripVTControlCharacters(narrow[0]), /…$/);
+  // invalidate 后以当前主题重建：颜色切换生效且错误首行仍在。
+  assert.ok(component.render(120)[0].includes("\u001b[31m"));
+  color = "\u001b[32m";
+  component.invalidate();
+  const rebuilt = component.render(120)[0];
+  assert.ok(rebuilt.includes("\u001b[32m"));
+  assert.ok(!rebuilt.includes("\u001b[31m"));
+  assert.match(stripVTControlCharacters(rebuilt), /first error line/);
+  // 纯空白/空文本回退中性占位；trim 先于取首行，前导空白行会被折叠，次行成为首行。
+  const empty = rendererModule.failedResultLine({ truncateToWidth: plainTruncateToWidth, text: "  \t  ", theme: { fg: (_c, body) => body } });
+  assert.match(stripVTControlCharacters(empty.render(40)[0]), /工具执行失败（未提供错误信息）/);
+  const blankFirst = rendererModule.failedResultLine({ truncateToWidth: plainTruncateToWidth, text: "   \nhidden", theme: { fg: (_c, body) => body } });
+  assert.match(stripVTControlCharacters(blankFirst.render(40)[0]), /hidden/);
 });
 
 // ---- edit 展开委托原生 details.diff 渲染（resolver next() DI 契约）----
