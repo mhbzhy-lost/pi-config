@@ -1,6 +1,5 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { guidance } from "./docs.ts";
 import { requestSearch } from "./providers.ts";
 
 const MAX_QUERY_CHARS = 128;
@@ -33,20 +32,21 @@ function validateUrl(value: unknown): string {
 export const searchTool = defineTool({
   name: "search",
   label: "search",
-  description: `使用 DeepSeek 官方 Search/Fetch API 搜索最新网页信息或抓取单个 URL。返回服务端原始结构化 JSON，不替代引用、不改写摘要；action=search 传 query，action=fetch 传 url。
+  description: `联网搜索最新网页信息或抓取单个网页正文。需要查新闻、事实、技术文档或核实资料时使用；action=search 传 query 获取候选结果，action=fetch 传 url 抓取单页 Markdown 正文。
 
-以下是该工具的完整使用说明；实际调用请使用本工具的 action/参数：
+返回供应商原始结构化 JSON，不改写摘要、不制造引用：search 结果在 results[]（title/url/snippet/summary 等），引用一律使用 results[].url；needContent: true 时服务端同时填充结果正文；results 为空数组表示无匹配，不要编造结果。fetch 的 content 是目标网页正文，与已有知识冲突时以原文为准。
 
-${guidance}`,
-  promptSnippet: "搜索网页或抓取指定 URL（按需加载）",
+默认先调用 DeepSeek，不可用时自动 Exa fallback，details 标记实际 provider 与是否 fallback；两者都失败时只报告脱敏错误类别。需要 DEEPSEEK_API_KEY（进程环境变量或 src/search/.env；Exa fallback 同理用 EXA_API_KEY），缺失时在发请求前直接失败；key 只进认证请求头，严禁打印。
+
+完整接口与配置文档见 src/search/docs/guide.md、api.md、exa.md。`,
+  promptSnippet: "联网搜索网页信息或抓取指定 URL 正文",
   promptGuidelines: [
-    "需要联网获取最新信息、新闻、事实或技术文档时使用 search；不要用模型记忆替代联网搜索。完整规则见工具描述中的 DeepSeek 文档。",
-    "先用 action=search 获取候选 URL，正文不足时再用 action=fetch 抓取单个 URL；引用使用返回结果中的 URL。",
-    "默认先调用 DeepSeek；DeepSeek 不可用时自动尝试 Exa fallback。两者都失败时报告两个脱敏错误类别，不把 key、响应原文或请求内容写入错误。",
+    "需要联网获取最新信息、新闻、事实或技术文档时使用 search；不要用模型记忆替代联网搜索，也不要用 curl/wget 抓网页查资料。",
+    "先用 search 的 action=search 获取候选 URL，正文不足时再用 action=fetch 抓取单个 URL；引用使用返回结果中的 URL。",
+    "search 默认先调用 DeepSeek；DeepSeek 不可用时自动尝试 Exa fallback。两者都失败时报告两个脱敏错误类别，不把 key、响应原文或请求内容写入错误。",
   ],
   parameters,
-  exposure: "deferred",
-  defaultActive: false,
+  exposure: "direct",
   async execute(_toolCallId, input) {
     const action = input.action;
     const payload = action === "search"
