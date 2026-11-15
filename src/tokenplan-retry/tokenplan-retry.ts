@@ -52,6 +52,8 @@ function replay(events: any[], result: any) {
 export default function tokenPlanRetryExtension(pi: ExtensionAPI): void {
   pi.registerProvider(PROVIDER, {
     // 只覆盖 tokenplan 的请求实现，模型目录、baseUrl、认证仍沿用内置 provider。
+    // "api" 是注册 streamSimple 的必填字段，同时决定 hook 只对该 api 的模型生效。
+    api: 'openai-completions',
     streamSimple(model: any, context: any, options: any = {}) {
       const run = async () => {
         let attempt = await collectAttempt(model, context, options);
