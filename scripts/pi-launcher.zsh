@@ -110,8 +110,9 @@ if [[ "$action" == pin-session ]]; then
 fi
 export PI_SESSION_OWNER_ID="$owner_id"
 export PI_SESSION_OWNER_REGISTRY="${PI_SESSION_OWNER_REGISTRY:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/pi-session-owner-${EUID}}"
-heap_diagnostic_dir="${PI_HEAP_DIAGNOSTIC_DIR:-$HOME/.pi/agent/diagnostics/heap}"
-if mkdir -p -- "$heap_diagnostic_dir" && chmod 700 -- "$heap_diagnostic_dir"; then
+# BSD chmod（macOS）不支持把 `--` 放在 mode 之后；用 zsh `:a` 先转成绝对路径再免用 `--`。
+heap_diagnostic_dir="${${PI_HEAP_DIAGNOSTIC_DIR:-$HOME/.pi/agent/diagnostics/heap}:a}"
+if mkdir -p "$heap_diagnostic_dir" && chmod 700 "$heap_diagnostic_dir"; then
   # Keep the normal launcher self-diagnosing: a long-lived Pi process gets a
   # larger safety margin and writes heap snapshots before a fatal OOM. Preserve
   # caller-provided NODE_OPTIONS and allow an explicit size override.
