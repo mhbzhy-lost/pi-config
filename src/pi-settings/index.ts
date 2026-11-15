@@ -1,5 +1,6 @@
 import { access, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 
 export type EnsureOptions = {
@@ -15,6 +16,8 @@ type DirectoryProbe = { exists: boolean; error?: NodeJS.ErrnoException };
 export const R2C_ADAPTER_SOURCE = "../../.r2c/integrations/pi-adapter";
 const SELECTOR_FIELDS = ["defaultTools", "extensions"] as const;
 const SHARED_SCALAR_FIELDS = ["hideThinkingBlock", "cacheWarming"] as const;
+// Pi 运行时写入 globalSettings（=agentDir/settings.json）的机器状态字段，不属于可提交、可同步的共享配置。
+export const RUNTIME_SETTINGS_FIELDS = ["lastChangelogVersion", "extensionChangelogVersions", "deviceId", "trackingId"] as const;
 
 const moduleRoot = resolve(dirname(new URL(import.meta.url).pathname), "../..");
 const defaultTarget = resolve(moduleRoot, "pi/settings.json");
@@ -196,6 +199,36 @@ export function resolveR2cAdapterDirectory(target: string, override?: string): s
 
 async function readJson(path: string): Promise<JsonObject> {
   return JSON.parse(await readFile(path, "utf8")) as JsonObject;
+}
+
+// git clean filter：剥离运行时字段并输出规范格式（2 空格缩进 + 尾随换行），
+// 使提交与 git diff 不含机器状态（git status 在 git add 后归一）。解析失败或无运行时字段时原样透传，避免损坏数据。
+export function cleanSettingsText(raw: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+  if (!isRecord(parsed)) return raw;
+  const result: JsonObject = { ...parsed };
+  let changed = false;
+  for (const field of RUNTIME_SETTINGS_FIELDS) {
+    if (field in result) {
+      delete result[field];
+      changed = true;
+    }
+  }
+  return changed ? `${JSON.stringify(result, null, 2)}\n` : raw;
+}
+
+// 幂等配置 pi/settings.json 的 git clean filter；非 git 环境或 git 不可用时静默跳过，不阻塞 settings 规整。
+export function ensureGitCleanFilter(): void {
+  try {
+    execFileSync("git", ["config", "filter.pi-settings-clean.clean", "node scripts/pi-settings-clean.ts"], { cwd: moduleRoot, stdio: "ignore" });
+  } catch {
+    // best-effort：filter 未配置时 git 按无操作透传，不影响既有流程。
+  }
 }
 
 export async function ensureSettings(options: EnsureOptions = {}): Promise<void> {

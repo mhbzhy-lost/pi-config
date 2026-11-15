@@ -1,0 +1,4 @@
+# Pi 运行时状态（lastChangelogVersion/deviceId/trackingId/extensionChangelogVersions）
+# 由运行时写入 pi/settings.json，不属于可提交的共享配置；提交时经 clean filter 剥离。
+# filter 命令由 `node scripts/ensure-pi-settings.ts` 幂等配置（见 src/pi-settings ensureGitCleanFilter）。
+pi/settings.json filter=pi-settings-clean
