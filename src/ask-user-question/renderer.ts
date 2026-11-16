@@ -42,7 +42,7 @@ function optionLabels(question: Question): string[] | undefined {
   return labels;
 }
 
-// 单问卡片块：问题行（含未回答 loading 态 glyph 与自定义输入后缀）+ 选项行（选中标记）。
+// 单问卡片块：问题行 + 选项行（选中标记）。自定义单选回答作为额外选项显示。
 function questionLines(
   name: string,
   question: Question,
@@ -64,13 +64,13 @@ function questionLines(
         if (typeof item === "string") selected.add(item);
       }
     } else if (typeof entry.answer === "string") {
-      // 单选：answer === 某 label → 该 label ●；answer 存在且不等于任何 label（用户自定义输入）
-      // → 该问全部 ○，并在问题行尾追加 " → <answer>"（dim 色）。
+      // 单选：answer === 某 label → 该 label ●；answer 存在且不等于任何 label 时，
+      // 将用户自定义输入作为额外的选项显示。
       if (labels?.includes(entry.answer)) selected.add(entry.answer);
       else custom = text(entry.answer);
     }
   }
-  const lines = [fitLine(custom === undefined ? head : `${head}${theme.fg("dim", ` → ${custom}`)}`, width)];
+  const lines = [fitLine(head, width)];
   if (labels) {
     for (const label of labels) {
       const isSelected = selected.has(label);
@@ -78,6 +78,9 @@ function questionLines(
       // 显示层对 label 做空白归一化（text()），含换行的病态 label 不破坏单行假设；
       // 选中判定（selected/answer 与 label）仍用原文比对，显示与匹配解耦。
       lines.push(fitLine(`   ${theme.fg(isSelected ? "accent" : "dim", isSelected ? "●" : "○")} ${text(label)}`, width));
+    }
+    if (custom !== undefined) {
+      lines.push(fitLine(`   ${theme.fg("accent", "●")} ${custom}`, width));
     }
   }
   return lines;

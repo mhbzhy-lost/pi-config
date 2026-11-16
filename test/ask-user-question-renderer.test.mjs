@@ -127,7 +127,7 @@ test("单选回答：answer 等于某 label → 恰好该 label ●", () => {
   assert.equal(lines.filter((line) => line.includes("●")).length, 1);
 });
 
-test("单选自定义输入：该问全 ○ 且问题行尾追加 “ → 输入”（dim 色）", () => {
+test("单选自定义输入：作为额外选项显示并标记为 ●", () => {
   const renderer = createRenderer();
   const context = makeContext();
   const args = {
@@ -146,10 +146,11 @@ test("单选自定义输入：该问全 ○ 且问题行尾追加 “ → 输入
   );
   const lines = card.render(80);
 
-  assert.match(lines[0], /^✓ ask_user_question 选择集群？ → 灰度集群$/);
+  assert.match(lines[0], /^✓ ask_user_question 选择集群？$/);
   assert.equal(lines[1], "   ○ 生产");
   assert.equal(lines[2], "   ○ 测试");
-  assert.equal(lines.filter((line) => line.includes("●")).length, 0);
+  assert.equal(lines[3], "   ● 灰度集群");
+  assert.equal(lines.filter((line) => line.includes("●")).length, 1);
 });
 
 test("多问连排：每问一块（问题行+选项行）顺序正确，混合回答态按问独立", () => {
