@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>pi · 局域网终端</title>
+<link rel="stylesheet" href="/xterm.css">
+<style>
+  html, body { margin: 0; height: 100%; background: #101014; color: #d8d8e0; overscroll-behavior: none; }
+  #app { display: flex; flex-direction: column; height: 100%; }
+  #term-wrap { flex: 1; min-height: 0; padding: 4px 2px 0; }
+  /* 列宽整数无法填满容器宽，居中让两侧余数对称，避免单侧黑条 */
+  #term { height: 100%; display: flex; justify-content: center; touch-action: none; }
+  #term > .xterm { height: 100%; }
+  /* 列表视图 */
+  #list { display: none; flex: 1; min-height: 0; overflow-y: auto; padding: 16px 16px calc(16px + env(safe-area-inset-bottom)); }
+  #list h1 { font: 600 18px -apple-system, sans-serif; margin: 4px 0 14px; }
+  #list .hint { font: 12px -apple-system, sans-serif; color: #6a6a78; margin: 14px 0 0; line-height: 1.6; word-break: break-all; }
+  .card {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    background: #17171d; border: 1px solid #26262e; border-radius: 12px;
+    padding: 14px 14px; margin-bottom: 10px; touch-action: manipulation;
+  }
+  .card:active { background: #1e1e26; }
+  .card .name { font: 600 15px ui-monospace, Menlo, monospace; }
+  .card .meta { font: 12px -apple-system, sans-serif; color: #6a6a78; margin-top: 3px; }
+  .card .dot { width: 8px; height: 8px; border-radius: 50%; background: #3a3a46; flex: none; }
+  .card .dot.on { background: #7ec98f; }
+  .card .go { color: #4a6a95; font: 14px -apple-system, sans-serif; }
+  #back-btn { margin-right: 4px; } /* 显隐由 route() 控制 */
+  /* 工具栏 */
+  #bar {
+    display: flex; gap: 6px; align-items: center; justify-content: space-between;
+    padding: 4px 6px calc(4px + env(safe-area-inset-bottom));
+    background: #17171d; border-top: 1px solid #26262e;
+  }
+  #keys { display: flex; gap: 4px; flex-wrap: wrap; }
+  #keys1 { display: flex; gap: 4px; }
+  #keys2 { display: none; }
+  #keys2.show { display: flex; gap: 4px; }
+  button {
+    font: 12px ui-monospace, Menlo, monospace; color: #d8d8e0; background: #26262e;
+    border: 1px solid #34343e; border-radius: 7px; padding: 6px 9px;
+    touch-action: manipulation; user-select: none; -webkit-user-select: none;
+  }
+  button:active { background: #3a3a46; }
+  button.on { background: #2f4a6d; border-color: #4a6a95; color: #cfe3ff; }
+  #status { font: 11px ui-monospace, Menlo, monospace; color: #6a6a78; padding: 0 2px; white-space: nowrap; }
+  .xterm .xterm-viewport { -webkit-overflow-scrolling: touch; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="list">
+    <h1>pi 会话</h1>
+    <div id="cards"></div>
+    <p class="hint" id="hint"></p>
+  </div>
+  <div id="term-wrap"><div id="term"></div></div>
+  <div id="bar">
+    <div id="keys">
+      <div id="keys1">
+        <button id="back-btn">‹</button>
+        <button id="kb">⌨</button>
+        <button data-key="esc">Esc</button>
+        <button data-key="tab">Tab</button>
+        <button id="ctrl" data-key="ctrl">Ctrl</button>
+        <button data-key="ctrlc">^C</button>
+        <button data-key="up">↑</button>
+        <button data-key="down">↓</button>
+        <button id="more">⋯</button>
+      </div>
+      <div id="keys2">
+        <button id="scroll" data-key="scrollmode">滚屏</button>
+        <button data-key="pgup">PgUp</button>
+        <button data-key="pgdn">PgDn</button>
+        <button data-key="left">←</button>
+        <button data-key="right">→</button>
+        <button data-key="enter">Enter</button>
+      </div>
+    </div>
+    <span id="status"></span>
+  </div>
+</div>
+<script src="/xterm.js"></script>
+<script src="/xterm-fit.js"></script>
+<script>
+"use strict";
+const term = new Terminal({
+  fontSize: 13,
+  fontFamily: 'ui-monospace, Menlo, "Courier New", monospace',
+  theme: { background: "#101014" },
+  scrollback: 5000,
+  cursorBlink: true,
+  convertEol: false,
+});
+const fit = new FitAddon.FitAddon();
+term.loadAddon(fit);
+term.open(document.getElementById("term"));
+
+const $ = (id) => document.getElementById(id);
+const statusEl = $("status"), ctrlBtn = $("ctrl"), listEl = $("list"), termWrap = $("term-wrap");
+const query = location.search; // 透传 ?token=
+let ws = null, ctrlArmed = false, lastSent = { cols: 0, rows: 0 }, reconnectTimer = null;
+let currentSession = null;
+
+/* ---------- 键盘模式：默认浏览态不拉软键盘；点底部输入区或 ⌨ 才激活 ---------- */
+let keyboardOn = false;
+const kbBtn = $("kb");
+function focusIfOn() { if (keyboardOn) term.focus(); }
+function setKeyboard(on) {
+  keyboardOn = on;
+  kbBtn.classList.toggle("on", on);
+  if (on) term.focus();
+  else { try { term.blur(); } catch (e) {} }
+}
+kbBtn.addEventListener("click", () => setKeyboard(!keyboardOn));
+// 拦截终端区域点击：浏览态下阻止 xterm 内部监听器拉起键盘（stopPropagation 必须在捕获阶段，
+// 否则 xterm 在内部元素上的 click/touchend 处理器仍会 focus）；点底部输入区才激活。
+const termHost = document.getElementById("term");
+// 记录触摸起点，用于区分点按（tap）与滑动（swipe）：滑动后的抬手不触发任何点击行为
+let tapOrigin = null;
+termHost.addEventListener("touchstart", (e) => {
+  tapOrigin = e.touches.length === 1 ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : null;
+}, { capture: true, passive: true });
+for (const type of ["mousedown", "touchend", "click"]) {
+  termHost.addEventListener(type, (e) => {
+    const y = type === "touchend" && e.changedTouches && e.changedTouches[0] ? e.changedTouches[0].clientY : e.clientY;
+    const x = type === "touchend" && e.changedTouches && e.changedTouches[0] ? e.changedTouches[0].clientX : e.clientX;
+    const r = termHost.getBoundingClientRect();
+    // 输入区判定收窄到底部 15%（约输入框+状态栏的行数），其上方如 jump-to-latest 等控件不被误触
+    const bottom = y > r.top + r.height * 0.85;
+    const isTap = type !== "touchend" || (tapOrigin !== null && Math.hypot(x - tapOrigin.x, y - tapOrigin.y) < 12);
+    if (keyboardOn) {
+      // 手机上收起软键盘不一定让 textarea 失焦，keyboardOn 可能卡在 true；
+      // 输入态下点上部视为“收起键盘去浏览”，点底部继续输入。
+      if (bottom || type === "click") return;
+      setKeyboard(false);
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    if (bottom && type !== "click" && isTap) { setKeyboard(true); }
+    else if (!bottom && type === "touchend" && isTap) {
+      // 浏览态点击透传给 pi（tmux mouse on 转发）：jump-to-latest、链接等控件可正常点按
+      forwardClick(x, y);
+    }
+    e.preventDefault();
+    e.stopPropagation();
+  }, { capture: true, passive: false });
+}
+// 把像素坐标换算成单元格坐标，发送 SGR 左键点击序列（press+release）
+function forwardClick(clientX, clientY) {
+  const screen = term.element?.querySelector(".xterm-screen");
+  if (!screen) return;
+  const r = screen.getBoundingClientRect();
+  const cellW = r.width / Math.max(1, term.cols);
+  const cellH = r.height / Math.max(1, term.rows);
+  const col = Math.min(term.cols, Math.max(1, Math.floor((clientX - r.left) / cellW) + 1));
+  const row = Math.min(term.rows, Math.max(1, Math.floor((clientY - r.top) / cellH) + 1));
+  send({ type: "input", data: `\x1b[<0;${col};${row}M` });
+  send({ type: "input", data: `\x1b[<0;${col};${row}m` });
+}
+term.textarea?.addEventListener("blur", () => {
+  keyboardOn = false;
+  kbBtn.classList.remove("on");
+});
+
+function setStatus(text, ok) {
+  statusEl.textContent = text;
+  statusEl.style.color = ok ? "#7ec98f" : "#8a6a4a";
+}
+
+/* ---------- 列表视图 ---------- */
+async function refreshList() {
+  try {
+    const res = await fetch(`/api/sessions${query}`, { cache: "no-store" });
+    const data = await res.json();
+    const cards = $("cards");
+    cards.innerHTML = "";
+    for (const s of data.sessions || []) {
+      const card = document.createElement("div");
+      card.className = "card";
+      const dot = s.attached ? '<span class="dot on"></span>' : '<span class="dot"></span>';
+      card.innerHTML = `<div><div class="name">${escapeHtml(s.name)}</div><div class="meta">${s.windows} 窗口 · ${escapeHtml(s.created)}</div></div>${dot}<span class="go">进入 →</span>`;
+      card.addEventListener("click", () => { location.hash = `#/t/${encodeURIComponent(s.name)}`; });
+      cards.appendChild(card);
+    }
+    if ((data.sessions || []).length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "hint";
+      empty.textContent = "当前没有在跑的 pi 会话：在本机终端运行 pi 即会出现。";
+      cards.appendChild(empty);
+    }
+  } catch (e) { /* 网络抖动时保留旧列表 */ }
+}
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+
+/* 会话创建只在本机 pi 命令侧，手机端仅浏览与进入 */
+
+/* ---------- 终端视图 ---------- */
+function send(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+
+function syncSize() {
+  try { fit.fit(); } catch (e) { /* 容器不可见时忽略 */ }
+  if (term.cols !== lastSent.cols || term.rows !== lastSent.rows) {
+    lastSent = { cols: term.cols, rows: term.rows };
+    send({ type: "resize", cols: term.cols, rows: term.rows });
+  }
+}
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const name = encodeURIComponent(currentSession);
+  ws = new WebSocket(`${proto}://${location.host}/ws?session=${name}${query ? "&" + query.slice(1) : ""}`);
+  ws.onopen = () => { setStatus(currentSession, true); focusIfOn(); syncSize(); };
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    if (msg.type === "output") term.write(msg.data);
+    else if (msg.type === "hello") {
+      // 首次测量时字体/布局可能未稳定，多次校准确保宽度正确；
+      // hello 代表 server 消息通道就绪，重置 lastSent 强制重发当前尺寸，
+      // 修复“首次 resize 在 server 就绪前发送被本地去重跳过”的竞态。
+      lastSent = { cols: 0, rows: 0 };
+      syncSize();
+      setTimeout(() => { if (currentSession) { lastSent = { cols: 0, rows: 0 }; syncSize(); } }, 120);
+      setTimeout(() => { if (currentSession) { lastSent = { cols: 0, rows: 0 }; syncSize(); } }, 450);
+    }
+  };
+  ws.onclose = async () => {
+    // 区分会话结束与网络抖动：会话仍在则自动重连，否则回到列表
+    try {
+      const res = await fetch(`/api/sessions${query}`, { cache: "no-store" });
+      const data = await res.json();
+      const alive = (data.sessions || []).some((s) => s.name === currentSession);
+      if (!alive) { location.hash = "#/"; return; }
+    } catch (e) { /* 查询失败走默认重连 */ }
+    setStatus("重连中…", false);
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connect, 1200);
+  };
+  ws.onerror = () => { try { ws.close(); } catch (e) {} };
+}
+
+term.onData((d) => {
+  // copy-mode 下终端输入不再进入 pi 编辑器；任意可见输入自动退出滚屏态保持状态同步
+  if (scrollArmed && d.length === 1 && d >= " ") setScrollArmed(false);
+  if (ctrlArmed && d.length === 1) {
+    const code = d.toUpperCase().charCodeAt(0);
+    if (code >= 64 && code <= 95) {
+      send({ type: "input", data: String.fromCharCode(code & 0x1f) });
+      ctrlArmed = false;
+      ctrlBtn.classList.remove("on");
+      return;
+    }
+  }
+  send({ type: "input", data: d });
+});
+
+const KEYMAP = {
+  esc: "\x1b", tab: "\t", ctrlc: "\x03",
+  up: "\x1b[A", down: "\x1b[B", right: "\x1b[C", left: "\x1b[D",
+  enter: "\r", pgup: "\x1b[5~", pgdn: "\x1b[6~",
+};
+let scrollArmed = false;
+const scrollBtn = $("scroll");
+function setScrollArmed(on) {
+  scrollArmed = on;
+  scrollBtn.classList.toggle("on", on);
+}
+$("keys").addEventListener("click", (ev) => {
+  const key = ev.target && ev.target.dataset ? ev.target.dataset.key : null;
+  if (!key) return;
+  if (key === "ctrl") {
+    ctrlArmed = !ctrlArmed;
+    ctrlBtn.classList.toggle("on", ctrlArmed);
+    focusIfOn();
+    return;
+  }
+  if (key === "scrollmode") {
+    // 进入/退出 tmux copy-mode（C-b [），方向键与 PgUp/PgDn 滚动历史，Esc/q 退出
+    if (scrollArmed) { setScrollArmed(false); send({ type: "input", data: "q" }); }
+    else { setScrollArmed(true); send({ type: "input", data: "\x02[" }); }
+    focusIfOn();
+    return;
+  }
+  const data = KEYMAP[key];
+  if (data) { send({ type: "input", data }); focusIfOn(); }
+});
+
+$("back-btn").addEventListener("click", () => { location.hash = "#/"; });
+
+// ⋯ 展开低频键（滚屏/翻页/左右/Enter）
+$("more").addEventListener("click", () => {
+  document.getElementById("keys2").classList.toggle("show");
+  focusIfOn();
+});
+
+/* ---------- 触屏滑动 → SGR 滚轮序列 ----------
+   移动浏览器不产生 wheel 事件；翻译成 \x1b[<64/65;col;rowM（SGR mouse wheel）
+   发给 tmux：上滑自动进 copy-mode 滚动，滑到底自动退出，状态由 tmux 管理。 */
+(() => {
+  const WHEEL_STEP = 18; // 每滑约一行高触发一次滚轮（tmux 已重绑为逐行滚动）
+  let lastY = null;
+  let carry = 0;
+  const host = document.getElementById("term-wrap");
+  host.addEventListener("touchstart", (e) => {
+    if (e.touches.length === 1) {
+      lastY = e.touches[0].clientY;
+      carry = 0;
+    }
+  }, { passive: false });
+  host.addEventListener("touchmove", (e) => {
+    if (lastY === null || e.touches.length !== 1) return;
+    e.preventDefault(); // 阻止浏览器接管为页面滚动
+    const y = e.touches[0].clientY;
+    carry += y - lastY; // 手机自然方向：手指下划看历史（wheel up），上划回最新（wheel down）
+    lastY = y;
+    while (Math.abs(carry) >= WHEEL_STEP) {
+      if (carry > 0) send({ type: "input", data: "\x1b[<64;1;1M" }); // wheel up
+      else send({ type: "input", data: "\x1b[<65;1;1M" }); // wheel down
+      carry += carry > 0 ? -WHEEL_STEP : WHEEL_STEP;
+    }
+  }, { passive: false });
+  host.addEventListener("touchend", () => {
+    lastY = null;
+  }, { passive: true });
+})();
+
+new ResizeObserver(() => { if (currentSession) syncSize(); }).observe(termWrap);
+if (window.visualViewport) window.visualViewport.addEventListener("resize", () => { if (currentSession) syncSize(); });
+window.addEventListener("resize", () => { if (currentSession) syncSize(); });
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { if (currentSession) syncSize(); });
+
+/* ---------- 路由 ---------- */
+let listTimer = null;
+const BUILD = "__BUILD__"; // server 启动时注入，用于排查浏览器缓存
+function route() {
+  const match = location.hash.match(/^#\/t\/(.+)$/);
+  const nextSession = match ? decodeURIComponent(match[1]) : null;
+  if (listTimer) { clearInterval(listTimer); listTimer = null; }
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if (ws) { try { ws.onclose = null; ws.close(); } catch (e) {} ws = null; }
+  if (nextSession) {
+    currentSession = nextSession;
+    listEl.style.display = "none";
+    termWrap.style.display = "";
+    $("bar").style.display = "";
+    $("back-btn").style.display = "";
+    term.reset();
+    setStatus("连接中…", false);
+    connect();
+  } else {
+    currentSession = null;
+    listEl.style.display = "block"; // CSS 默认 none，必须显式置 block
+    termWrap.style.display = "none";
+    $("bar").style.display = "none";
+    $("back-btn").style.display = "none";
+    $("hint").textContent = `本机接入同一会话：tmux attach -t <名字> · 页面版本 ${BUILD} · ${location.host}`;
+    refreshList();
+    listTimer = setInterval(refreshList, 3000);
+  }
+}
+window.addEventListener("hashchange", route);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && currentSession && (!ws || ws.readyState !== WebSocket.OPEN)) connect();
+  if (!document.hidden && !currentSession) refreshList();
+});
+route();
+</script>
+</body>
+</html>
