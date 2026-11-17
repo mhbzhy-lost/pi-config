@@ -19,8 +19,10 @@ import {
   BACKPRESSURE_CHECK_MS,
   BACKPRESSURE_HIGH_BYTES,
   CLOSE_AGENT_TOKEN_INVALID,
+  CLOSE_PROTOCOL_VERSION_INVALID,
   HEARTBEAT_TIMEOUT_MS,
   MAX_WS_MESSAGE_BYTES,
+  PROTOCOL_VERSION,
   RECONNECT_MAX_MS,
   RECONNECT_MIN_MS,
   is192168,
@@ -319,7 +321,7 @@ export async function runAgent(root: string, settingsPath: string): Promise<void
       lastPingAt = Date.now();
       void (async () => {
         const lan = await pickLanInfo(webPort, webToken);
-        sendUp({ type: "hello", lan, hostname: hostname().slice(0, 64) });
+        sendUp({ type: "hello", lan, hostname: hostname().slice(0, 64), version: PROTOCOL_VERSION });
         await clearStalePending(root).catch(() => {});
         await diffDevices(false);
         await writeStatus(dir, "connected", lastHeartbeat);
@@ -346,9 +348,11 @@ export async function runAgent(root: string, settingsPath: string): Promise<void
     });
     ws.on("close", (code) => {
       if (control === ws) control = null;
-      if (code === CLOSE_AGENT_TOKEN_INVALID) {
+      if (code === CLOSE_AGENT_TOKEN_INVALID || code === CLOSE_PROTOCOL_VERSION_INVALID) {
         stopped = true;
-        log("agentToken 与中继不一致，请核对 settings.local.json 与 ECS init 输出");
+        log(code === CLOSE_AGENT_TOKEN_INVALID
+          ? "agentToken 与中继不一致，请核对 settings.local.json 与 ECS init 输出"
+          : "协议版本与中继不匹配：请升级 pi-relay-server 依赖或中继到对应 tag");
         void writeStatus(dir, "stopped", lastHeartbeat).then(() => process.exit(1));
         return;
       }
