@@ -41,6 +41,11 @@ fi
 # 根 package-lock 统一安装 Pi Host 与第三方扩展，不再创建 Pi-managed npm 树。
 export PI_HOST_ROOT="$SCRIPT_DIR/node_modules/@earendil-works/pi-coding-agent"
 NPM_CONFIG_REGISTRY="$NPM_REGISTRY" npm_config_cache="$SCRIPT_DIR/var/tmp/npm-cache" npm --no-audit --no-fund --prefix "$SCRIPT_DIR" ci --ignore-scripts
+# pi-relay-server git 依赖的 prepare（tsc）被 --ignore-scripts 跳过：显式编译 protocol dist，
+# 否则本仓 agent 的 import "pi-relay-server/protocol" 因缺 dist 失败。
+if [ -d "$SCRIPT_DIR/node_modules/pi-relay-server" ] && [ ! -f "$SCRIPT_DIR/node_modules/pi-relay-server/dist/protocol.js" ]; then
+  "$SCRIPT_DIR/node_modules/.bin/tsc" -p "$SCRIPT_DIR/node_modules/pi-relay-server/tsconfig.build.json"
+fi
 pi_binary="$PI_HOST_ROOT/dist/cli.js"
 export PI_REAL_BIN="$pi_binary"
 export PI_PACKAGE_DIR="$PI_HOST_ROOT"
