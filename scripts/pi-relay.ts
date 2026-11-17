@@ -4,7 +4,7 @@
  * 实现全部在 src/pi-relay/；ensure 的任何失败都降级为中文告警（exit 0），绝不阻断 pi()。
  */
 import { createHash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { request as httpsRequest } from "node:https";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -54,6 +54,8 @@ async function fetchCa(): Promise<void> {
     throw new Error("CA 指纹与 webRelay.caFingerprint 不一致：拒绝保存（请核对 ECS init 输出，谨防中间人）");
   }
   const file = path.join(relayDir(root), "root-ca.crt");
+  // 新克隆环境 var/pi-relay/ 尚不存在（gitignored）：先建目录，否则 writeFile ENOENT
+  await mkdir(relayDir(root), { recursive: true });
   await writeFile(file, pem.endsWith("\n") ? pem : `${pem}\n`, { mode: 0o600 });
   console.log(`CA 已校验并保存：${file}`);
 }
