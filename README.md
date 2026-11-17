@@ -4,7 +4,7 @@ Pi Coding Agent 的独立配置。仓库内 `pi/` 是配置根。
 
 ## 初始化
 
-需要 Git、Node.js 22.19 或更高版本、npm、zsh 和 uv。
+需要 Git、Node.js 22.19 或更高版本、npm、zsh 和 uv。tmux 是 pi-web 局域网共享的运行时依赖，缺失时初始化脚本会经 Homebrew 自动安装（无 brew 时需手动安装）。
 
 ```bash
 ./init-pi.sh

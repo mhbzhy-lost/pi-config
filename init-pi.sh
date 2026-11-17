@@ -19,6 +19,17 @@ for required_command in git node npm zsh uv; do
   require_command "$required_command"
 done
 
+# tmux 是 pi-web 局域网共享的运行时依赖；缺失时经 Homebrew 安装，无 brew 则显式失败。
+if ! command -v tmux >/dev/null 2>&1; then
+  if command -v brew >/dev/null 2>&1; then
+    printf '[pi-web] tmux 未安装，正在经 Homebrew 安装（brew install tmux）…\n'
+    brew install tmux
+  else
+    printf 'missing required command: tmux（pi-web 依赖；请安装 Homebrew 后重跑，或手动安装 tmux）\n' >&2
+    exit 1
+  fi
+fi
+
 node_version="$(node -p 'process.versions.node')"
 IFS=. read -r node_major node_minor node_patch <<< "$node_version"
 if (( node_major < 22 || (node_major == 22 && node_minor < 19) )); then
