@@ -1,6 +1,11 @@
 {
   "hideThinkingBlock": true,
   "cacheWarming": "streaming",
+  "retry": {
+    "provider": {
+      "maxRetries": 2
+    }
+  },
   "packages": [
     "../node_modules/@arhen/pi-core-ask",
     "../node_modules/@snowy117/pi-dcp"
