@@ -15,9 +15,19 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { sha256Hex } from "./protocol.ts";
 import { loadWebSettings, type WebSettings } from "./config.ts";
-import { readDevices, readPending, relayDir } from "./devices.ts";
+import { audit, readDevices, readPending, relayDir } from "./devices.ts";
 
 const execFileAsync = promisify(execFile);
+
+/** 调用方描述（父进程 cmdline，best-effort）：生命周期审计用，定位谁触发了 ensure/stop */
+async function callerDesc(): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("ps", ["-p", String(process.ppid), "-o", "command="], { encoding: "utf8" });
+    return `ppid=${process.ppid} cmd=${stdout.trim().slice(0, 120)}`;
+  } catch {
+    return `ppid=${process.ppid}`;
+  }
+}
 
 type WebState = { pid: number; port: number; host: string; tokenFingerprint: string; trustLoopback: boolean };
 
@@ -111,11 +121,12 @@ async function findWebListener(port: number): Promise<{ pid: number; ours: boole
   }
 }
 
-/** 停止进程：先 SIGTERM，组杀仅当 pgid==pid；3s 未退则 SIGKILL */
-async function stopPid(pid: number): Promise<void> {
+/** 停止进程：先 SIGTERM，组杀仅当 pgid==pid；3s 未退则 SIGKILL；停止动作与升级均入审计 */
+async function stopPid(root: string, pid: number, label: string): Promise<void> {
   if (!pidAlive(pid)) return;
   const pgid = await pgidOf(pid);
   const target = pgid === pid ? -pid : pid;
+  await audit(root, `stop ${label} pid=${pid} signal=SIGTERM group=${pgid === pid} caller=${await callerDesc()}`);
   try {
     process.kill(target, "SIGTERM");
   } catch {
@@ -126,6 +137,7 @@ async function stopPid(pid: number): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   if (pidAlive(pid)) {
+    await audit(root, `stop ${label} pid=${pid} escalate=SIGKILL（3s 未退）`);
     try {
       process.kill(target, "SIGKILL");
     } catch {
@@ -137,10 +149,10 @@ async function stopPid(pid: number): Promise<void> {
 async function stopWeb(root: string, port: number): Promise<void> {
   const state = await readJson<WebState>(webStatePath(root));
   if (state && pidAlive(state.pid) && isWebCmdline(await cmdline(state.pid))) {
-    await stopPid(state.pid);
+    await stopPid(root, state.pid, "web");
   } else {
     const listener = await findWebListener(port);
-    if (listener?.ours) await stopPid(listener.pid);
+    if (listener?.ours) await stopPid(root, listener.pid, "web-legacy");
     else if (listener) throw new Error(`端口 ${port} 被陌生进程占用（pid=${listener.pid}），请手动处理后重试`);
   }
   await unlink(webPidPath(root)).catch(() => {});
@@ -151,7 +163,7 @@ async function stopAgent(root: string): Promise<void> {
   const raw = await readText(agentPidPath(root));
   const pid = raw ? Number.parseInt(raw.trim(), 10) : NaN;
   if (Number.isInteger(pid) && pidAlive(pid) && isAgentCmdline(await cmdline(pid))) {
-    await stopPid(pid);
+    await stopPid(root, pid, "agent");
   }
   await unlink(agentPidPath(root)).catch(() => {});
 }
@@ -293,6 +305,8 @@ export async function ensureWeb(root: string, settingsPath: string): Promise<Ens
   const settings: WebSettings = await loadWebSettings(settingsPath);
   const port = Number.parseInt(process.env.PI_WEB_PORT ?? "7681", 10) || 7681;
   const messages: string[] = [];
+  // 生命周期审计：记录配置路径与三态判定（ENOENT 会归为 off），供进程异常停止时溯源
+  await audit(root, `ensure exposure=${settings.exposure} settings=${settingsPath} caller=${await callerDesc()}`);
 
   return withEnsureLock(root, async () => {
     const prevState = await readJson<{ exposure: string; webPid: number | null; agentPid: number | null }>(path.join(relayDir(root), "ensure-state.json"));
@@ -337,7 +351,7 @@ export async function ensureWeb(root: string, settingsPath: string): Promise<Ens
     if (currentPid !== null) {
       desired.pid = currentPid;
       if (!(await webMatches(root, desired))) {
-        await stopPid(currentPid);
+        await stopPid(root, currentPid, "web-restart");
         await unlink(webStatePath(root)).catch(() => {});
         webPid = await startWeb(root, port, host, token, trustLoopback);
       }
@@ -382,6 +396,7 @@ export async function ensureWeb(root: string, settingsPath: string): Promise<Ens
 /** 停止本机 web + agent 并清理状态 */
 export async function stopAll(root: string): Promise<void> {
   const port = Number.parseInt(process.env.PI_WEB_PORT ?? "7681", 10) || 7681;
+  await audit(root, `stop-all caller=${await callerDesc()}`);
   await withEnsureLock(root, async () => {
     await stopWeb(root, port);
     await stopAgent(root);
