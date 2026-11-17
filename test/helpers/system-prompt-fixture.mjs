@@ -384,7 +384,10 @@ function shallowFiles(root) {
 /** AST 解析的自有生产源码扩展名（production 自有 TS/JS）。 */
 const SOURCE_EXTENSIONS = new Set([".ts", ".mts", ".cts", ".js", ".mjs", ".cjs", ".jsx", ".tsx"]);
 /** 只做字面探针的非源码文本（launcher / 配置），不做 AST 判类。 */
-const TEXT_PROBE_EXTENSIONS = new Set([".zsh", ".sh", ".bash", ".json", ".yaml", ".yml", ".txt"]);
+// .html/.md：浏览器 UI 模板与 feature 文档（如 pi-web/public/index.html、pi-relay/README.md）
+// 属非源码文本，走字面探针；skill-loader skills 与 */docs/ 已在 isProgressiveToolDocumentation 先行豁免。
+// 792f493 引入 pi-web 时漏判 .html 导致存量扫描 fail closed，此处补齐显式归类。
+const TEXT_PROBE_EXTENSIONS = new Set([".zsh", ".sh", ".bash", ".json", ".yaml", ".yml", ".txt", ".html", ".md"]);
 
 /** 默认禁止的完整替换标识符：写入与读取都不允许出现在自有生产代码里。 */
 const BANNED_OVERRIDE_NAMES = ["customPrompt", "forceSystemPrompt", "systemPromptOverride"];
