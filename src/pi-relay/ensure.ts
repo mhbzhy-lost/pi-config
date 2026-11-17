@@ -13,7 +13,7 @@ import { request as httpRequest } from "node:http";
 import { networkInterfaces } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { sha256Hex } from "./protocol.ts";
+import { sha256Hex } from "pi-relay-server/protocol";
 import { loadWebSettings, type WebSettings } from "./config.ts";
 import { audit, readDevices, readPending, relayDir } from "./devices.ts";
 

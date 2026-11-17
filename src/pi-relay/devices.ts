@@ -6,7 +6,7 @@
  */
 import { mkdir, open, readFile, rename, unlink, writeFile, appendFile } from "node:fs/promises";
 import path from "node:path";
-import { PAIR_TTL_MS } from "./protocol.ts";
+import { PAIR_TTL_MS } from "pi-relay-server/protocol";
 
 export type DeviceRecord = {
   id: string;

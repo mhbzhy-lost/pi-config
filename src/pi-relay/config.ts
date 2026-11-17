@@ -3,7 +3,7 @@
  * scripts/pi-local-settings.ts 与 ensure/agent 共用，保持「未知/非法字段即 fail」语义。
  */
 import { readFile } from "node:fs/promises";
-import { normalizeFingerprint } from "./protocol.ts";
+import { normalizeFingerprint } from "pi-relay-server/protocol";
 
 export type WebExposure = "off" | "lan" | "public";
 

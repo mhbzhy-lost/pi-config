@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * pi-relay 本机薄 CLI：ensure/status/stop/bundle/fetch-ca/devices/approve/deny/revoke。
+ * pi-relay 本机薄 CLI：ensure/status/stop/fetch-ca/devices/approve/deny/revoke。
  * 实现全部在 src/pi-relay/；ensure 的任何失败都降级为中文告警（exit 0），绝不阻断 pi()。
  */
 import { createHash } from "node:crypto";
@@ -8,18 +8,17 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { request as httpsRequest } from "node:https";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { normalizeFingerprint } from "../src/pi-relay/protocol.ts";
+import { normalizeFingerprint } from "pi-relay-server/protocol";
 import { loadWebSettings } from "../src/pi-relay/config.ts";
 import { approveByCode, denyByCode, readDevices, readLastSeen, readPending, relayDir, revokeById } from "../src/pi-relay/devices.ts";
 import { ensureWeb, statusReport, stopAll } from "../src/pi-relay/ensure.ts";
-import { buildBundle } from "../src/pi-relay/bundle.ts";
 import { runAgent } from "../src/pi-relay/agent.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const settingsPath = process.env.PI_LOCAL_SETTINGS_PATH ?? path.join(root, "pi", "settings.local.json");
 
 function usage(): never {
-  console.error("用法：node scripts/pi-relay.ts <ensure|status|stop|bundle|fetch-ca|devices|approve <配对码> [--name 名称]|deny <配对码>|revoke <设备id>>");
+  console.error("用法：node scripts/pi-relay.ts <ensure|status|stop|fetch-ca|devices|approve <配对码> [--name 名称]|deny <配对码>|revoke <设备id>>");
   process.exit(1);
 }
 
@@ -102,9 +101,6 @@ try {
     case "stop":
       await stopAll(root);
       console.log("已停止本机 pi-web 与 pi-relay agent。");
-      break;
-    case "bundle":
-      console.log(`部署包已生成：${await buildBundle(root)}`);
       break;
     case "fetch-ca":
       await fetchCa();

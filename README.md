@@ -25,7 +25,7 @@ source ~/.zshrc
 
 ## pi-web 与 pi-relay 远程控制
 
-`pi` 经 tmux 共享会话，pi-web 提供手机浏览器终端（xterm.js attach tmux）。外部控制由 `pi/settings.local.json` 的 `webExposure` 三态开关管理：缺失/`off` 不启用（默认），`lan` 局域网共享，`public` 经自有 ECS 中继公网访问（涵盖 lan）。公网链路为 Codex 同款拓扑：本机出站 WSS 常连接 → ECS 字节透明中继 → 手机，家里零入站端口、数据面无 SSH 隧道；手机首连配对需本机 `node scripts/pi-relay.ts approve <配对码>` 批准，可信设备列表维护在本机，吊销即时切断。支持多台 Mac 接入同一中继：手机单入口看全部在线主机的拍平会话列表，逐主机批准/吊销，同网段会话点击即局域网直连；新 Mac 用 `node scripts/pi-relay-join.ts` 交互式接入。凭据注入、ECS 部署、多主机接入、手机 CA 信任与安全边界见 `src/pi-relay/README.md`。
+`pi` 经 tmux 共享会话，pi-web 提供手机浏览器终端（xterm.js attach tmux）。外部控制由 `pi/settings.local.json` 的 `webExposure` 三态开关管理：缺失/`off` 不启用（默认），`lan` 局域网共享，`public` 经自有 ECS 中继公网访问（涵盖 lan）。公网链路为 Codex 同款拓扑：本机出站 WSS 常连接 → ECS 字节透明中继 → 手机，家里零入站端口、数据面无 SSH 隧道；手机首连配对需本机 `node scripts/pi-relay.ts approve <配对码>` 批准，可信设备列表维护在本机，吊销即时切断。支持多台 Mac 接入同一中继：手机单入口看全部在线主机的拍平会话列表，逐主机批准/吊销，同网段会话点击即局域网直连；新 Mac 用 `node scripts/pi-relay-join.ts` 交互式接入。凭据注入、多主机接入、手机 CA 信任与安全边界见 `src/pi-relay/README.md`；中继服务端为独立仓库 `pi-relay-server`（ECS git 部署、state 迁移、协议事实源），本仓经 pinned tag git 依赖消费其 protocol。
 
 ## 最小 Subagent
 

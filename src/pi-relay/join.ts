@@ -114,7 +114,7 @@ async function joinFlow(root: string): Promise<void> {
     if (!pem || !existsSync(pem)) fail(`私钥文件不存在：${pem || "(空)"}`);
     const port = await ask("ssh 端口", "22");
     if (!/^[0-9]{1,5}$/.test(port)) fail("ssh 端口必须是数字");
-    const remote = await ask("远端注入材料路径（相对登录家目录）", "pi-relay/init-output-agent2.txt");
+    const remote = await ask("远端注入材料路径（相对登录家目录）", "pi-relay-server/init-output-agent2.txt");
     if (!/^[A-Za-z0-9_./-]+$/.test(remote)) fail("远端路径只允许字母/数字/_-./（防 shell 注入）");
     const base = path.posix.basename(remote);
     // 仅文件读取；先按给定路径 cat，失败再 find 兜底（登录用户家目录可能与文件属主不同）

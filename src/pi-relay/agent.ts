@@ -29,7 +29,7 @@ import {
   type LanInfo,
   type SessionBrief,
   type UpMessage,
-} from "./protocol.ts";
+} from "pi-relay-server/protocol";
 import { loadWebSettings } from "./config.ts";
 import { addPending, clearStalePending, readDevices, readPending, relayDir, writeLastSeen } from "./devices.ts";
 
