@@ -46,15 +46,19 @@ ECS 侧 `init` 生成并打印注入材料，用户粘贴进本机 `pi/settings.
 
 单入口直接看到**全部在线 Mac 的拍平会话列表**（每条带主机名徽章，离线主机灰显），点哪条进哪条，无需先选主机。
 
-接入新 Mac：
+接入新 Mac（推荐交互式一条龙）：
 
 ```bash
 # ECS 侧（经 skill 包装器或手工）：新增 agent，保留 CA/既有 agent
 node scripts/pi-relay-server.ts init --add-agent --label mac-b
 # 重启中继进程（配置 start 时加载一次，不热加载）
-# 新 Mac：把打印的注入 JSON 写入其 pi/settings.local.json（url/CA 指纹与既有相同，仅 agentToken 不同）
-node scripts/pi-relay.ts fetch-ca && node scripts/pi-relay.ts ensure
+# 新 Mac 上（仓库根目录，交互式终端）：
+node scripts/pi-relay-join.ts
 ```
+
+join 工具引导完成：git pull（可跳过）→ 注入材料取回（ssh 从 ECS 读文件，或手工粘贴 JSON）→ 校验并合并进本机 pi/settings.local.json（保留已有字段，agentToken 不回显，写入 0600）→ fetch-ca → ensure → status。ssh 仅文件读取，绝不使用端口转发；取回失败可改手工粘贴。
+
+手工等价步骤：把 init 打印的注入 JSON 写入新 Mac 的 pi/settings.local.json（url/CA 指纹与既有相同，仅 agentToken 不同），然后 `node scripts/pi-relay.ts fetch-ca && node scripts/pi-relay.ts ensure`。
 
 - CA 相同：手机无需再装证书；已批准手机（含旧版 v1 Cookie）免重新配对（v1 自动映射到迁移 id host-1）。
 - 配对：多主机在线时 /pair 出主机选择页（批准权威在各 Mac，必须知道在哪台核对配对码）；批准后凭据合并进同一个 Cookie（同源单 Cookie，按主机键控，≤16 台）。
