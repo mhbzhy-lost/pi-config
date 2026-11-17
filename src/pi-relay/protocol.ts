@@ -7,18 +7,23 @@ import { createHash, timingSafeEqual } from "node:crypto";
 /** agent 上报的局域网直连信息（仅 192.168.0.0/16，默认路由网卡优选后） */
 export type LanInfo = { host: string; port: number; token: string };
 
+/** pi-web /api/sessions 的会话条目形状（agent 透传，中继最小校验后拍平合并） */
+export type SessionBrief = { name: string; windows: number; created: string; attached: boolean };
+
 /** 中继 → agent 下行控制消息 */
 export type DownMessage =
   | { type: "open"; channel: string }
   | { type: "auth"; req: string; id: string; secretHash: string }
   | { type: "pair-request"; id: string; code: string; ua: string; ip: string; secretHash: string }
-  | { type: "pair-check"; req: string; id: string };
+  | { type: "pair-check"; req: string; id: string }
+  | { type: "list-sessions"; req: string };
 
 /** agent → 中继上行控制消息（device-revoked 由 agent 检测吊销后推送） */
 export type UpMessage =
-  | { type: "hello"; lan: LanInfo | null }
+  | { type: "hello"; lan: LanInfo | null; hostname?: string }
   | { type: "auth-result"; req: string; allow: boolean; name?: string }
   | { type: "pair-check-result"; req: string; status: "approved" | "denied" | "pending" }
+  | { type: "sessions-result"; req: string; sessions: SessionBrief[] }
   | { type: "device-revoked"; id: string };
 
 export type ControlMessage = DownMessage | UpMessage;
@@ -38,6 +43,9 @@ export const RECONNECT_MAX_MS = 15_000;
 // ---- 通道限额 ----
 export const MAX_DATA_CHANNELS = 32;
 export const MAX_PENDING_CHANNELS = 16;
+/** 多 agent 全局通道上限（防总量失控，单 agent 限额另计） */
+export const MAX_GLOBAL_DATA_CHANNELS = 64;
+export const MAX_GLOBAL_PENDING_CHANNELS = 64;
 export const CHANNEL_TTL_MS = 10_000;
 export const CHANNEL_IDLE_MS = 120_000;
 export const MAX_WS_MESSAGE_BYTES = 4 * 1024 * 1024;
@@ -53,6 +61,12 @@ export const PAIR_TTL_MS = 10 * 60_000;
 export const PAIR_MAX_GLOBAL = 8;
 export const PAIR_MAX_PER_IP_PER_MIN = 5;
 export const AUTH_FAIL_MAX_PER_IP_PER_MIN = 10;
+
+// ---- 多主机 ----
+/** server-config agents 上限（也是 Cookie 映射上限） */
+export const MAX_AGENTS = 16;
+/** 旧单 agentToken 配置迁移后的固定 id（v1 Cookie 兼容映射依赖它） */
+export const LEGACY_AGENT_ID = "host-1";
 
 // ---- 背压 ----
 export const BACKPRESSURE_HIGH_BYTES = 1024 * 1024;

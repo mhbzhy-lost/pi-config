@@ -9,8 +9,9 @@ import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { watch as fsWatch } from "node:fs";
+import { get as httpGet } from "node:http";
 import { connect, type Socket } from "node:net";
-import { networkInterfaces } from "node:os";
+import { hostname, networkInterfaces } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { WebSocket } from "ws";
@@ -26,6 +27,7 @@ import {
   safeEqualHex,
   type DownMessage,
   type LanInfo,
+  type SessionBrief,
   type UpMessage,
 } from "./protocol.ts";
 import { loadWebSettings } from "./config.ts";
@@ -72,8 +74,49 @@ async function writeStatus(dir: string, state: string, lastHeartbeat: string | n
   await writeFile(path.join(dir, "agent-status.json"), `${JSON.stringify({ state, since: new Date().toISOString(), lastHeartbeat }, null, 2)}\n`, { mode: 0o600 });
 }
 
-/** TCP→WS / WS→TCP 双向背压 pipe（与中继侧同策略） */
-function pipePair(socket: Socket, ws: WebSocket): void {
+/** 经回环 HTTP 消费 pi-web /api/sessions（跨 feature 只走公开 HTTP API，不 import 实现）；4s 超时 destroy */
+function fetchSessions(webPort: number): Promise<SessionBrief[]> {
+  return new Promise((resolve) => {
+    const req = httpGet({ host: "127.0.0.1", port: webPort, path: "/api/sessions", timeout: 4_000 }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (c: Buffer) => chunks.push(c));
+      res.on("end", () => {
+        try {
+          const data = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { sessions?: unknown };
+          resolve(Array.isArray(data.sessions) ? data.sessions.filter(isSessionBrief) : []);
+        } catch {
+          resolve([]);
+        }
+      });
+      res.on("error", () => resolve([]));
+    });
+    req.on("timeout", () => req.destroy());
+    req.on("error", () => resolve([]));
+  });
+}
+
+function isSessionBrief(s: unknown): s is SessionBrief {
+  if (!s || typeof s !== "object") return false;
+  const o = s as Record<string, unknown>;
+  return typeof o.name === "string" && typeof o.windows === "number" && typeof o.created === "string" && typeof o.attached === "boolean";
+}
+
+/** 非 upgrade 请求的首块头部注入 Connection: close：
+ * 中继按连接路由，浏览器 keep-alive 复用会让后续 /api/sessions 绕过中继拦截直达单台 pi-web；
+ * 令 pi-web 响应后关 TCP → 数据通道成对关闭 → 浏览器每请求新建连接，逐请求路由才成立。
+ * WS upgrade 请求不改（Connection: Upgrade 语义必须保留）。首块必含完整头部（中继缓冲至 \r\n\r\n 后才转发）。 */
+function forceConnectionClose(chunk: Buffer): Buffer {
+  const idx = chunk.indexOf("\r\n\r\n");
+  if (idx < 0) return chunk;
+  let header = chunk.subarray(0, idx).toString("latin1");
+  if (/^upgrade:/im.test(header)) return chunk;
+  header = header.replace(/^connection:[^\r\n]*\r\n/gim, "");
+  header += "\r\nConnection: close";
+  return Buffer.concat([Buffer.from(header, "latin1"), chunk.subarray(idx)]);
+}
+
+/** TCP→WS / WS→TCP 双向背压 pipe（与中继侧同策略）；transformFirst 仅对首个 WS 消息生效 */
+function pipePair(socket: Socket, ws: WebSocket, transformFirst: boolean): void {
   let checkTimer: NodeJS.Timeout | null = null;
   socket.on("data", (chunk: Buffer) => {
     if (ws.readyState !== ws.OPEN) {
@@ -93,22 +136,49 @@ function pipePair(socket: Socket, ws: WebSocket): void {
     }
   });
   ws.on("message", (data: Buffer) => {
+    if (socketClosed || socket.destroyed) return;
+    if (transformFirst) {
+      data = forceConnectionClose(data);
+      transformFirst = false;
+    }
     if (!socket.write(data)) ws.pause();
   });
   socket.on("drain", () => ws.resume());
-  const cleanup = (): void => {
+  // 方向性清理：pi-web 侧先关（Connection: close 响应完毕）必须等 WS 缓冲字节 flush 后
+  // 优雅 close，否则 terminate 丢弃未发送帧 → 浏览器 chunked 响应截断；
+  // WS 侧先关意味着浏览器已断开，直接销毁本地 socket。
+  let socketClosed = false;
+  const drainThenCloseWs = (): void => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    if (ws.bufferedAmount > 0) {
+      setTimeout(drainThenCloseWs, BACKPRESSURE_CHECK_MS);
+      return;
+    }
+    try {
+      ws.close(1000);
+    } catch {
+      // 忽略
+    }
+  };
+  socket.on("close", () => {
+    socketClosed = true;
     if (checkTimer) clearInterval(checkTimer);
-    socket.destroy();
+    drainThenCloseWs();
+  });
+  socket.on("error", () => {
+    socketClosed = true;
+    if (checkTimer) clearInterval(checkTimer);
     try {
       ws.terminate();
     } catch {
       // 忽略
     }
-  };
-  socket.on("close", cleanup);
-  socket.on("error", cleanup);
-  ws.on("close", cleanup);
-  ws.on("error", cleanup);
+  });
+  ws.on("close", () => {
+    if (checkTimer) clearInterval(checkTimer);
+    socket.destroy();
+  });
+  ws.on("error", () => socket.destroy());
 }
 
 export async function runAgent(root: string, settingsPath: string): Promise<void> {
@@ -174,8 +244,10 @@ export async function runAgent(root: string, settingsPath: string): Promise<void
       socket = connect({ host: "127.0.0.1", port: webPort });
       socket.on("connect", () => {
         ws.removeListener("message", onEarly);
+        const hadEarly = early.length > 0;
+        if (hadEarly) early[0] = forceConnectionClose(early[0]!);
         for (const chunk of early.splice(0)) socket!.write(chunk);
-        pipePair(socket!, ws);
+        pipePair(socket!, ws, !hadEarly);
       });
       socket.on("error", () => {
         try {
@@ -210,6 +282,9 @@ export async function runAgent(root: string, settingsPath: string): Promise<void
       sendUp({ type: "pair-check-result", req: msg.req, status });
     } else if (msg.type === "open") {
       openDataChannel(msg.channel);
+    } else if (msg.type === "list-sessions") {
+      const sessions = await fetchSessions(webPort);
+      sendUp({ type: "sessions-result", req: msg.req, sessions });
     }
   };
 
@@ -244,7 +319,7 @@ export async function runAgent(root: string, settingsPath: string): Promise<void
       lastPingAt = Date.now();
       void (async () => {
         const lan = await pickLanInfo(webPort, webToken);
-        sendUp({ type: "hello", lan });
+        sendUp({ type: "hello", lan, hostname: hostname().slice(0, 64) });
         await clearStalePending(root).catch(() => {});
         await diffDevices(false);
         await writeStatus(dir, "connected", lastHeartbeat);

@@ -3,12 +3,13 @@
 利用自有阿里云 ECS（仅公网 IP、无域名）作中继，让手机在公网安全访问本机 pi 会话。拓扑与 Codex/Claude Code 的远程控制同款：**本机出站加密长连接 → 云端中继 → 手机客户端**，家里不开任何入站端口；数据面不使用 SSH 隧道（内网穿透不合规）。
 
 ```
-手机浏览器 ──HTTPS/WSS(TLS，默认443可自定义)──▶ ECS 中继（server.ts，字节透明反向代理）
-   │ 首连 /pair 配对页 + 6 位码          │ 设备鉴权/配对状态经控制连接往返本机
-   │ 批准后 HttpOnly Secure Cookie       │
-                                       ▲ 出站 WSS（pinned CA）
-本机 agent（agent.ts）──TCP──▶ 127.0.0.1:7681 pi-web
-   │ 可信设备列表权威：var/pi-relay/devices.json（仅 CLI 写）
+手机浏览器 ──HTTPS/WSS(TLS，默认443可自定义)──▶ ECS 中继（server.ts，字节透明反向代理，多 agent）
+   │ 首连 /pair 配对页 + 6 位码          │ 设备鉴权/配对/会话列表经控制连接往返对应 Mac
+   │ 批准后 HttpOnly Secure Cookie       │ /api/sessions 拍平合并全部获批在线主机
+Mac-A agent ──出站 WSS（pinned CA）──▶   │
+Mac-B agent ──出站 WSS（pinned CA）──▶   ▼
+   各 Mac：agent（agent.ts）──TCP──▶ 127.0.0.1:7681 pi-web
+   │ 可信设备列表权威：各 Mac 本机 var/pi-relay/devices.json（仅 CLI 写）
 ```
 
 ## 三态开关（pi/settings.local.json，gitignored）
@@ -41,6 +42,29 @@ ECS 侧 `init` 生成并打印注入材料，用户粘贴进本机 `pi/settings.
 - 内部 LAN `web-token` 由 ensure 自动生成（`var/pi-relay/web-token`，0600），用户无需感知；`status` 可显示含 token 的局域网直连 URL。
 - 设备凭据（Cookie 中的 secret）由中继配对时生成，本机只存 SHA256 哈希，中继不落盘。
 
+## 多主机：多台 Mac 共用一个手机入口
+
+单入口直接看到**全部在线 Mac 的拍平会话列表**（每条带主机名徽章，离线主机灰显），点哪条进哪条，无需先选主机。
+
+接入新 Mac：
+
+```bash
+# ECS 侧（经 skill 包装器或手工）：新增 agent，保留 CA/既有 agent
+node scripts/pi-relay-server.ts init --add-agent --label mac-b
+# 重启中继进程（配置 start 时加载一次，不热加载）
+# 新 Mac：把打印的注入 JSON 写入其 pi/settings.local.json（url/CA 指纹与既有相同，仅 agentToken 不同）
+node scripts/pi-relay.ts fetch-ca && node scripts/pi-relay.ts ensure
+```
+
+- CA 相同：手机无需再装证书；已批准手机（含旧版 v1 Cookie）免重新配对（v1 自动映射到迁移 id host-1）。
+- 配对：多主机在线时 /pair 出主机选择页（批准权威在各 Mac，必须知道在哪台核对配对码）；批准后凭据合并进同一个 Cookie（同源单 Cookie，按主机键控，≤16 台）。
+- 吊销按 Mac 独立生效：revoke 只切断该 Mac 的通道与访问，不波及其他主机；单 host 鉴权失败不计全局限流。
+- 逐会话 LAN 直连：点同网段（192.168）Mac 的会话时整页跳转其局域网地址（token/会话自动携带）；异网段会话走中继。多主机在线时根导航不再 redirect（保留聚合视图）；仅单主机在线且同网段时保留旧 redirect。
+- **CGNAT 误判逃生**：访问 `https://<IP>:<端口>/?stay=1` → 所有会话强制走中继（s.lan 全部置空）。
+- 各 Mac 建议保持仓库同版本（页面/静态资源按配置顺序取第一个获批在线 agent，版本漂移可能不一致）。
+- 主机名暴露面：/pair 选择页与 /relay-status 对未鉴权请求可见主机名/在线态（无会话名）；私有部署可接受。
+- 回滚注记：v2 Cookie 对旧版中继不可解析，旧二进制读不了 agents 数组配置；回滚需恢复旧 server-config（单 agentToken）且手机重新配对。
+
 ## ECS 部署
 
 部署 bundle 不含任何凭据（证书/token 均在 ECS 侧生成）：
@@ -57,10 +81,11 @@ ECS 前置：Node ≥ 22.19（nodejs.org 官方二进制）、系统 openssl/tar
 
 ```bash
 # ECS 侧（解包后）
-node scripts/pi-relay-server.ts init --ip <ECS公网IP> [--port <端口>]  # 生成 CA/叶证书/agentToken，打印注入材料
+node scripts/pi-relay-server.ts init --ip <ECS公网IP> [--port <端口>]  # 生成 CA/叶证书/首个 agent，打印注入材料
+node scripts/pi-relay-server.ts init --add-agent [--label <名>]        # 新增一台 Mac 的 agent（保留 CA/既有），重启中继生效
 node scripts/pi-relay-server.ts start                     # 前台运行
 node scripts/pi-relay-server.ts renew-cert                # 叶证书续签（398 天，保留 CA，手机无需重新信任）
-node scripts/pi-relay-server.ts init --rotate-tokens      # 仅轮换 agentToken（保留 CA），本机同步更新注入值
+node scripts/pi-relay-server.ts init --rotate-tokens      # 轮换全部 agent token（保留 CA/id）；重启中继后逐台 Mac 更新注入值
 ```
 
 守护方式二选一：
@@ -119,7 +144,7 @@ public 模式下，已批准设备经公网入口访问时，若中继检测到�
 
 - 仅 `192.168.x.x` 触发；`10.x`/`172.x` 企业网段一律走公网链路。
 - `/api/*`、`/ws`、静态资源永不重定向。
-- `?stay=1` 强制留在公网入口（CGNAT 共享出口误判时的逃生门）。
+- `?stay=1` 强制留在公网入口（CGNAT 共享出口误判时的逃生门）；多主机下同时使聚合列表所有 s.lan=null，逐会话直连也被抑制。
 
 ## 回环豁免边界（pi-web）
 

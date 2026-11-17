@@ -125,7 +125,8 @@ const $ = (id) => document.getElementById(id);
 const statusEl = $("status"), ctrlBtn = $("ctrl"), listEl = $("list"), termWrap = $("term-wrap");
 const query = location.search; // 透传 ?token=
 let ws = null, ctrlArmed = false, lastSent = { cols: 0, rows: 0 }, reconnectTimer = null;
-let currentSession = null;
+let currentSession = null, currentHost = null;
+const hostNames = {}; // agentId → 主机名（最近一次列表缓存，状态栏用）
 
 /* ---------- 键盘模式：默认浏览态不拉软键盘；点底部输入区或 ⌨ 才激活 ---------- */
 let keyboardOn = false;
@@ -198,22 +199,48 @@ function setStatus(text, ok) {
 async function refreshList() {
   try {
     const res = await fetch(`/api/sessions${query}`, { cache: "no-store" });
+    if (res.status === 401) { location.replace("/pair" + query); return; } // 吊销/未批准：不滞留旧卡片
     const data = await res.json();
     const cards = $("cards");
     cards.innerHTML = "";
     for (const s of data.sessions || []) {
+      if (s.host) hostNames[s.host] = s.hostName || s.host;
       const card = document.createElement("div");
       card.className = "card";
       const dot = s.attached ? '<span class="dot on"></span>' : '<span class="dot"></span>';
-      card.innerHTML = `<div><div class="name">${escapeHtml(s.name)}</div><div class="meta">${s.windows} 窗口 · ${escapeHtml(s.created)}</div></div>${dot}<span class="go">进入 →</span>`;
-      card.addEventListener("click", () => { location.hash = `#/t/${encodeURIComponent(s.name)}`; });
+      const hostBadge = s.hostName ? `<span class="meta">[${escapeHtml(s.hostName)}]</span> ` : "";
+      card.innerHTML = `<div><div class="name">${escapeHtml(s.name)}</div><div class="meta">${hostBadge}${s.windows} 窗口 · ${escapeHtml(s.created)}</div></div>${dot}<span class="go">进入 →</span>`;
+      card.addEventListener("click", () => {
+        if (s.lan) {
+          // 同局域网 Mac：整页跳转 LAN origin（token 在 query、会话在 hash），
+          // 规避 https 聚合页内 ws:// 混合内容拦截；浏览器返回键回聚合页
+          location.href = s.lan + "#/t/" + encodeURIComponent(s.name);
+        } else {
+          location.hash = "#/t/" + (s.host ? encodeURIComponent(s.host) + "/" : "") + encodeURIComponent(s.name);
+        }
+      });
       cards.appendChild(card);
     }
-    if ((data.sessions || []).length === 0) {
+    // 离线主机灰显（仅中继聚合视图）
+    for (const h of data.hosts || []) {
+      if (h.online) continue;
+      const card = document.createElement("div");
+      card.className = "card";
+      card.style.opacity = "0.45";
+      card.innerHTML = `<div><div class="name">${escapeHtml(h.name)}</div><div class="meta">离线</div></div><span class="dot"></span>`;
+      cards.appendChild(card);
+    }
+    if ((data.sessions || []).length === 0 && (data.hosts || []).length === 0) {
       const empty = document.createElement("p");
       empty.className = "hint";
       empty.textContent = "当前没有在跑的 pi 会话：在本机终端运行 pi 即会出现。";
       cards.appendChild(empty);
+    }
+    if (data.relay) {
+      const add = document.createElement("p");
+      add.className = "hint";
+      add.innerHTML = '添加主机：<a href="/pair" style="color:#4a6a95">/pair</a>（在新主机上批准本设备）';
+      cards.appendChild(add);
     }
   } catch (e) { /* 网络抖动时保留旧列表 */ }
 }
@@ -240,8 +267,9 @@ function syncSize() {
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const name = encodeURIComponent(currentSession);
-  ws = new WebSocket(`${proto}://${location.host}/ws?session=${name}${query ? "&" + query.slice(1) : ""}`);
-  ws.onopen = () => { setStatus(currentSession, true); focusIfOn(); syncSize(); };
+  const hostPart = currentHost ? `&host=${encodeURIComponent(currentHost)}` : "";
+  ws = new WebSocket(`${proto}://${location.host}/ws?session=${name}${hostPart}${query ? "&" + query.slice(1) : ""}`);
+  ws.onopen = () => { setStatus(currentHost ? `${hostNames[currentHost] || currentHost} · ${currentSession}` : currentSession, true); focusIfOn(); syncSize(); };
   ws.onmessage = (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch (e) { return; }
@@ -260,8 +288,9 @@ function connect() {
     // 区分会话结束与网络抖动：会话仍在则自动重连，否则回到列表
     try {
       const res = await fetch(`/api/sessions${query}`, { cache: "no-store" });
+      if (res.status === 401) { location.replace("/pair" + query); return; }
       const data = await res.json();
-      const alive = (data.sessions || []).some((s) => s.name === currentSession);
+      const alive = (data.sessions || []).some((s) => s.name === currentSession && (!currentHost || s.host === currentHost || !s.host));
       if (!alive) { location.hash = "#/"; return; }
     } catch (e) { /* 查询失败走默认重连 */ }
     setStatus("重连中…", false);
@@ -365,11 +394,14 @@ if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { if
 let listTimer = null;
 const BUILD = "__BUILD__"; // server 启动时注入，用于排查浏览器缓存
 function route() {
-  const match = location.hash.match(/^#\/t\/(.+)$/);
-  const nextSession = match ? decodeURIComponent(match[1]) : null;
+  // 双格式：#/t/<host>/<session>（中继聚合视图）与 #/t/<session>（LAN 落地页/单主机旧书签）
+  const match = location.hash.match(/^#\/t(?:\/([0-9a-f]{8}|host-1))?\/(.+)$/);
+  const nextHost = match && match[1] ? decodeURIComponent(match[1]) : null;
+  const nextSession = match ? decodeURIComponent(match[2]) : null;
   if (listTimer) { clearInterval(listTimer); listTimer = null; }
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   if (ws) { try { ws.onclose = null; ws.close(); } catch (e) {} ws = null; }
+  currentHost = nextHost;
   if (nextSession) {
     currentSession = nextSession;
     listEl.style.display = "none";
