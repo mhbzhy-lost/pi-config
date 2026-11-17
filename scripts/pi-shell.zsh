@@ -12,26 +12,22 @@ _pi_config_invoke() {
   "$_PI_CONFIG_ROOT/scripts/pi-launcher.zsh" "$@"
 }
 
-# ---- pi-web 局域网共享：tmux 包裹 + server 自启 ----
+# ---- pi-web / pi-relay 外部控制：三态 ensure（off/lan/public，见 src/pi-relay/）----
 typeset -g _PI_WEB_PORT="${PI_WEB_PORT:-7681}"
 
-# 探活 pi-web server；未跑则后台拉起（端口被占时 server 启动失败自退，天然幂等）。
-# 可选 PI_WEB_TOKEN 环境变量作为访问令牌。
+# 调 node ensure 状态机：按 settings.local.json 的 webExposure 决定停/局域网/公网中继。
+# 每个 shell 首次 pi() 必跑完整 ensure（识别/接管存量旧 nohup web）；
+# 配置文件不存在且本 shell 已完成过一次 ensure 时走快路径。失败不阻断 pi()。
 _pi_ensure_web_server() {
-  command -v curl >/dev/null 2>&1 || return 0
   command -v node >/dev/null 2>&1 || return 0
-  if curl -fsS -m 1 "http://127.0.0.1:${_PI_WEB_PORT}/api/sessions" >/dev/null 2>&1; then
+  local settings="${PI_LOCAL_SETTINGS_PATH:-$_PI_CONFIG_ROOT/pi/settings.local.json}"
+  if [[ ! -f "$settings" && "${_PI_RELAY_ENSURED:-}" == "1" ]]; then
     return 0
   fi
-  local -a token_args=()
-  [[ -n "${PI_WEB_TOKEN:-}" ]] && token_args=(--token "$PI_WEB_TOKEN")
-  nohup node "${_PI_CONFIG_ROOT}/scripts/pi-web.ts" --port "${_PI_WEB_PORT}" "${token_args[@]}" \
-    >>"${TMPDIR:-/tmp}/pi-web-server.log" 2>&1 &!
-  local ip
-  ip="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)"
-  if [[ -n "$ip" ]]; then
-    print -P "%F{cyan}pi-web 已自动启动，手机访问 http://${ip}:${_PI_WEB_PORT}%f"
-  fi
+  PI_LOCAL_SETTINGS_PATH="$settings" PI_WEB_PORT="${_PI_WEB_PORT}" \
+    node "${_PI_CONFIG_ROOT}/scripts/pi-relay.ts" ensure || true
+  typeset -g _PI_RELAY_ENSURED=1
+  return 0
 }
 
 # tmux 全局 TUI 调优（幂等）：Esc 低延迟、真彩色、修饰键穿透（pi 官方 tmux 建议）
@@ -75,17 +71,19 @@ pi() {
     _pi_config_invoke --tui-mode fullscreen "$@"
     return
   fi
+  # ensure 必须在 TMUX 早退分支之前：tmux 内发起的 pi() 同样触发三态状态机（切 off 才能停进程）
+  _pi_ensure_web_server
   # 已在 tmux 内：维持原路径（此会话本身就能被手机经 pi-web 列表接入）
   if [[ -n "${TMUX:-}" ]]; then
     _pi_config_invoke --tui-mode fullscreen "$@"
     return
   fi
-  # tmux 不可用时降级为原路径
+  # tmux 不可用时降级为原路径，并给出可见提示（pi-web 共享依赖 tmux）
   if ! command -v tmux >/dev/null 2>&1; then
+    print -P "%F{yellow}tmux 未安装，pi-web 局域网共享不可用；安装后重开终端即可：brew install tmux%f"
     _pi_config_invoke --tui-mode fullscreen "$@"
     return
   fi
-  _pi_ensure_web_server
   _pi_tmux_tune
   local cols rows name
   cols="${COLUMNS:-$(tput cols 2>/dev/null)}"

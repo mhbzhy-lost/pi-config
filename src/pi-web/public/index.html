@@ -5,7 +5,30 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>pi · 局域网终端</title>
-<link rel="stylesheet" href="/xterm.css">
+<script>
+// 静态资源 URL 动态附加当前 query（?token=…）：lan+token / public 局域网直连路径
+// 依赖此通过 pi-web 的 token 门禁；公网中继路径 location.search 为空亦正常。
+(function () {
+  var q = location.search;
+  var css = document.createElement("link");
+  css.rel = "stylesheet";
+  css.href = "/xterm.css" + q;
+  document.head.appendChild(css);
+  var pending = 2;
+  function done() {
+    pending -= 1;
+    if (pending === 0) window.dispatchEvent(new Event("pi:assets-ready"));
+  }
+  ["/xterm.js", "/xterm-fit.js"].forEach(function (src) {
+    var s = document.createElement("script");
+    s.src = src + q;
+    s.async = false; // 保证两个脚本按插入顺序执行
+    s.onload = done;
+    s.onerror = done; // 加载失败时主逻辑因 Terminal 检查不通过而不启动，避免半初始化
+    document.head.appendChild(s);
+  });
+})();
+</script>
 <style>
   html, body { margin: 0; height: 100%; background: #101014; color: #d8d8e0; overscroll-behavior: none; }
   #app { display: flex; flex-direction: column; height: 100%; }
@@ -83,9 +106,8 @@
     <span id="status"></span>
   </div>
 </div>
-<script src="/xterm.js"></script>
-<script src="/xterm-fit.js"></script>
 <script>
+function __piMain() {
 "use strict";
 const term = new Terminal({
   fontSize: 13,
@@ -374,6 +396,11 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden && !currentSession) refreshList();
 });
 route();
+}
+// 资源引导脚本（head）保证 xterm.js/xterm-fit.js 先于主逻辑执行：
+// 已就绪则直接运行，否则等待 pi:assets-ready（动态 script 不阻塞后续内联脚本，必须门控）
+if (window.Terminal && window.FitAddon) __piMain();
+else window.addEventListener("pi:assets-ready", __piMain, { once: true });
 </script>
 </body>
 </html>

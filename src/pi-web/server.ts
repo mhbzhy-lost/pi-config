@@ -199,10 +199,19 @@ export async function startPiWebServer(opts: PiWebOptions): Promise<{ server: Se
   };
 
   const wss = new WebSocketServer({ noServer: true });
-  const checkToken = (url: URL): boolean => !opts.token || url.searchParams.get("token") === opts.token;
+  // 条件回环豁免：仅 pi-relay public 模式由 ensure 设置 PI_WEB_TRUST_LOOPBACK=1。
+  // 中继流量经本机 agent 从 127.0.0.1 进入，设备鉴权已在边缘完成；
+  // 非回环（局域网直连）token 门禁不变，lan/off 模式语义与现状完全一致。
+  const trustLoopback = process.env.PI_WEB_TRUST_LOOPBACK === "1";
+  const isLoopback = (req: IncomingMessage): boolean => {
+    const addr = req.socket.remoteAddress ?? "";
+    return addr === "127.0.0.1" || addr === "::1" || addr === "::ffff:127.0.0.1";
+  };
+  const checkToken = (url: URL, req: IncomingMessage): boolean =>
+    (trustLoopback && isLoopback(req)) || !opts.token || url.searchParams.get("token") === opts.token;
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? "/", "http://localhost");
-    if (!checkToken(url)) {
+    if (!checkToken(url, req)) {
       res.writeHead(401, { "content-type": "text/plain; charset=utf-8" });
       res.end("令牌无效：请在 URL 上携带 ?token=...");
       return;
@@ -225,7 +234,7 @@ export async function startPiWebServer(opts: PiWebOptions): Promise<{ server: Se
   const livePties = new Set<pty.IPty>();
   server.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url ?? "/", "http://localhost");
-    if (url.pathname !== "/ws" || !checkToken(url)) {
+    if (url.pathname !== "/ws" || !checkToken(url, req)) {
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
       socket.destroy();
       return;

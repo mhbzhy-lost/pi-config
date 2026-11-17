@@ -13,7 +13,7 @@ source ~/.zshrc
 
 初始化使用 npm 官方源，在仓库内安装 Pi 1.5.2 和 Basic Memory，合并本机设置，并运行 doctor 与类型检查。模型和认证保存在 Git 忽略的 `pi/models.json`、`pi/auth.json`；本机模型选择和启动偏好保存在 Git 忽略的 `pi/settings.local.json`。
 
-`pi/settings.local.json` 可从 `pi/settings.local.example.json` 复制，支持 `packages`、`enabledModels`、`defaultProvider`、`defaultModel`、`defaultThinkingLevel` 和 `theme`。本机 package 路径（例如 `../../.r2c/integrations/pi-adapter`）只能写在这里；默认 launcher 会把它们转换为本次启动的 `--extension` 参数。显式命令行参数优先。未设置 `theme` 时 Pi 使用 `system`，会根据终端的明暗外观自动选择主题。
+`pi/settings.local.json` 可从 `pi/settings.local.example.json` 复制，支持 `packages`、`enabledModels`、`defaultProvider`、`defaultModel`、`defaultThinkingLevel`、`theme`、`webExposure` 和 `webRelay`。本机 package 路径（例如 `../../.r2c/integrations/pi-adapter`）只能写在这里；默认 launcher 会把它们转换为本次启动的 `--extension` 参数。显式命令行参数优先。未设置 `theme` 时 Pi 使用 `system`，会根据终端的明暗外观自动选择主题。
 
 根 `package.json` 和 `package-lock.json` 统一管理 Pi Host、本仓依赖与第三方扩展，由根 `npm ci --ignore-scripts` 安装到 `node_modules/`。Pi 只加载扩展，不再由初始化脚本调用 `pi install npm:…` 创建 `pi/npm/`。
 
@@ -22,6 +22,10 @@ source ~/.zshrc
 启动入口只保留 `pi` 和 `pi-lite`；`pi` 使用完整配置，`pi-lite` 使用精简只读环境，并显式提供 deferred `search`/`browser` 工具与 `tool_search`。
 
 扩展代码统一位于 `src/<feature>/`：`<feature>.ts` 只负责宿主接线，具体实现与它同目录；加载列表由 `pi/settings.template.json` 的 `extensions` 显式声明，已有安装运行 `node scripts/ensure-pi-settings.ts` 同步。本机额外扩展在 `pi/settings.json` 中显式声明；`pi/extensions/` 不再放本仓扩展代码。
+
+## pi-web 与 pi-relay 远程控制
+
+`pi` 经 tmux 共享会话，pi-web 提供手机浏览器终端（xterm.js attach tmux）。外部控制由 `pi/settings.local.json` 的 `webExposure` 三态开关管理：缺失/`off` 不启用（默认），`lan` 局域网共享，`public` 经自有 ECS 中继公网访问（涵盖 lan）。公网链路为 Codex 同款拓扑：本机出站 WSS 常连接 → ECS 字节透明中继 → 手机，家里零入站端口、数据面无 SSH 隧道；手机首连配对需本机 `node scripts/pi-relay.ts approve <配对码>` 批准，可信设备列表维护在本机，吊销即时切断。凭据注入、ECS 部署、手机 CA 信任与安全边界见 `src/pi-relay/README.md`。
 
 ## 最小 Subagent
 

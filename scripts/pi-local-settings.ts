@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import { access, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { validateWebSettings } from "../src/pi-relay/config.ts";
 
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-const LOCAL_FIELDS = new Set(["enabledModels", "defaultProvider", "defaultModel", "defaultThinkingLevel", "theme", "packages"]);
+const LOCAL_FIELDS = new Set(["enabledModels", "defaultProvider", "defaultModel", "defaultThinkingLevel", "theme", "packages", "webExposure", "webRelay"]);
 
 type LocalSettings = {
   enabledModels?: unknown;
@@ -12,6 +13,8 @@ type LocalSettings = {
   defaultThinkingLevel?: unknown;
   theme?: unknown;
   packages?: unknown;
+  webExposure?: unknown;
+  webRelay?: unknown;
 };
 
 function fail(message: string): never {
@@ -45,6 +48,8 @@ export async function localSettingsArgs(settings: LocalSettings, cliArgs: readon
   if (packages !== undefined && (!Array.isArray(packages) || packages.some((value) => typeof value !== "string" || value.length === 0 || /[\r\n\0]/.test(value)))) fail("packages 必须是字符串数组");
   if (thinking && !THINKING_LEVELS.has(thinking)) fail(`defaultThinkingLevel 无效：${thinking}`);
   if (provider && !model) fail("设置 defaultProvider 时必须同时设置 defaultModel");
+  // web 两键：同等深度校验（事实源 src/pi-relay/config.ts），不生成任何 pi CLI 参数
+  validateWebSettings(settings);
 
   const result: string[] = [];
   for (const packagePath of (packages as string[] | undefined) ?? []) {
