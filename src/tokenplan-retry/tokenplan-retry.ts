@@ -33,20 +33,32 @@ function is429Result(result: unknown): boolean {
     || contains429(message.errorMessage);
 }
 
-async function collectAttempt(model: any, context: any, options: any): Promise<{ events: any[]; result: any }> {
-  const stream = streamSimpleOpenAICompletions(model, context, options);
-  const events: any[] = [];
-  for await (const event of stream) events.push(event);
-  return { events, result: await stream.result() };
+// 429 拒答只可能出现在「还没有任何内容」的阶段。因此在产生首个内容事件之前先把事件
+// 暂存：确认不是 429 立刻按序转发，随后的增量事件继续直通，流式不受影响；若这一段以
+// 429 结束则整段丢弃并重试，不把已失效的 start/error 片段写给调用方。
+function gatesStream(event: any): boolean {
+  return event?.type === 'start' || event?.type === 'error';
 }
 
-function replay(events: any[], result: any) {
-  const output = createAssistantMessageEventStream();
-  queueMicrotask(() => {
-    for (const event of events) output.push(event);
-    output.end(result);
-  });
-  return output;
+async function forwardAttempt(model: any, context: any, options: any, output: any): Promise<{ result: any; retryable: boolean }> {
+  const stream = streamSimpleOpenAICompletions(model, context, options);
+  const buffered: any[] = [];
+  let committed = false;
+  for await (const event of stream) {
+    if (committed) {
+      output.push(event);
+      continue;
+    }
+    buffered.push(event);
+    if (gatesStream(event)) continue;
+    committed = true;
+    for (const pending of buffered) output.push(pending);
+    buffered.length = 0;
+  }
+  const result = await stream.result();
+  const retryable = !committed && is429Result(result);
+  if (!retryable) for (const pending of buffered) output.push(pending);
+  return { result, retryable };
 }
 
 export default function tokenPlanRetryExtension(pi: ExtensionAPI): void {
@@ -55,18 +67,18 @@ export default function tokenPlanRetryExtension(pi: ExtensionAPI): void {
     // "api" 是注册 streamSimple 的必填字段，同时决定 hook 只对该 api 的模型生效。
     api: 'openai-completions',
     streamSimple(model: any, context: any, options: any = {}) {
-      const run = async () => {
-        let attempt = await collectAttempt(model, context, options);
-        for (let retry = 0; retry < MAX_429_RETRIES && is429Result(attempt.result); retry += 1) {
-          if (options.signal?.aborted) break;
-          attempt = await collectAttempt(model, context, options);
-        }
-        return replay(attempt.events, attempt.result);
-      };
       const output = createAssistantMessageEventStream();
-      void run().then(async stream => {
-        for await (const event of stream) output.push(event);
-        output.end(await stream.result());
+      const run = async () => {
+        let result: any;
+        for (let retry = 0; ; retry += 1) {
+          const attempt = await forwardAttempt(model, context, options, output);
+          result = attempt.result;
+          if (!attempt.retryable || retry >= MAX_429_RETRIES || options.signal?.aborted) break;
+        }
+        return result;
+      };
+      void run().then((result) => {
+        output.end(result);
       }).catch(error => {
         output.end({
           role: 'assistant',
