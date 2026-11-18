@@ -29,9 +29,9 @@ source ~/.zshrc
 
 ## 最小 Subagent
 
-当前暴露五个 `pi-subagents` RPC facade：`subagent_spawn({ task })`、`subagent_status({ runId })`、`subagent_steer({ runId, message })`、`subagent_stop({ runId })` 和 `subagent_resume({ runId, message })`。child 固定使用 `pi/agents/executor.md` profile；工具面、system prompt、extensions 和 nested policy 均由该 Markdown 声明。
+当前暴露五个 `pi-subagents` RPC facade：`subagent_spawn({ agent, task })`、`subagent_status({ runId })`、`subagent_steer({ runId, message })`、`subagent_stop({ runId })` 和 `subagent_resume({ runId, message })`。`subagent_spawn.agent` 动态对应 `pi/agents/*.md` 中 `advertise: true` 的 profile；工具面、system prompt、extensions 和 nested policy 均由对应 Markdown 声明。
 
-接线层当前不暴露角色选择、工作区隔离、schedule 或 supervisor。`runId` 是上游返回的 async run 标识；控制工具只接受本接线层的 `runId` 和必要消息，不透传上游的其它定位字段。上游异步 runner 的生命周期与普通短命子进程不同，运行数据和 child session 会持久化。
+接线层当前不暴露工作区隔离、schedule 或 supervisor；角色通过 `subagent_spawn.agent` 选择。`runId` 是上游返回的 async run 标识；控制工具只接受本接线层的 `runId` 和必要消息，不透传上游的其它定位字段。上游异步 runner 的生命周期与普通短命子进程不同，运行数据和 child session 会持久化。
 
 ## TUI
 

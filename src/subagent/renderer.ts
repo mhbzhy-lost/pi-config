@@ -5,7 +5,6 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 import { formatStandardReceipt } from "../async-receipt/format.ts";
 import { resultStatus, setRenderStatus, statusGlyph, syncStatusAnimation, type CompactRenderStatus } from "../compact-tools/index.ts";
 
-const AGENT_NAME = "executor";
 const titlesByRunId = new Map<string, string>();
 const titlesByToolCallId = new Map<string, string>();
 
@@ -35,7 +34,7 @@ function rawText(message: any): string {
 }
 
 function completionReceipt(run: any) {
-  const agent = compact(run?.agent, AGENT_NAME);
+  const agent = compact(run?.agent, "unknown");
   const runId = run?.runId ?? run?.asyncId ?? run?.id;
   const title = compact(titlesByRunId.get(runId) ?? run?.taskInfo ?? run?.title ?? run?.task, "未命名任务");
   return formatStandardReceipt({
@@ -78,8 +77,8 @@ function rememberControlResult(args: any, result: any): void {
   if (title && resultRunId) titlesByRunId.set(resultRunId, title);
 }
 
-function line(name: string, title: string, extra: string, theme: any, status?: CompactRenderStatus): string {
-  return `${statusGlyph(theme, status)} ${theme.bold(name)} ${AGENT_NAME}${title ? ` ${title}` : ""}${extra}`;
+function line(name: string, agent: string, title: string, extra: string, theme: any, status?: CompactRenderStatus): string {
+  return `${statusGlyph(theme, status)} ${theme.bold(name)} ${agent}${title ? ` ${title}` : ""}${extra}`;
 }
 
 function renderTool(name: string, getExtra: (args: any, context: any) => string, remember?: (args: any, result: any, context: any) => void): any {
@@ -95,8 +94,9 @@ function renderTool(name: string, getExtra: (args: any, context: any) => string,
         const title = name === "subagent_spawn"
           ? compact(args?.title, "")
           : compact(titlesByRunId.get(args?.runId), "");
+        const agent = name === "subagent_spawn" ? compact(args?.agent, "unknown") : "subagent";
         const extra = getExtra(args, context);
-        return { render: () => [line(name, title, extra, theme, context?.state?.status)], invalidate() {} };
+        return { render: () => [line(name, agent, title, extra, theme, context?.state?.status)], invalidate() {} };
       },
       renderResult(result: any, options: any, theme: any, context: any) {
         if (remember) remember(context?.args, result, context);

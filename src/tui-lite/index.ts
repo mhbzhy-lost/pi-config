@@ -42,7 +42,7 @@ function displayCwd(cwd: string): string {
 }
 
 function agentIdentity(row: AsyncNode): string {
-  const name = row.agent || row.label || "executor";
+  const name = row.agent || row.label || "unknown";
   const title = row.title?.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
   return `${name} · ${title || "未命名任务"}`;
 }
@@ -68,16 +68,18 @@ function activityRows(runs: readonly AsyncNode[]): AsyncNode[] {
 function sessionHistory(ctx: ExtensionContext): AsyncNode[] {
   const runs = new Map<string, AsyncNode>();
   const titles = new Map<string, string | undefined>();
+  const agents = new Map<string, string | undefined>();
   for (const entry of ctx.sessionManager.getEntries()) {
     if (entry.type !== "message") continue;
     const message = entry.message;
     if (message.role === "assistant") {
       for (const part of message.content) {
         if (part.type !== "toolCall" || part.name !== "subagent_spawn") continue;
-        const args = part.arguments as { title?: unknown; task?: unknown };
+        const args = part.arguments as { agent?: unknown; title?: unknown; task?: unknown };
         const title = typeof args.title === "string" && args.title.trim() ? args.title
           : typeof args.task === "string" ? args.task.split(/\r?\n/).find(line => line.trim()) : undefined;
         titles.set(part.id, title);
+        agents.set(part.id, typeof args.agent === "string" && args.agent.trim() ? args.agent : undefined);
       }
       continue;
     }
@@ -85,7 +87,9 @@ function sessionHistory(ctx: ExtensionContext): AsyncNode[] {
     if (message.toolName !== "subagent_spawn" || message.isError) continue;
     const details = message.details as { asyncId?: unknown; runId?: unknown } | undefined;
     const id = details?.asyncId ?? details?.runId;
-    if (typeof id === "string" && id.length > 0) runs.set(id, { id, agent: "executor", title: titles.get(message.toolCallId), state: "history" });
+    if (typeof id === "string" && id.length > 0) {
+      runs.set(id, { id, agent: agents.get(message.toolCallId), title: titles.get(message.toolCallId), state: "history" });
+    }
   }
   return [...runs.values()];
 }
@@ -115,8 +119,8 @@ function createSubagentView(pi: ExtensionAPI, close: () => void, tui: TUI, getRu
       selectedId = row?.id;
       if (row) {
         const requestedId = row.id;
-        // 本仓 facade 每个 run 只有一个 executor；普通 status 可能没有顶层 sessionFile，
-        // 必须选中 child 0，使用上游 transcript 元数据中的实际子会话路径。
+        // 普通 status 可能没有顶层 sessionFile，必须选中 child 0，
+        // 使用上游 transcript 元数据中的实际子会话路径。
         const detail = await callRpc(pi, "status", { runId: row.id, view: "transcript", index: 0, lines: 1 });
         if (disposed || selectedId !== requestedId) return;
         if (!detail.success) throw new Error(`历史或运行详情不可用，任务记录保留（产物可能已清理）：${detail.error?.message ?? "查询失败"}`);

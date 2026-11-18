@@ -61,7 +61,7 @@ test("minimal extension registers prefixed subagent RPC tools plus supervisor re
     const spawnParams = session.getToolDefinition("subagent_spawn").parameters;
     assert.equal(spawnParams.properties.title.type, "string");
     assert.equal(spawnParams.properties.worktree.type, "boolean");
-    assert.deepEqual(spawnParams.required, ["task"]);
+    assert.deepEqual(spawnParams.required, ["agent", "task"]);
     for (const name of ["git_queue_inspect", "git_queue_status", "git_queue_enqueue"]) {
       assert.equal(session.getToolDefinition(name)?.exposure, "deferred", `${name} must be deferred`);
     }

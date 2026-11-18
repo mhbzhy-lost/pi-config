@@ -9,12 +9,10 @@ import { createGitIntegrationReceiptRenderer, GIT_INTEGRATION_MESSAGE } from "..
 
 const RPC_REQUEST = "subagents:rpc:v1:request";
 const RPC_REPLY = "subagents:rpc:v1:reply:";
-const AGENT_NAME = "executor";
 const MAX_TITLE_BYTES = 240;
 const MAX_TASK_BYTES = 32 * 1024;
 const MAX_MESSAGE_BYTES = 32 * 1024;
 const RPC_TIMEOUT_MS = 60_000;
-const AGENT_CATALOG_ALLOWLIST = new Set([AGENT_NAME]);
 const AGENT_CATALOG_ROOT = join(import.meta.dirname, "..", "..", "pi", "agents");
 
 type RpcReply = {
@@ -69,7 +67,7 @@ async function loadAdvertisedAgents(): Promise<readonly AdvertisedAgent[]> {
     try { fields = frontmatter(await readFile(path, "utf8")); } catch { continue; }
     const agentName = fields.get("name");
     const description = fields.get("description");
-    if (fields.get("advertise") !== "true" || !agentName || !description || !AGENT_CATALOG_ALLOWLIST.has(agentName)) continue;
+    if (fields.get("advertise") !== "true" || !agentName || !description) continue;
     const tools = fields.get("tools")?.split(",").map((tool) => tool.trim()).filter(Boolean);
     agents.push({ name: agentName, description, ...(tools?.length ? { tools } : {}) });
   }
@@ -197,9 +195,10 @@ export function createMinimalSubagentExtension(pi: ExtensionAPI): void {
     pi,
     "subagent_spawn",
     "spawn",
-    "异步派发一个 fresh context 的编码执行代理完成独立任务。用 title 概括任务目标，便于在面板中区分多个 executor。child 不继承本会话历史或项目上下文，可使用 read/write/edit/bash/grep/find/ls；只修改任务合同允许的范围。立即返回 runId，不阻塞等待结果；run 结束后会自动唤醒本会话送达结果，不要轮询 status 等待。task 必须自包含：child 看不到本会话历史与项目规范。后续用返回的 runId 调 status/steer/stop 管理。可选 model 指定 child 模型（provider/model[:thinking]），省略则继承父会话当前模型。",
-    toolParameters(["task"], {
-      title: { type: "string", minLength: 1, maxLength: 80, description: "用于面板显示的简短任务标题，概括具体目标，不要重复 executor 或角色说明" },
+    "异步派发一个 fresh context 的指定角色子代理完成独立任务。可选角色由 pi/agents/*.md 中 advertise: true 的 profile 自动发现。child 不继承父会话历史或项目上下文；只修改任务合同允许的范围。立即返回 runId，不阻塞等待结果；run 结束后会自动唤醒本会话送达结果，不要轮询 status 等待。task 必须自包含：child 看不到本会话历史与项目规范。后续用返回的 runId 调 status/steer/stop 管理。可选 model 指定 child 模型（provider/model[:thinking]），省略则继承父会话当前模型。",
+    toolParameters(["agent", "task"], {
+      agent: { type: "string", minLength: 1, maxLength: 80, description: "子代理角色名，必须对应 pi/agents/*.md 中 advertise: true 的 profile" },
+      title: { type: "string", minLength: 1, maxLength: 80, description: "用于面板显示的简短任务标题，概括具体目标，不要重复角色说明" },
       task: { type: "string", minLength: 1, maxLength: MAX_TASK_BYTES, description: "委派给子代理的完整任务描述，需自包含（child 无本会话上下文）" },
       worktree: { type: "boolean", description: "是否让 pi-subagents 为该 child 使用独立 Git worktree；仅在 Git repository 中有效" },
       model: { type: "string", minLength: 1, maxLength: 200, description: "可选：指定 child 使用的模型（provider/model 或 provider/model:thinking），省略时继承父会话当前模型" },
@@ -216,7 +215,7 @@ export function createMinimalSubagentExtension(pi: ExtensionAPI): void {
       const model = modelOverride ?? ctx.modelRef;
       // title 保留在父会话的原始工具参数中供 TUI 读取，不改写任务或上游执行回执。
       return {
-        agent: AGENT_NAME,
+        agent: stringInput(input, "agent", 80),
         task: stringInput(input, "task", MAX_TASK_BYTES),
         cwd: ctx.cwd,
         context: "fresh",
@@ -229,7 +228,8 @@ export function createMinimalSubagentExtension(pi: ExtensionAPI): void {
     {
       snippet: "异步派发编码执行代理完成独立任务；返回 runId，结果完成时自动唤醒本会话",
       guidelines: [
-        "为 subagent_spawn 提供简短明确的 title，说明任务目标，便于区分多个 executor。",
+        "为 subagent_spawn 指定 pi/agents/*.md 中已 advertise 的 agent 角色。",
+        "为 subagent_spawn 提供简短明确的 title，说明任务目标，便于区分不同角色。",
         "subagent_spawn 派发的 run 结束后会自动唤醒本会话；不要循环调用 subagent_status 轮询等待结果。",
         "subagent_spawn 的 task 必须自包含：child 是 fresh context，看不到本会话历史与项目规范。",
       ],
