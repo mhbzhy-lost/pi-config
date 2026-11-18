@@ -30,9 +30,10 @@
 })();
 </script>
 <style>
-  html, body { margin: 0; height: 100%; background: #101014; color: #d8d8e0; overscroll-behavior: none; }
-  #app { display: flex; flex-direction: column; height: 100%; }
-  #term-wrap { flex: 1; min-height: 0; padding: 4px 2px 0; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #101014; color: #d8d8e0; overscroll-behavior: none; }
+  /* 由视觉视口同步高度与偏移，软键盘开合时终端与工具栏始终位于可见区域内。 */
+  #app { position: fixed; top: 0; left: 0; width: 100%; display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+  #term-wrap { flex: 1; min-height: 0; padding: 4px 2px 0; overflow: hidden; }
   /* 列宽整数无法填满容器宽，居中让两侧余数对称，避免单侧黑条 */
   #term { height: 100%; display: flex; justify-content: center; touch-action: none; }
   #term > .xterm { height: 100%; }
@@ -54,7 +55,7 @@
   #back-btn { margin-right: 4px; } /* 显隐由 route() 控制 */
   /* 工具栏 */
   #bar {
-    display: flex; gap: 6px; align-items: center; justify-content: space-between;
+    display: flex; flex-shrink: 0; gap: 6px; align-items: center; justify-content: space-between;
     padding: 4px 6px calc(4px + env(safe-area-inset-bottom));
     background: #17171d; border-top: 1px solid #26262e;
   }
@@ -122,7 +123,7 @@ term.loadAddon(fit);
 term.open(document.getElementById("term"));
 
 const $ = (id) => document.getElementById(id);
-const statusEl = $("status"), ctrlBtn = $("ctrl"), listEl = $("list"), termWrap = $("term-wrap");
+const app = $("app"), statusEl = $("status"), ctrlBtn = $("ctrl"), listEl = $("list"), termWrap = $("term-wrap");
 const query = location.search; // 透传 ?token=
 let ws = null, ctrlArmed = false, lastSent = { cols: 0, rows: 0 }, reconnectTimer = null;
 let currentSession = null, currentHost = null;
@@ -135,44 +136,81 @@ function focusIfOn() { if (keyboardOn) term.focus(); }
 function setKeyboard(on) {
   keyboardOn = on;
   kbBtn.classList.toggle("on", on);
+  // 浏览态的原生触摸、兼容鼠标事件即使聚焦 textarea，也不能拉起软键盘。
+  if (term.textarea) {
+    term.textarea.readOnly = !on;
+    term.textarea.inputMode = on ? "text" : "none";
+  }
   if (on) term.focus();
-  else { try { term.blur(); } catch (e) {} }
+  else term.blur();
 }
 kbBtn.addEventListener("click", () => setKeyboard(!keyboardOn));
-// 拦截终端区域点击：浏览态下阻止 xterm 内部监听器拉起键盘（stopPropagation 必须在捕获阶段，
-// 否则 xterm 在内部元素上的 click/touchend 处理器仍会 focus）；点底部输入区才激活。
-const termHost = document.getElementById("term");
-// 记录触摸起点，用于区分点按（tap）与滑动（swipe）：滑动后的抬手不触发任何点击行为
-let tapOrigin = null;
-termHost.addEventListener("touchstart", (e) => {
-  tapOrigin = e.touches.length === 1 ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : null;
-}, { capture: true, passive: true });
-for (const type of ["mousedown", "touchend", "click"]) {
-  termHost.addEventListener(type, (e) => {
-    const y = type === "touchend" && e.changedTouches && e.changedTouches[0] ? e.changedTouches[0].clientY : e.clientY;
-    const x = type === "touchend" && e.changedTouches && e.changedTouches[0] ? e.changedTouches[0].clientX : e.clientX;
-    const r = termHost.getBoundingClientRect();
-    // 输入区判定收窄到底部 15%（约输入框+状态栏的行数），其上方如 jump-to-latest 等控件不被误触
-    const bottom = y > r.top + r.height * 0.85;
-    const isTap = type !== "touchend" || (tapOrigin !== null && Math.hypot(x - tapOrigin.x, y - tapOrigin.y) < 12);
-    if (keyboardOn) {
-      // 手机上收起软键盘不一定让 textarea 失焦，keyboardOn 可能卡在 true；
-      // 输入态下点上部视为“收起键盘去浏览”，点底部继续输入。
-      if (bottom || type === "click") return;
-      setKeyboard(false);
-      e.preventDefault();
-      e.stopPropagation();
-      return;
-    }
-    if (bottom && type !== "click" && isTap) { setKeyboard(true); }
-    else if (!bottom && type === "touchend" && isTap) {
-      // 浏览态点击透传给 pi（tmux mouse on 转发）：jump-to-latest、链接等控件可正常点按
-      forwardClick(x, y);
-    }
-    e.preventDefault();
-    e.stopPropagation();
-  }, { capture: true, passive: false });
+// 工具栏先抢焦点会触发 blur 清零，导致随后 click 无法正确关闭键盘。
+$("bar").addEventListener("mousedown", (e) => e.preventDefault());
+const termHost = $("term");
+function blockTerminalEvent(e) {
+  if (e.cancelable) e.preventDefault();
+  e.stopPropagation();
 }
+function tapTerminal(x, y) {
+  const r = termHost.getBoundingClientRect();
+  if (x < r.left || x > r.right || y < r.top || y > r.bottom) return;
+  // 输入区仍为底部 15%；上方控件由 SGR 点击转发给 Pi。
+  if (y > r.top + r.height * 0.85) {
+    const wasOn = keyboardOn;
+    setKeyboard(true);
+    if (wasOn) forwardClick(x, y);
+  } else if (keyboardOn) setKeyboard(false);
+  else forwardClick(x, y);
+}
+
+/* 点击判定和滚轮转换共用触点；滑动一旦成立，滑回起点也不再当作点击。 */
+const TAP_SLOP = 12, WHEEL_STEP = 18;
+let gesture = null;
+termHost.addEventListener("touchstart", (e) => {
+  blockTerminalEvent(e);
+  if (e.touches.length !== 1) { gesture = null; return; }
+  const t = e.touches[0];
+  gesture = { id: t.identifier, x: t.clientX, y: t.clientY, lastY: t.clientY, carry: 0, moved: false };
+}, { capture: true, passive: false });
+termHost.addEventListener("touchmove", (e) => {
+  blockTerminalEvent(e);
+  if (!gesture || e.touches.length !== 1 || e.touches[0].identifier !== gesture.id) {
+    gesture = null;
+    return;
+  }
+  const t = e.touches[0];
+  gesture.moved ||= Math.hypot(t.clientX - gesture.x, t.clientY - gesture.y) >= TAP_SLOP;
+  gesture.carry += t.clientY - gesture.lastY;
+  gesture.lastY = t.clientY;
+  if (!gesture.moved) return;
+  if (keyboardOn) setKeyboard(false);
+  // 手机自然方向：下划看历史，上划回最新；沿用 tmux 的 SGR 滚轮协议。
+  while (Math.abs(gesture.carry) >= WHEEL_STEP) {
+    const up = gesture.carry > 0;
+    send({ type: "input", data: up ? "\x1b[<64;1;1M" : "\x1b[<65;1;1M" });
+    gesture.carry += up ? -WHEEL_STEP : WHEEL_STEP;
+  }
+}, { capture: true, passive: false });
+termHost.addEventListener("touchend", (e) => {
+  blockTerminalEvent(e); // 同时阻止浏览器再合成一次鼠标点击。
+  const ended = gesture;
+  gesture = null;
+  if (!ended || ended.moved || e.touches.length !== 0) return;
+  const t = Array.from(e.changedTouches).find((t) => t.identifier === ended.id);
+  if (t && Math.hypot(t.clientX - ended.x, t.clientY - ended.y) < TAP_SLOP) tapTerminal(t.clientX, t.clientY);
+}, { capture: true, passive: false });
+termHost.addEventListener("touchcancel", (e) => {
+  gesture = null;
+  blockTerminalEvent(e);
+}, { capture: true, passive: false });
+termHost.addEventListener("mousedown", (e) => {
+  if (e.button !== 0) return;
+  blockTerminalEvent(e);
+  // 触摸只由 touchend 判定；兼容鼠标事件不能重新把滑动解释为点击。
+  if (!e.sourceCapabilities?.firesTouchEvents) tapTerminal(e.clientX, e.clientY);
+}, { capture: true });
+termHost.addEventListener("click", blockTerminalEvent, { capture: true });
 // 把像素坐标换算成单元格坐标，发送 SGR 左键点击序列（press+release）
 function forwardClick(clientX, clientY) {
   const screen = term.element?.querySelector(".xterm-screen");
@@ -185,10 +223,8 @@ function forwardClick(clientX, clientY) {
   send({ type: "input", data: `\x1b[<0;${col};${row}M` });
   send({ type: "input", data: `\x1b[<0;${col};${row}m` });
 }
-term.textarea?.addEventListener("blur", () => {
-  keyboardOn = false;
-  kbBtn.classList.remove("on");
-});
+term.textarea?.addEventListener("blur", () => setKeyboard(false));
+setKeyboard(false);
 
 function setStatus(text, ok) {
   statusEl.textContent = text;
@@ -257,6 +293,11 @@ function send(obj) {
 }
 
 function syncSize() {
+  // fit 必须测量实际可见区域；软键盘常只改变视觉视口，不改变布局视口。
+  const viewport = window.visualViewport;
+  app.style.height = `${viewport ? viewport.height : window.innerHeight}px`;
+  app.style.top = `${viewport ? viewport.offsetTop : 0}px`;
+  if (!currentSession) return;
   try { fit.fit(); } catch (e) { /* 容器不可见时忽略 */ }
   if (term.cols !== lastSent.cols || term.rows !== lastSent.rows) {
     lastSent = { cols: term.cols, rows: term.rows };
@@ -354,41 +395,19 @@ $("more").addEventListener("click", () => {
   focusIfOn();
 });
 
-/* ---------- 触屏滑动 → SGR 滚轮序列 ----------
-   移动浏览器不产生 wheel 事件；翻译成 \x1b[<64/65;col;rowM（SGR mouse wheel）
-   发给 tmux：上滑自动进 copy-mode 滚动，滑到底自动退出，状态由 tmux 管理。 */
-(() => {
-  const WHEEL_STEP = 18; // 每滑约一行高触发一次滚轮（tmux 已重绑为逐行滚动）
-  let lastY = null;
-  let carry = 0;
-  const host = document.getElementById("term-wrap");
-  host.addEventListener("touchstart", (e) => {
-    if (e.touches.length === 1) {
-      lastY = e.touches[0].clientY;
-      carry = 0;
-    }
-  }, { passive: false });
-  host.addEventListener("touchmove", (e) => {
-    if (lastY === null || e.touches.length !== 1) return;
-    e.preventDefault(); // 阻止浏览器接管为页面滚动
-    const y = e.touches[0].clientY;
-    carry += y - lastY; // 手机自然方向：手指下划看历史（wheel up），上划回最新（wheel down）
-    lastY = y;
-    while (Math.abs(carry) >= WHEEL_STEP) {
-      if (carry > 0) send({ type: "input", data: "\x1b[<64;1;1M" }); // wheel up
-      else send({ type: "input", data: "\x1b[<65;1;1M" }); // wheel down
-      carry += carry > 0 ? -WHEEL_STEP : WHEEL_STEP;
-    }
-  }, { passive: false });
-  host.addEventListener("touchend", () => {
-    lastY = null;
-  }, { passive: true });
-})();
-
-new ResizeObserver(() => { if (currentSession) syncSize(); }).observe(termWrap);
-if (window.visualViewport) window.visualViewport.addEventListener("resize", () => { if (currentSession) syncSize(); });
-window.addEventListener("resize", () => { if (currentSession) syncSize(); });
-if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { if (currentSession) syncSize(); });
+// 键盘动画、工具栏换行、视觉视口平移均在下一帧统一测量，避免重复调整 PTY。
+let sizeFrame = null;
+function scheduleSize() {
+  if (sizeFrame !== null) return;
+  sizeFrame = requestAnimationFrame(() => { sizeFrame = null; syncSize(); });
+}
+new ResizeObserver(scheduleSize).observe(termWrap);
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", scheduleSize);
+  window.visualViewport.addEventListener("scroll", scheduleSize);
+}
+window.addEventListener("resize", scheduleSize);
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(scheduleSize);
 
 /* ---------- 路由 ---------- */
 let listTimer = null;
@@ -402,6 +421,8 @@ function route() {
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   if (ws) { try { ws.onclose = null; ws.close(); } catch (e) {} ws = null; }
   currentHost = nextHost;
+  setKeyboard(false);
+  gesture = null;
   if (nextSession) {
     currentSession = nextSession;
     listEl.style.display = "none";
@@ -421,9 +442,11 @@ function route() {
     refreshList();
     listTimer = setInterval(refreshList, 3000);
   }
+  scheduleSize();
 }
 window.addEventListener("hashchange", route);
 document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) scheduleSize();
   if (!document.hidden && currentSession && (!ws || ws.readyState !== WebSocket.OPEN)) connect();
   if (!document.hidden && !currentSession) refreshList();
 });
