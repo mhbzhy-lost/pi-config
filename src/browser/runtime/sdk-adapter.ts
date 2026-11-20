@@ -1,5 +1,5 @@
 import { chromium } from 'playwright';
-import { RuntimeFault, type BrowserAdapter } from './contracts.ts';
+import { ACTION_TIMEOUT_MS, NAVIGATION_TIMEOUT_MS, RuntimeFault, type BrowserAdapter } from './contracts.ts';
 
 export const sdkAdapter: BrowserAdapter = {
   async launch(options, profile, artifactRoot) {
@@ -19,7 +19,7 @@ export const sdkAdapter: BrowserAdapter = {
       try { await context.close(); } catch { throw new RuntimeFault('stop', 'stop-unconfirmed'); }
       throw new RuntimeFault('page', 'page-create-failed');
     }
-    context.setDefaultTimeout(15_000); context.setDefaultNavigationTimeout(20_000);
+    context.setDefaultTimeout(ACTION_TIMEOUT_MS); context.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
     return {
       context, page, authMode: options.authMode, artifactRoot,
       async smoke() {

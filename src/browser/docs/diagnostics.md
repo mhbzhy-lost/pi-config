@@ -16,6 +16,9 @@
 | `socket-path-too-long` | 报告私有状态根过长；不放宽安全预算或换公共 socket |
 | `instance-unreachable` | 保留现场，先确认 owned instance 的状态；不停止其他浏览器 |
 | `stop-unconfirmed` | 不宣称清理成功；保留 authoritative state/lease，交由 owner 处理 |
+| `operation-timeout` | 单个操作超过 `45秒` 预算，只放弃该操作，不销毁浏览器；确认会话已不可用时由 owner 显式 stop |
+| `element-intercepted` / `element-not-visible` / `element-not-stable` | 页面侧动作条件未满足，不是工具故障；重新 snapshot 后修正 locator 或等待页面状态 |
+| `request-timeout` | 回包超过 `60秒` 线路预算；先查 daemon 状态，不重复发同一命令 |
 
 ## 安全诊断顺序
 

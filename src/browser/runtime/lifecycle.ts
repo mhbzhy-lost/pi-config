@@ -7,7 +7,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import {
   bounded, CLOSE_TIMEOUT_MS, MAX_WIRE_BYTES, REQUEST_TIMEOUT_MS, RuntimeFault, fault,
-  safeError, safeName, validateCommand, validateOptions, validateSafeResult,
+  safeError, safeName, validateCommand, validateOptions, validateSafeResult, WIRE_TIMEOUT_MS,
   type BrowserAdapter, type Command, type OperationDispatcher, type ReadyState, type RuntimeOptions,
   type RuntimeRef, type RuntimeScope, type SafeResult, type Session, type WireReply, type WireRequest,
 } from './contracts.ts';
@@ -78,7 +78,7 @@ async function wire(ref: RuntimeRef, command: WireRequest['command']): Promise<S
   return await new Promise((done, reject) => {
     const socket = createConnection(socketPath(ref)); let data = Buffer.alloc(0), settled = false;
     const end = (error?: unknown, result?: any) => { if (settled) return; settled = true; socket.destroy(); error ? reject(error) : done(result); };
-    socket.setTimeout(REQUEST_TIMEOUT_MS, () => end(new RuntimeFault('protocol', 'request-timeout')));
+    socket.setTimeout(WIRE_TIMEOUT_MS, () => end(new RuntimeFault('protocol', 'request-timeout')));
     socket.on('error', () => end(new RuntimeFault('protocol', 'instance-unreachable')));
     socket.on('connect', () => socket.write(JSON.stringify(request) + '\n'));
     socket.on('data', chunk => {
@@ -200,7 +200,7 @@ export async function serveRuntime(scope: RuntimeScope, options: RuntimeOptions,
     server = createServer(conn => {
       connections.add(conn); conn.on('close', () => connections.delete(conn));
       let data = Buffer.alloc(0), received = false;
-      conn.setTimeout(REQUEST_TIMEOUT_MS, () => conn.destroy()); conn.on('error', () => {});
+      conn.setTimeout(WIRE_TIMEOUT_MS, () => conn.destroy()); conn.on('error', () => {});
       conn.on('data', chunk => {
         if (received) return; data = Buffer.concat([data, Buffer.from(chunk)]);
         if (data.length > MAX_WIRE_BYTES) { received = true; conn.end(JSON.stringify({ v: 1, id: '', ok: false, error: { stage: 'protocol', code: 'request-too-large' } }) + '\n'); return; }
@@ -218,12 +218,8 @@ export async function serveRuntime(scope: RuntimeScope, options: RuntimeOptions,
             else if (request.command?.op === '_status') reply = { v: 1, id, ok: true, result: { ...ready, browserReady: !unusable, pageReady: !unusable } };
             else {
               if (unusable) fault('operation', 'instance-unusable'); validateCommand(request.command);
-              let result;
-              try { result = await bounded(dispatcher(session!, request.command), REQUEST_TIMEOUT_MS, 'operation', 'operation-timeout'); }
-              catch (e) {
-                if (e instanceof RuntimeFault && e.code === 'operation-timeout') { unusable = true; await shutdown(); stop = true; }
-                throw e;
-              }
+              // 操作超时不再销毁浏览器：违规动作本身已被 bounded 兜底，保留会话与 tab 才能继续诊断。
+              const result = await bounded(dispatcher(session!, request.command), REQUEST_TIMEOUT_MS, 'operation', 'operation-timeout');
               validateSafeResult(result); reply = { v: 1, id, ok: true, result };
             }
           } catch (e) { reply = { v: 1, id, ok: false, error: safeError(e, 'protocol') }; }

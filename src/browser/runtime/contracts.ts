@@ -1,7 +1,12 @@
 import type { BrowserContext, Page } from 'playwright';
 
 export const MAX_WIRE_BYTES = 1024 * 1024;
-export const REQUEST_TIMEOUT_MS = 30_000;
+// 动作超时必须小于操作预算，否则一次正常等待会先撞上 protocol 层超时。
+export const ACTION_TIMEOUT_MS = 30_000;
+export const NAVIGATION_TIMEOUT_MS = 20_000;
+export const REQUEST_TIMEOUT_MS = 45_000;
+// 客户端等回包要比 daemon 的操作预算更长，避免两侧同时到点产生假超时。
+export const WIRE_TIMEOUT_MS = 60_000;
 export const CLOSE_TIMEOUT_MS = 10_000;
 export type RuntimeScope = { stateRoot: string; profileRoot: string; artifactRoot: string };
 export type RuntimeOptions = {
@@ -60,6 +65,25 @@ export class RuntimeFault extends Error {
 export function fault(stage: string, code: string): never { throw new RuntimeFault(stage, code); }
 export function safeError(error: unknown, stage = 'operation'): { stage: string; code: string } {
   return error instanceof RuntimeFault ? { stage: error.stage, code: error.code } : { stage, code: 'operation-failed' };
+}
+// Playwright 的 actionability 错误文本包含元素 HTML 片段和页面文字，只能就地归并为固定 code，
+// 原文既不返回也不记日志；顺序敏感：越具体的可见性/遮挡原因越靠前，通用超时兜底在最后。
+const OPERATION_ERROR_RULES: ReadonlyArray<readonly [RegExp, string]> = [
+  [/intercepts pointer events/i, 'element-intercepted'],
+  [/element is not stable/i, 'element-not-stable'],
+  [/outside of the viewport/i, 'element-outside-viewport'],
+  [/element is not visible|to be visible/i, 'element-not-visible'],
+  [/element is not enabled|element is disabled/i, 'element-disabled'],
+  [/strict mode violation/i, 'locator-not-unique'],
+  [/element was detached|not attached to the DOM|execution context was destroyed|frame was detached|has been closed/i, 'element-detached'],
+  [/net::ERR_|NS_ERROR_|Cannot navigate to invalid URL/i, 'navigation-failed'],
+  [/waiting until "(load|domcontentloaded)"/i, 'navigation-timeout'],
+  [/waiting for locator/i, 'locator-not-found'],
+];
+export function classifyOperationError(error: unknown): string {
+  const message = error instanceof Error ? error.message : '';
+  for (const [pattern, code] of OPERATION_ERROR_RULES) if (pattern.test(message)) return code;
+  return error instanceof Error && error.name === 'TimeoutError' ? 'action-timeout' : 'operation-failed';
 }
 export function safeName(value: unknown): asserts value is string {
   if (typeof value !== 'string' || !/^[a-z0-9-]{1,32}$/.test(value)) fault('config', 'invalid-name');

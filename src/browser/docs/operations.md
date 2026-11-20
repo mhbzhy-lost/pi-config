@@ -4,7 +4,7 @@
 
 1. 先用 `snapshot` 查看当前页面结构。
 2. 只使用 snapshot 中已确认的 role、testId 或 CSS locator；页面跳转后重新 snapshot。
-3. 多匹配返回 `locator-not-unique`，不得擅自选择第一个。
+3. 未匹配返回 `locator-not-found`，多匹配返回 `locator-not-unique`，不得擅自选择第一个。
 4. 任务结束 stop 自己的 instance。
 
 ```bash
@@ -28,6 +28,28 @@ node "$CLI" --instance task-browser command '{"op":"inspect","query":"visible","
 | `aone-config-readonly` | 固定 app `332260`，仅 `verify` 和指定单环境 `export`；不接收 URL、locator、脚本或输出路径 |
 
 普通 snapshot/title 可能包含业务页面文字，不是秘密检测器；只在任务授权且不涉及凭据时使用。当前 CLI 没有任意页面 JavaScript、浏览器 storage、网络详情或脚本执行入口。
+
+## 动作失败错误码
+
+`click`、`fill`、`wait` 等动作失败时，stage 固定为 `operation`，只返回下列 code，不返回 Playwright 原始错误文本（其中含元素 HTML 片段和页面文字）：
+
+| code | 含义 | 下一步 |
+|---|---|---|
+| `locator-not-found` | 当前页面没有匹配该 locator 的元素 | 重新 snapshot 并核对 role/name、testId 或 css |
+| `locator-not-unique` | 匹配到多个元素 | 收窄 locator，不擅自取第一个 |
+| `element-not-visible` | 元素存在但不可见 | 等前置状态；必要时先 `wait` |
+| `element-not-stable` | 元素位置持续变化（动画、重渲染） | 先等稳定，或改为定位稳定父节点 |
+| `element-intercepted` | 其他元素接收了指针事件（覆盖层、loading、toast 等） | 先处理或关闭遮挡元素；属于页面状态，不是工具故障 |
+| `element-outside-viewport` | 元素在视口外 | 先滚动到可见，或改用可滚动容器内的定位 |
+| `element-disabled` | 元素被禁用 | 等启用条件满足 |
+| `element-detached` | 元素或 frame 已从 DOM 移除 | 重新 snapshot |
+| `navigation-failed` | 导航被网络或地址错误拒绝 | 核对 URL 与可达性 |
+| `navigation-timeout` | 导航在 `20秒` 内未达到 load | 先用较小页面复核，不重复撞同一个超时 |
+| `action-timeout` | 动作在 `30秒` 动作预算内未完成 | 结合上面具体原因定位，不直接判定为工具故障 |
+| `operation-timeout` | 整个操作超过 `45秒` 操作预算 | 该操作已被放弃，实例和 tab 保留；必要时 stop 后重建 |
+| `operation-failed` | 未归类的失败 | 属于需要排查的未知缺陷，记录首次偏离点 |
+
+动作预算（`30秒`）小于操作预算（`45秒`），所以正常情况下先返回具体动作原因，不会先撞上协议层超时。
 
 ## 返回和清理
 

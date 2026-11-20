@@ -30,3 +30,5 @@
 ## 结果与故障
 
 返回值是固定安全结果 schema；snapshot/title 可能包含业务页面文字，不是秘密检测器。`stop-unconfirmed` 时保留权威现场和租约，不抢占、不按裸 PID 清理。认证完成、签名/导出完成、安装完成和业务运行正常是不同阶段，报告实际完成阶段。
+
+动作失败会返回具体原因 code：`locator-not-found`、`locator-not-unique`、`element-not-visible`、`element-not-stable`、`element-intercepted`、`element-outside-viewport`、`element-disabled`、`element-detached`、`navigation-failed`、`navigation-timeout`、`action-timeout`、`operation-timeout`、`operation-failed`。这些是页面动作条件或 locator 不满足，不是工具故障；按 `docs/operations.md` 的错误码表处理，不要凭 snapshot 猜遮挡层。

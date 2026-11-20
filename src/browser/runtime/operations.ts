@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import { lstat, mkdir, open } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Locator, Page } from 'playwright';
-import { fault, validateCommand, validateSafeResult, type Command, type LocatorSpec, type SafeResult, type Session } from './contracts.ts';
+import { classifyOperationError, fault, RuntimeFault, validateCommand, validateSafeResult, type Command, type LocatorSpec, type SafeResult, type Session } from './contracts.ts';
 
 const tabs = new WeakMap<Session, Map<string, Page>>();
 function locator(page: Page, spec: LocatorSpec): Locator {
@@ -11,7 +11,11 @@ function locator(page: Page, spec: LocatorSpec): Locator {
   return spec.kind === 'testId' ? page.getByTestId(spec.value) : page.locator(spec.value);
 }
 async function strict(page: Page, spec: LocatorSpec): Promise<Locator> {
-  const l = locator(page, spec); if (await l.count() !== 1) fault('operation', 'locator-not-unique'); return l;
+  const l = locator(page, spec), count = await l.count();
+  // 未匹配和多重匹配是两种不同缺陷，不能都报成 not-unique。
+  if (count === 0) fault('operation', 'locator-not-found');
+  if (count > 1) fault('operation', 'locator-not-unique');
+  return l;
 }
 function publicUrl(raw: string): string {
   if (raw === 'about:blank') return raw;
@@ -22,6 +26,16 @@ export async function executeOperation(session: Session, command: Command): Prom
   validateCommand(command);
   if (session.authMode && !['navigate', 'auth-check'].includes(command.op)
     && !(command.op === 'aone-config-readonly' && command.action === 'verify')) fault('auth', 'auth-mode-restricted');
+  let result: SafeResult;
+  try { result = await dispatch(session, command); }
+  catch (error) {
+    // 保留固定的 stage/code，丢弃可能含页面 DOM 与文字的 Playwright 原始错误。
+    if (error instanceof RuntimeFault) throw error;
+    throw new RuntimeFault('operation', classifyOperationError(error));
+  }
+  validateSafeResult(result); return result;
+}
+async function dispatch(session: Session, command: Command): Promise<SafeResult> {
   let result: SafeResult = { kind: 'status', value: 'ok' };
   const { page } = session;
   switch (command.op) {
@@ -68,5 +82,5 @@ export async function executeOperation(session: Session, command: Command): Prom
       result = { kind: 'tabs', tabs: list }; break;
     }
   }
-  validateSafeResult(result); return result;
+  return result;
 }
