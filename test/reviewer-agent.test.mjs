@@ -43,7 +43,7 @@ test("agent profiles keep runtime configuration in frontmatter and cannot grant 
   }
   assert.match(executor, /^tools: read,write,edit,bash,grep,find,ls$/m, "executor tools 面必须保持只含实现/验证工具");
   assert.match(delegate, /^tools: read,write,edit,bash,grep,find,ls$/m, "delegate tools 面必须保持只含实现/验证工具");
-  assert.match(reviewer, /^tools: read,grep,find,ls,bash$/m, "reviewer 保持只读工具面，不得获得写权限");
+  assert.match(reviewer, /^tools: read,grep,find,ls,bash,search$/m, "reviewer 保持只读工具面，不得获得写权限");
   // 正文/description 文案是单一事实源（profile 文件本身），不在此逐字锁定；
   // 角色能力边界由上方 tools 面与 frontmatter 结构断言约束。
   assert.doesNotMatch(executor, /^temperature:/m);

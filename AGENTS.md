@@ -47,7 +47,7 @@ npm 只能使用官方源 `https://registry.npmjs.org/`；禁止使用淘宝、�
 
 ## Deferred Tool 维护规范
 
-本仓 deferred tool 遵循 Pi 官方 `Dynamic Tool Loading` / `Tool Exposure` 约定（当前基线为 `@earendil-works/pi-coding-agent@1.5.2`）：
+本仓 deferred tool 遵循 Pi 官方 `Dynamic Tool Loading` / `Tool Exposure` 约定（当前基线为 `@earendil-works/pi-coding-agent@1.6.0`）：
 
 - **选择 exposure**：高频、每轮都需要的能力使用 `direct`；领域专用、低频或声明较大的能力使用 `exposure: "deferred"`，让 `tool_search` 按需发现并在下一次模型请求中激活。deferred tool 仍应通过 `pi.registerTool()` 注册，不能在调用时临时绕过注册表。
 - **保持初始上下文轻量**：deferred tool 默认不进入模型初始工具声明；显式设置 `defaultActive: false`，loader（通常是 `tool_search`）保持 active。不要为 deferred tool 另写自定义发现/加载机制。

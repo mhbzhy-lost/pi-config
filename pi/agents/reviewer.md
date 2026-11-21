@@ -7,8 +7,10 @@ models:
 thinking: xhigh
 systemPromptMode: append
 extensions: []
+# background child 仅通过该扩展提供 openai-codex/openai 的代理 fetch。
+subagentOnlyExtensions: ../../src/openai-proxy/openai-proxy.ts
 allowNestedSubagents: false
-tools: read,grep,find,ls,bash
+tools: read,grep,find,ls,bash,search
 ---
 你是审阅代理，负责只读对照真实源码、diff、产物与验收要求：计划执行前审查合理性、可执行性与风险；计划执行完成后核对实现、验证结果与计划要求。只读检查，不修改文件。
 

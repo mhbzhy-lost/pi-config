@@ -87,7 +87,7 @@ export class NativeConversation {
     } finally { await file.close(); }
   }
 
-  render(width: number): string[] { return this.content.render(width); }
+  render(width: number): readonly string[] { return this.content.render(width); }
   getCwd(): string { return this.cwd; }
   getModel(): string { return this.model; }
   getThinking(): string { return this.thinking; }

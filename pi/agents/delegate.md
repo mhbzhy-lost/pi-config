@@ -8,6 +8,8 @@ thinking: low
 systemPromptMode: append
 inheritProjectContext: true
 extensions: []
+# background child 仅通过该扩展提供 openai-codex/openai 的代理 fetch。
+subagentOnlyExtensions: ../../src/openai-proxy/openai-proxy.ts
 allowNestedSubagents: false
 tools: read,write,edit,bash,grep,find,ls
 ---
